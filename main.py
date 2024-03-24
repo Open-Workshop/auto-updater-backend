@@ -15,7 +15,7 @@ async def main_loop():
 
     try:
         while True:
-            time.sleep(1)
+            time.sleep(3)
 
             url = f"https://api.openworkshop.su/list/mods/?page_size=40&page={currect_page}&sort=iUPDATE_DATE&general=false&primary_sources=%5B%22steam%22%5D"
             result = requests.get(url=url).json()
@@ -26,6 +26,7 @@ async def main_loop():
                 logging.info(f"Страница: {currect_page}")
 
                 for mod_id in mods:
+                    time.sleep(1)
                     await check_mod(mod_id["id"])
 
                 currect_page += 1
