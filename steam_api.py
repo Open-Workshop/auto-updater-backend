@@ -264,6 +264,32 @@ def steam_list_workshop_ids_html(
     return ids
 
 
+def steam_fetch_workshop_page_ids_html(
+    app_id: int,
+    page: int,
+    language: str,
+    timeout: int,
+) -> List[str]:
+    url = "https://steamcommunity.com/workshop/browse/"
+    params = {
+        "appid": app_id,
+        "browsesort": "mostrecent",
+        "section": "readytouseitems",
+        "p": page,
+        "l": language,
+    }
+    response = _steam_request(
+        "get",
+        url,
+        params=params,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=timeout,
+    )
+    if response.status_code != 200:
+        return []
+    return re.findall(r"data-publishedfileid=\"(\d+)\"", response.text)
+
+
 def steam_get_published_file_details(
     ids: List[str], timeout: int
 ) -> Dict[str, Dict[str, Any]]:

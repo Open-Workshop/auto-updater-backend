@@ -1,3 +1,4 @@
+import hashlib
 import html
 import json
 import logging
@@ -145,6 +146,32 @@ def download_url_to_file(url: str, dest_dir: Path, basename: str, timeout: int) 
             if chunk:
                 handle.write(chunk)
     return path
+
+
+def download_url_to_file_with_hash(
+    url: str, dest_dir: Path, basename: str, timeout: int
+) -> tuple[Path | None, str | None]:
+    ensure_dir(dest_dir)
+    response = requests.get(url, stream=True, timeout=timeout)
+    if response.status_code != 200:
+        logging.warning(
+            "Failed to download %s: %s",
+            url,
+            response.status_code,
+        )
+        return None, None
+    ext = _extension_from_headers(response.headers)
+    if not ext:
+        ext = ".bin"
+    path = dest_dir / f"{basename}{ext}"
+    hasher = hashlib.sha256()
+    with path.open("wb") as handle:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if not chunk:
+                continue
+            hasher.update(chunk)
+            handle.write(chunk)
+    return path, hasher.hexdigest()
 
 
 def load_state(path: Path) -> Dict[str, Any]:

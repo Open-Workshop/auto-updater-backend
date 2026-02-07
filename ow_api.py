@@ -146,6 +146,10 @@ def _extract_id(response: requests.Response) -> Optional[int]:
     return None
 
 
+def _is_success(response: requests.Response) -> bool:
+    return 200 <= response.status_code < 300
+
+
 def list_all_pages(fetch_page: callable) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     page = 0
@@ -218,7 +222,7 @@ def ow_add_game(api: ApiClient, name: str, short_desc: str, desc: str) -> int:
             "game_desc": truncate(desc, 10000),
         },
     )
-    if response.status_code not in (200, 201):
+    if not _is_success(response):
         raise RuntimeError(f"Failed to add game: {response.status_code} {response.text}")
     game_id = _extract_id(response)
     if game_id is not None:
@@ -236,8 +240,12 @@ def ow_edit_game_source(api: ApiClient, game_id: int, source: str, source_id: in
             "game_source_id": source_id,
         },
     )
-    if response.status_code not in (200, 204):
-        logging.warning("Failed to update game source: %s", response.status_code)
+    if not _is_success(response):
+        logging.warning(
+            "Failed to update game source: %s %s",
+            response.status_code,
+            (response.text or "")[:200],
+        )
 
 
 def ow_get_mod_details(api: ApiClient, mod_id: int) -> Dict[str, Any]:
@@ -280,7 +288,7 @@ def ow_add_mod(
             "without_author": "true" if without_author else "false",
         }
         response = api.request("post", "/add/mod", data=data, files=files)
-    if response.status_code not in (200, 201):
+    if not _is_success(response):
         raise RuntimeError(f"Failed to add mod: {response.status_code} {response.text}")
     mod_id = _extract_id(response)
     if mod_id is not None:
@@ -318,7 +326,7 @@ def ow_edit_mod(
             response = api.request("post", "/edit/mod", data=data, files=files)
     else:
         response = api.request("post", "/edit/mod", data=data)
-    if response.status_code not in (200, 201, 202, 204):
+    if not _is_success(response):
         raise RuntimeError(
             f"Failed to edit mod {mod_id}: {response.status_code} {response.text}"
         )
@@ -343,7 +351,7 @@ def ow_list_tags(api: ApiClient, game_id: int, page_size: int) -> List[Dict[str,
 
 def ow_add_tag(api: ApiClient, name: str) -> int:
     response = api.request("post", "/add/tag", data={"tag_name": truncate(name, 128)})
-    if response.status_code not in (200, 201, 202):
+    if not _is_success(response):
         raise RuntimeError(f"Failed to add tag: {response.status_code} {response.text}")
     tag_id = _extract_id(response)
     if tag_id is not None:
@@ -357,7 +365,7 @@ def ow_associate_game_tag(api: ApiClient, game_id: int, tag_id: int) -> None:
         "/association/game/tag",
         data={"game_id": game_id, "tag_id": tag_id, "mode": "true"},
     )
-    if response.status_code not in (200, 202, 204, 409):
+    if not _is_success(response) and response.status_code != 409:
         logging.warning(
             "Failed to associate tag %s with game %s: %s %s",
             tag_id,
@@ -387,7 +395,7 @@ def ow_get_mod_tags(api: ApiClient, mod_id: int) -> List[int]:
 
 def ow_add_mod_tag(api: ApiClient, mod_id: int, tag_id: int) -> None:
     response = api.request("post", f"/mods/{mod_id}/tags/{tag_id}")
-    if response.status_code not in (200, 201, 202, 204):
+    if not _is_success(response):
         logging.warning(
             "Failed to add tag %s to mod %s: %s %s",
             tag_id,
@@ -399,7 +407,7 @@ def ow_add_mod_tag(api: ApiClient, mod_id: int, tag_id: int) -> None:
 
 def ow_delete_mod_tag(api: ApiClient, mod_id: int, tag_id: int) -> None:
     response = api.request("delete", f"/mods/{mod_id}/tags/{tag_id}")
-    if response.status_code not in (200, 204):
+    if not _is_success(response):
         logging.warning(
             "Failed to delete tag %s from mod %s: %s %s",
             tag_id,
@@ -429,7 +437,7 @@ def ow_get_mod_dependencies(api: ApiClient, mod_id: int) -> List[int]:
 
 def ow_add_mod_dependency(api: ApiClient, mod_id: int, dep_id: int) -> None:
     response = api.request("post", f"/mods/{mod_id}/dependencies/{dep_id}")
-    if response.status_code not in (200, 201, 202, 204):
+    if not _is_success(response):
         logging.warning(
             "Failed to add dependency %s to mod %s: %s %s",
             dep_id,
@@ -441,7 +449,7 @@ def ow_add_mod_dependency(api: ApiClient, mod_id: int, dep_id: int) -> None:
 
 def ow_delete_mod_dependency(api: ApiClient, mod_id: int, dep_id: int) -> bool:
     response = api.request("delete", f"/mods/{mod_id}/dependencies/{dep_id}")
-    if response.status_code in (200, 202, 204, 404, 409, 412):
+    if _is_success(response) or response.status_code in (404, 409, 412):
         return True
     logging.warning(
         "Failed to delete dependency %s from mod %s: %s %s",
@@ -474,7 +482,7 @@ def ow_add_resource(api: ApiClient, owner_type: str, owner_id: int, res_type: st
             "resource_owner_id": owner_id,
         },
     )
-    if response.status_code not in (200, 201, 202, 204):
+    if not _is_success(response):
         logging.warning(
             "Failed to add resource %s to %s %s: %s %s",
             url,
@@ -504,7 +512,7 @@ def ow_add_resource_file(
             data=data,
             files=files,
         )
-    if response.status_code not in (200, 201, 202, 204, 409):
+    if not _is_success(response) and response.status_code != 409:
         logging.warning(
             "Failed to add resource file %s to %s %s: %s %s",
             file_path,
@@ -519,7 +527,7 @@ def ow_add_resource_file(
 
 def ow_delete_resource(api: ApiClient, resource_id: int) -> None:
     response = api.request("delete", f"/resources/{resource_id}")
-    if response.status_code not in (200, 204):
+    if not _is_success(response):
         logging.warning(
             "Failed to delete resource %s: %s %s",
             resource_id,
