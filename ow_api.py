@@ -186,6 +186,33 @@ def ow_list_mods(api: ApiClient, game_id: int, page_size: int) -> List[Dict[str,
     return list_all_pages(fetch)
 
 
+def ow_find_mod_by_source(api: ApiClient, source: str, source_id: int) -> Optional[int]:
+    params = {
+        "page_size": 10,
+        "page": 0,
+        "general": "true",
+        "dates": "true",
+        "primary_sources": json.dumps([source]),
+        "allowed_sources_ids": json.dumps([source_id]),
+    }
+    response = api.request("get", "/list/mods/", params=params)
+    if not _is_success(response):
+        return None
+    payload = response.json()
+    results = payload.get("results", []) if isinstance(payload, dict) else []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("source_id")) == str(source_id):
+            mod_id = item.get("id")
+            if mod_id is not None:
+                try:
+                    return int(mod_id)
+                except (TypeError, ValueError):
+                    return None
+    return None
+
+
 def ow_list_games_by_source(api: ApiClient, app_id: int, page_size: int) -> List[Dict[str, Any]]:
     def fetch(page: int) -> Dict[str, Any]:
         response = api.request(
@@ -288,6 +315,11 @@ def ow_add_mod(
             "without_author": "true" if without_author else "false",
         }
         response = api.request("post", "/add/mod", data=data, files=files)
+    if response.status_code == 412:
+        existing_id = ow_find_mod_by_source(api, source, source_id)
+        if existing_id is not None:
+            return existing_id
+        raise RuntimeError(f"Failed to add mod: {response.status_code} {response.text}")
     if not _is_success(response):
         raise RuntimeError(f"Failed to add mod: {response.status_code} {response.text}")
     mod_id = _extract_id(response)

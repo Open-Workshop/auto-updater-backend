@@ -87,8 +87,6 @@ def parse_images(description: str, preview_url: str | None, max_images: int) -> 
     urls: List[str] = []
     if preview_url:
         urls.append(preview_url)
-    for match in re.findall(r"\[img\]\s*(https?://[^\s\]]+)\s*\[/img\]", description, re.I):
-        urls.append(match)
     deduped: List[str] = []
     seen = set()
     for url in urls:
