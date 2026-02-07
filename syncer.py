@@ -1,4 +1,3 @@
-import os
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,6 +9,7 @@ from ow_api import (
     ow_add_mod_dependency,
     ow_add_mod_tag,
     ow_add_resource,
+    ow_add_resource_file,
     ow_add_tag,
     ow_associate_game_tag,
     ow_delete_mod_dependency,
@@ -31,12 +31,15 @@ from steam_api import (
     steam_get_dependencies_with_key,
     steam_get_published_file_details,
     steam_list_workshop_ids_html,
+    steam_scrape_preview_images,
     steam_queryfiles_ids,
 )
 from steamcmd import download_steam_mod
 from utils import (
+    download_url_to_file,
     has_files,
     load_state,
+    normalize_image_url,
     parse_images,
     save_state,
     strip_bbcode,
@@ -105,6 +108,8 @@ def sync_mods(
     prune_dependencies: bool,
     sync_resources: bool,
     prune_resources: bool,
+    upload_resource_files: bool,
+    scrape_preview_images: bool,
     language: str,
     steamcmd_path: Path,
 ) -> None:
@@ -268,6 +273,11 @@ def sync_mods(
             description = truncate(raw_description, 10000)
 
             images = parse_images(raw_description, details.get("preview_url"), max_screenshots)
+            if scrape_preview_images:
+                extra = steam_scrape_preview_images(str(workshop_id), timeout)
+                for url in extra:
+                    if url not in images:
+                        images.append(url)
 
             mod_state = mods_state.get(str(workshop_id), {})
             previous_updated = int(mod_state.get("steam_updated") or 0)
@@ -400,20 +410,51 @@ def sync_mods(
                     res_type = "logo" if idx_img == 0 else "screenshot"
                     desired_resources.append((res_type, url))
 
-                for res_type, url in desired_resources:
-                    if (res_type, url) not in current_urls:
-                        ow_add_resource(api, "mods", ow_mod_id, res_type, url)
+                if upload_resource_files:
+                    if prune_resources:
+                        logging.warning(
+                            "Resource pruning is disabled when OW_RESOURCE_UPLOAD_FILES=true"
+                        )
+                    resource_state = mod_state.get("resource_urls", [])
+                    if not isinstance(resource_state, list):
+                        resource_state = []
+                    resource_state = [
+                        normalize_image_url(u)
+                        for u in resource_state
+                        if isinstance(u, str)
+                    ]
+                    for idx_img, url in enumerate(images):
+                        if url in resource_state:
+                            continue
+                        res_type = "logo" if idx_img == 0 else "screenshot"
+                        dest_dir = mirror_root / "resources" / str(workshop_id)
+                        file_path = download_url_to_file(
+                            url,
+                            dest_dir,
+                            f"{idx_img}",
+                            timeout,
+                        )
+                        if not file_path:
+                            continue
+                        ow_add_resource_file(api, "mods", ow_mod_id, res_type, file_path)
+                        resource_state.append(url)
+                    mod_state["resource_urls"] = resource_state
+                else:
+                    for res_type, url in desired_resources:
+                        if (res_type, url) not in current_urls:
+                            ow_add_resource(api, "mods", ow_mod_id, res_type, url)
 
-                if prune_resources:
-                    desired_set = set(desired_resources)
-                    for (res_type, url), res_id in current_urls.items():
-                        if (res_type, url) not in desired_set:
-                            if res_id is not None:
-                                ow_delete_resource(api, int(res_id))
+                    if prune_resources:
+                        desired_set = set(desired_resources)
+                        for (res_type, url), res_id in current_urls.items():
+                            if (res_type, url) not in desired_set:
+                                if res_id is not None:
+                                    ow_delete_resource(api, int(res_id))
 
             mods_state[str(workshop_id)] = {
                 "ow_mod_id": ow_mod_id,
                 "steam_updated": updated,
                 "last_sync": utc_now(),
+                "resource_urls": mod_state.get("resource_urls", []),
             }
             save_state(state_file, state)

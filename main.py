@@ -81,6 +81,8 @@ def main() -> int:
                 cfg.prune_dependencies,
                 cfg.sync_resources,
                 cfg.prune_resources,
+                cfg.upload_resource_files,
+                cfg.scrape_preview_images,
                 cfg.language,
                 Path(cfg.steamcmd_path),
             )

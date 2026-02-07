@@ -1,10 +1,14 @@
+import html
 import json
+import mimetypes
 import os
 import re
 import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
+
+import requests
 
 
 def utc_now() -> str:
@@ -36,6 +40,15 @@ def truncate(text: str, limit: int) -> str:
     return text[:limit]
 
 
+def normalize_image_url(url: str) -> str:
+    if not url:
+        return ""
+    value = html.unescape(url.strip().strip("\"'"))
+    if "?" in value:
+        value = value.split("?", 1)[0]
+    return value
+
+
 def parse_images(description: str, preview_url: str | None, max_images: int) -> List[str]:
     urls: List[str] = []
     if preview_url:
@@ -45,7 +58,7 @@ def parse_images(description: str, preview_url: str | None, max_images: int) -> 
     deduped: List[str] = []
     seen = set()
     for url in urls:
-        url = url.strip()
+        url = normalize_image_url(url)
         if not url or len(url) > 256:
             continue
         if url in seen:
@@ -68,6 +81,32 @@ def zip_directory(source_dir: Path, dest_zip: Path) -> Path:
                 rel_path = full_path.relative_to(source_dir)
                 archive.write(full_path, rel_path)
     return dest_zip
+
+
+def _extension_from_headers(headers: Dict[str, str]) -> str:
+    content_type = headers.get("content-type", "").split(";")[0].strip().lower()
+    if not content_type:
+        return ""
+    ext = mimetypes.guess_extension(content_type) or ""
+    if ext == ".jpe":
+        ext = ".jpg"
+    return ext
+
+
+def download_url_to_file(url: str, dest_dir: Path, basename: str, timeout: int) -> Path | None:
+    ensure_dir(dest_dir)
+    response = requests.get(url, stream=True, timeout=timeout)
+    if response.status_code != 200:
+        return None
+    ext = _extension_from_headers(response.headers)
+    if not ext:
+        ext = ".bin"
+    path = dest_dir / f"{basename}{ext}"
+    with path.open("wb") as handle:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                handle.write(chunk)
+    return path
 
 
 def load_state(path: Path) -> Dict[str, Any]:

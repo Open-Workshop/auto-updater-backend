@@ -33,6 +33,7 @@ Steam / Workshop:
 - `OW_STEAM_DELAY` — задержка между страницами Workshop, по умолчанию `1.0`
 - `OW_MAX_SCREENSHOTS` — максимум скриншотов, по умолчанию `8`
 - `STEAM_LANGUAGE` — язык Steam страниц и описаний, по умолчанию `english`
+- `STEAMCMD_PATH` — путь к `steamcmd.sh`, по умолчанию `/opt/steamcmd/steamcmd.sh`
 
 Поведение синхронизации:
 - `OW_MOD_PUBLIC` — публичность мода: `0` публичный, `1` по ссылке, `2` скрытый
@@ -40,10 +41,13 @@ Steam / Workshop:
 - `OW_SYNC_TAGS` / `OW_PRUNE_TAGS` — синхронизировать/удалять теги
 - `OW_SYNC_DEPENDENCIES` / `OW_PRUNE_DEPENDENCIES` — синхронизировать/удалять зависимости
 - `OW_SYNC_RESOURCES` / `OW_PRUNE_RESOURCES` — синхронизировать/удалять ресурсы (скриншоты)
+- `OW_RESOURCE_UPLOAD_FILES` — загружать скриншоты файлом вместо URL, по умолчанию `true`
+- `OW_SCRAPE_PREVIEW_IMAGES` — пытаться вытянуть дополнительные скриншоты со страницы Steam, по умолчанию `true`
 
 Структура зеркала по умолчанию:
 - `OW_MIRROR_DIR/steam/steamapps/workshop/content/<app_id>/<workshop_id>/...` — Steam‑моды
 - `OW_MIRROR_DIR/steam_archives/<workshop_id>.zip` — архивы для публикации в OW
+- `OW_MIRROR_DIR/resources/<workshop_id>/...` — кеш загруженных изображений
 
 ## Docker
 Сборка:

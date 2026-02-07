@@ -363,6 +363,23 @@ def ow_add_resource(api: ApiClient, owner_type: str, owner_id: int, res_type: st
         logging.warning("Failed to add resource %s to %s %s", url, owner_type, owner_id)
 
 
+def ow_add_resource_file(api: ApiClient, owner_type: str, owner_id: int, res_type: str, file_path) -> None:
+    with file_path.open("rb") as handle:
+        files = {"resource_file": (file_path.name, handle)}
+        data = {
+            "resource_type": res_type,
+            "resource_owner_id": owner_id,
+        }
+        response = api.request(
+            "post",
+            f"/add/resource/{owner_type}",
+            data=data,
+            files=files,
+        )
+    if response.status_code not in (200, 201, 202, 204):
+        logging.warning("Failed to add resource file %s to %s %s", file_path, owner_type, owner_id)
+
+
 def ow_delete_resource(api: ApiClient, resource_id: int) -> None:
     response = api.request("delete", f"/resources/{resource_id}")
     if response.status_code not in (200, 204):

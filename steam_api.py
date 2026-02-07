@@ -1,9 +1,11 @@
+import html
 import re
 import time
 from typing import Any, Dict, List
 
 import requests
 
+from utils import normalize_image_url
 
 def steam_get_app_details(app_id: int, language: str, timeout: int) -> Dict[str, str]:
     url = "https://store.steampowered.com/api/appdetails"
@@ -180,3 +182,29 @@ def steam_get_dependencies_with_key(
                 dep_ids.append(str(child_id))
         deps[str(file_id)] = dep_ids
     return deps
+
+
+def steam_scrape_preview_images(item_id: str, timeout: int) -> List[str]:
+    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={item_id}"
+    response = requests.get(
+        url,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=timeout,
+    )
+    if response.status_code != 200:
+        return []
+    text = response.text
+    raw_urls = re.findall(
+        r"https?://(?:images\\.steamusercontent\\.com|steamusercontent-a\\.akamaihd\\.net|steamuserimages-a\\.akamaihd\\.net)/ugc/[^\"\\s>]+",
+        text,
+        flags=re.I,
+    )
+    normalized: List[str] = []
+    seen = set()
+    for url in raw_urls:
+        url = normalize_image_url(html.unescape(url))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        normalized.append(url)
+    return normalized

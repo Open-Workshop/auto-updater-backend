@@ -47,6 +47,8 @@ class Config:
     steam_delay: float
     max_screenshots: int
     steamcmd_path: str
+    upload_resource_files: bool
+    scrape_preview_images: bool
     public_mode: int
     without_author: bool
     sync_tags: bool
@@ -83,6 +85,8 @@ def load_config() -> Config:
     steam_delay = float(os.environ.get("OW_STEAM_DELAY", DEFAULT_STEAM_DELAY))
     max_screenshots = parse_int(os.environ.get("OW_MAX_SCREENSHOTS"), DEFAULT_MAX_SCREENSHOTS)
     steamcmd_path = os.environ.get("STEAMCMD_PATH", DEFAULT_STEAMCMD_PATH)
+    upload_resource_files = parse_bool(os.environ.get("OW_RESOURCE_UPLOAD_FILES"), True)
+    scrape_preview_images = parse_bool(os.environ.get("OW_SCRAPE_PREVIEW_IMAGES"), True)
     public_mode = parse_int(os.environ.get("OW_MOD_PUBLIC"), 0)
     without_author = parse_bool(os.environ.get("OW_WITHOUT_AUTHOR"), False)
 
@@ -113,6 +117,8 @@ def load_config() -> Config:
         steam_delay=steam_delay,
         max_screenshots=max_screenshots,
         steamcmd_path=steamcmd_path,
+        upload_resource_files=upload_resource_files,
+        scrape_preview_images=scrape_preview_images,
         public_mode=public_mode,
         without_author=without_author,
         sync_tags=sync_tags,
