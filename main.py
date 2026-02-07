@@ -1,84 +1,99 @@
-import asyncio
-import aiohttp
-import requests
 import logging
+import sys
 import time
+from pathlib import Path
+
+from config import load_config
+from ow_api import ApiClient, ow_get_game
+from syncer import ensure_game, sync_mods
+from utils import ensure_dir
 
 
-async def main_loop():
-    print("За работу!(")
+def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[logging.StreamHandler()],
+    )
 
-    logging.basicConfig(level=logging.INFO, filename="working.log", filemode="w",
-                        format="%(asctime)s %(levelname)s %(message)s")
-    logging.getLogger().addHandler(logging.StreamHandler())
-    currect_page:int = 0
+    cfg = load_config()
+    if not cfg.login_name or not cfg.password:
+        logging.error("OW_LOGIN and OW_PASSWORD are required")
+        return 2
+    if cfg.steam_app_id <= 0 and cfg.game_id <= 0:
+        logging.error("OW_STEAM_APP_ID or OW_GAME_ID is required")
+        return 2
+
+    api = ApiClient(cfg.api_base, cfg.login_name, cfg.password, cfg.timeout)
+    try:
+        api.login()
+    except Exception as exc:
+        logging.error("Failed to authenticate: %s", exc)
+        return 2
+
+    steam_app_id = cfg.steam_app_id
+    if steam_app_id <= 0:
+        try:
+            game = ow_get_game(api, cfg.game_id)
+        except Exception as exc:
+            logging.error("Failed to load game %s: %s", cfg.game_id, exc)
+            return 2
+        steam_app_id = int(game.get("source_id") or 0)
+        if steam_app_id <= 0:
+            logging.error("OW game has no steam source_id, set OW_STEAM_APP_ID")
+            return 2
 
     try:
-        while True:
-            time.sleep(3)
+        game_id = ensure_game(api, cfg.game_id if cfg.game_id > 0 else None, steam_app_id, cfg.language, cfg.timeout)
+    except Exception as exc:
+        logging.error("Failed to ensure game: %s", exc)
+        return 2
 
-            url = f"https://api.openworkshop.su/list/mods/?page_size=40&page={currect_page}&sort=iUPDATE_DATE&general=false&primary_sources=%5B%22steam%22%5D"
-            result = requests.get(url=url).json()
-            mods = result.get("results", [])
+    mirror_root = Path(cfg.mirror_root)
+    steam_root = Path(cfg.steam_root)
+    state_file = Path(cfg.state_file)
 
-            print("")
-            if len(mods) > 0:
-                logging.info(f"Страница: {currect_page}")
+    logging.info("Using OW game %s for steam app %s", game_id, steam_app_id)
+    ensure_dir(mirror_root)
+    ensure_dir(steam_root)
 
-                for mod_id in mods:
-                    time.sleep(1)
-                    await check_mod(mod_id["id"])
+    while True:
+        try:
+            sync_mods(
+                api,
+                steam_app_id,
+                game_id,
+                mirror_root,
+                steam_root,
+                state_file,
+                cfg.page_size,
+                cfg.timeout,
+                cfg.steam_api_key,
+                cfg.steam_max_pages,
+                cfg.steam_max_items,
+                cfg.steam_delay,
+                cfg.max_screenshots,
+                cfg.public_mode,
+                cfg.without_author,
+                cfg.sync_tags,
+                cfg.prune_tags,
+                cfg.sync_dependencies,
+                cfg.prune_dependencies,
+                cfg.sync_resources,
+                cfg.prune_resources,
+                cfg.language,
+                Path(cfg.steamcmd_path),
+            )
+        except Exception:
+            logging.exception("Sync failed")
 
-                currect_page += 1
-            else:
-                logging.info(f"Сброс подсчета страниц на странице: {currect_page}")
-                currect_page = 0
-    except:
-        logging.critical("Во время основного цикла произошла неизвестная ошибка!!")
+        if cfg.run_once:
+            break
+        logging.info("Sleeping %s seconds", cfg.poll_interval)
+        time.sleep(cfg.poll_interval)
 
-async def check_mod(mod_id):
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f'https://api.openworkshop.su/info/mod/{mod_id}?dependencies=true&short_description=false&description=false&dates=false&general=false&game=false'
-            async with session.get(url=url) as response:
-                result = await response.json()
-                dependencies = result.get('dependencies', [])
-
-                if len(dependencies) > 0:
-                    durl = f'https://api.openworkshop.su/condition/mod/{dependencies}'.replace(' ', '')
-                    async with session.get(url=durl) as dresponse:
-                        dresult = await dresponse.json()
-
-                        non_downloaded_depen = []
-
-                        for depen in dependencies:
-                            if str(depen) not in dresult:
-                                non_downloaded_depen.append(fetch_url(depen))
-
-                        if len(non_downloaded_depen) > 0:
-                            logging.info(f"У мода {mod_id} обнаружено {len(non_downloaded_depen)} из {len(dependencies)} не установленных зависимостей!")
-                            await asyncio.gather(*non_downloaded_depen)
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"https://api.openworkshop.su/update/steam/{mod_id}") as response:
-                    if response.status == 202:
-                        logging.info(f'Мод {mod_id} поставлен на обновление! ^_^')
-                    elif response.status == 404:
-                        logging.warning(f'Мод {mod_id} удалён со Steam! O_o')
-    except:
-        logging.critical(f"Во время работы с модом {mod_id} произошла неизвестная ошибка!!")
-
-
-
-async def fetch_url(depen):
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://api.openworkshop.su/download/steam/{depen}") as response:
-                if response.status != 202:
-                    logging.error(f'Загрузка зависимости {depen} завершилась с ошибкой {response.status} :(')
-    except:
-        logging.critical(f"Во время работы с зависимостью {depen} произошла неизвестная ошибка!!")
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    sys.exit(main())

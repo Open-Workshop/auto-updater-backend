@@ -1,4 +1,4 @@
-while true; do
-    screen -S auto-updater-backend-executor python3 main.py
-    sleep 10
-done
+#!/usr/bin/env bash
+set -euo pipefail
+
+python3 /app/main.py
