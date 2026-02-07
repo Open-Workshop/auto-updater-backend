@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import os
+import re
 
 DEFAULT_API_BASE = "https://api.openworkshop.miskler.ru"
 DEFAULT_PAGE_SIZE = 50
@@ -15,6 +16,7 @@ DEFAULT_STEAMCMD_PATH = "/opt/steamcmd/steamcmd.sh"
 DEFAULT_STEAM_HTTP_RETRIES = 2
 DEFAULT_STEAM_HTTP_BACKOFF = 2.0
 DEFAULT_STEAM_REQUEST_DELAY = 1.0
+DEFAULT_STEAM_PROXY_POOL = ""
 DEFAULT_LOG_LEVEL = "INFO"
 
 
@@ -31,6 +33,13 @@ def parse_int(value: str | None, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def parse_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    parts = re.split(r"[,\s]+", value.strip())
+    return [part for part in (p.strip() for p in parts) if part]
 
 
 @dataclass
@@ -54,6 +63,7 @@ class Config:
     steam_http_retries: int
     steam_http_backoff: float
     steam_request_delay: float
+    steam_proxy_pool: list[str]
     steam_max_pages: int
     steam_max_items: int
     steam_delay: float
@@ -107,6 +117,9 @@ def load_config() -> Config:
     steam_request_delay = float(
         os.environ.get("OW_STEAM_REQUEST_DELAY", DEFAULT_STEAM_REQUEST_DELAY)
     )
+    steam_proxy_pool = parse_list(
+        os.environ.get("OW_STEAM_PROXY_POOL", DEFAULT_STEAM_PROXY_POOL)
+    )
 
     steam_max_pages = parse_int(os.environ.get("OW_STEAM_MAX_PAGES"), DEFAULT_STEAM_MAX_PAGES)
     steam_max_items = parse_int(os.environ.get("OW_STEAM_MAX_ITEMS"), 0)
@@ -148,6 +161,7 @@ def load_config() -> Config:
         steam_http_retries=steam_http_retries,
         steam_http_backoff=steam_http_backoff,
         steam_request_delay=steam_request_delay,
+        steam_proxy_pool=steam_proxy_pool,
         steam_max_pages=steam_max_pages,
         steam_max_items=steam_max_items,
         steam_delay=steam_delay,

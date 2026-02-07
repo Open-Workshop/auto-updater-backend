@@ -32,6 +32,7 @@
 - `OW_STEAM_HTTP_RETRIES` — ретраи для запросов к Steam, по умолчанию `2`
 - `OW_STEAM_HTTP_BACKOFF` — базовая задержка backoff для Steam, по умолчанию `1.0`
 - `OW_STEAM_REQUEST_DELAY` — минимальная задержка между запросами к Steam (сек), по умолчанию `0.0`
+- `OW_STEAM_PROXY_POOL` — список прокси для Steam (через запятую или пробел), например `http://user:pass@host:port,socks5://host:1080`
 
 Steam / Workshop:
 - `OW_STEAM_MAX_PAGES` — максимум страниц Workshop при HTML‑обходе, по умолчанию `50` (0 = без лимита)
@@ -49,7 +50,7 @@ Steam / Workshop:
 - `OW_SYNC_RESOURCES` / `OW_PRUNE_RESOURCES` — синхронизировать/удалять ресурсы (скриншоты)
 - `OW_RESOURCE_UPLOAD_FILES` — загружать скриншоты файлом вместо URL, по умолчанию `true`
 - `OW_SCRAPE_PREVIEW_IMAGES` — пытаться вытянуть дополнительные скриншоты со страницы Steam, по умолчанию `true`
-- `OW_SCRAPE_REQUIRED_ITEMS` — вытягивать зависимости из HTML (если нет Steam API key), по умолчанию `true`
+- `OW_SCRAPE_REQUIRED_ITEMS` — вытягивать зависимости из HTML, по умолчанию `true`
 
 Структура зеркала по умолчанию:
 - `OW_MIRROR_DIR/steam/steamapps/workshop/content/<app_id>/<workshop_id>/...` — Steam‑моды

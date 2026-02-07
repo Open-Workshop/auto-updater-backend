@@ -17,6 +17,8 @@ _STEAM_HTTP_BACKOFF = 1.0
 _STEAM_REQUEST_DELAY = 0.0
 _STEAM_LAST_REQUEST_TS = 0.0
 _STEAM_RETRY_STATUSES = {429, 500, 502, 503, 504}
+_STEAM_PROXY_POOL: List[str] = []
+_STEAM_PROXY_INDEX = 0
 
 
 def set_steam_request_logging(enabled: bool) -> None:
@@ -29,6 +31,20 @@ def set_steam_request_policy(retries: int, backoff: float, request_delay: float)
     _STEAM_HTTP_RETRIES = max(0, int(retries))
     _STEAM_HTTP_BACKOFF = max(0.0, float(backoff))
     _STEAM_REQUEST_DELAY = max(0.0, float(request_delay))
+
+
+def set_steam_proxy_pool(proxies: List[str]) -> None:
+    global _STEAM_PROXY_POOL, _STEAM_PROXY_INDEX
+    cleaned: List[str] = []
+    for proxy in proxies or []:
+        value = proxy.strip()
+        if not value:
+            continue
+        if value.lower() in {"none", "off", "direct"}:
+            continue
+        cleaned.append(value)
+    _STEAM_PROXY_POOL = cleaned
+    _STEAM_PROXY_INDEX = 0
 
 
 def steam_stats_reset() -> None:
@@ -62,6 +78,31 @@ def _record_stat(endpoint: str, ok: bool) -> None:
     _STEAM_STATS["by_endpoint"][endpoint] = _STEAM_STATS["by_endpoint"].get(endpoint, 0) + 1
 
 
+def _next_proxy() -> str | None:
+    global _STEAM_PROXY_INDEX
+    if not _STEAM_PROXY_POOL:
+        return None
+    proxy = _STEAM_PROXY_POOL[_STEAM_PROXY_INDEX % len(_STEAM_PROXY_POOL)]
+    _STEAM_PROXY_INDEX += 1
+    return proxy
+
+
+def _mask_proxy(proxy: str | None) -> str:
+    if not proxy:
+        return "-"
+    try:
+        parsed = urlparse(proxy)
+    except Exception:
+        return proxy
+    if parsed.scheme and parsed.netloc:
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        if parsed.username:
+            return f"{parsed.scheme}://{parsed.username}:***@{host}{port}"
+        return f"{parsed.scheme}://{host}{port}"
+    return proxy
+
+
 def _steam_request(method: str, url: str, timeout: int, **kwargs: Any) -> requests.Response:
     global _STEAM_LAST_REQUEST_TS
     endpoint = _endpoint_key(method, url)
@@ -69,6 +110,11 @@ def _steam_request(method: str, url: str, timeout: int, **kwargs: Any) -> reques
     attempts = _STEAM_HTTP_RETRIES + 1
     last_exc: Exception | None = None
     for attempt in range(1, attempts + 1):
+        proxy = _next_proxy()
+        if proxy:
+            kwargs = dict(kwargs)
+            kwargs["proxies"] = {"http": proxy, "https": proxy}
+
         if _STEAM_REQUEST_DELAY > 0:
             now = time.monotonic()
             wait_for = _STEAM_REQUEST_DELAY - (now - _STEAM_LAST_REQUEST_TS)
@@ -84,9 +130,10 @@ def _steam_request(method: str, url: str, timeout: int, **kwargs: Any) -> reques
             if _LOG_STEAM_REQUESTS:
                 elapsed = time.monotonic() - start
                 logging.warning(
-                    "Steam %s failed after %.2fs: %s (%s)",
+                    "Steam %s failed after %.2fs via %s: %s (%s)",
                     endpoint,
                     elapsed,
+                    _mask_proxy(proxy),
                     exc,
                     type(exc).__name__,
                 )
@@ -104,11 +151,12 @@ def _steam_request(method: str, url: str, timeout: int, **kwargs: Any) -> reques
             size = response.headers.get("content-length") or "-"
             log_fn = logging.info if ok else logging.warning
             log_fn(
-                "Steam %s -> %s in %.2fs (size=%s)",
+                "Steam %s -> %s in %.2fs (size=%s, proxy=%s)",
                 endpoint,
                 response.status_code,
                 elapsed,
                 size,
+                _mask_proxy(proxy),
             )
 
         if response.status_code in _STEAM_RETRY_STATUSES and attempt < attempts:
