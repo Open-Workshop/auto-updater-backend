@@ -36,7 +36,7 @@ Steam / Workshop:
 
 Поведение синхронизации:
 - `OW_MOD_PUBLIC` — публичность мода: `0` публичный, `1` по ссылке, `2` скрытый
-- `OW_WITHOUT_AUTHOR` — не указывать авторство (нужно админ‑право), по умолчанию `true`
+- `OW_WITHOUT_AUTHOR` — не указывать авторство (нужно админ‑право), по умолчанию `false`
 - `OW_SYNC_TAGS` / `OW_PRUNE_TAGS` — синхронизировать/удалять теги
 - `OW_SYNC_DEPENDENCIES` / `OW_PRUNE_DEPENDENCIES` — синхронизировать/удалять зависимости
 - `OW_SYNC_RESOURCES` / `OW_PRUNE_RESOURCES` — синхронизировать/удалять ресурсы (скриншоты)

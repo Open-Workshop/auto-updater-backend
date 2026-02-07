@@ -84,7 +84,7 @@ def load_config() -> Config:
     max_screenshots = parse_int(os.environ.get("OW_MAX_SCREENSHOTS"), DEFAULT_MAX_SCREENSHOTS)
     steamcmd_path = os.environ.get("STEAMCMD_PATH", DEFAULT_STEAMCMD_PATH)
     public_mode = parse_int(os.environ.get("OW_MOD_PUBLIC"), 0)
-    without_author = parse_bool(os.environ.get("OW_WITHOUT_AUTHOR"), True)
+    without_author = parse_bool(os.environ.get("OW_WITHOUT_AUTHOR"), False)
 
     sync_tags = parse_bool(os.environ.get("OW_SYNC_TAGS"), True)
     prune_tags = parse_bool(os.environ.get("OW_PRUNE_TAGS"), True)

@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -42,6 +42,29 @@ class ApiClient:
         return response
 
 
+def _extract_id(response: requests.Response) -> Optional[int]:
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        for key in ("id", "tag_id", "mod_id", "game_id", "resource_id"):
+            if key in payload and payload[key] is not None:
+                try:
+                    return int(payload[key])
+                except (TypeError, ValueError):
+                    continue
+    if isinstance(payload, int):
+        return int(payload)
+    if isinstance(payload, str):
+        text = payload.strip()
+    else:
+        text = (response.text or "").strip()
+    if text.isdigit():
+        return int(text)
+    return None
+
+
 def list_all_pages(fetch_page: callable) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     page = 0
@@ -60,19 +83,18 @@ def list_all_pages(fetch_page: callable) -> List[Dict[str, Any]]:
 
 def ow_list_mods(api: ApiClient, game_id: int, page_size: int) -> List[Dict[str, Any]]:
     def fetch(page: int) -> Dict[str, Any]:
-        response = api.request(
-            "get",
-            "/list/mods/",
-            params={
-                "page_size": page_size,
-                "page": page,
-                "sort": "UPDATE_DATE",
-                "general": "true",
-                "dates": "true",
-                "game": game_id,
-                "primary_sources": json.dumps(["steam"]),
-            },
-        )
+        params = {
+            "page_size": page_size,
+            "page": page,
+            "general": "true",
+            "dates": "true",
+            "game": game_id,
+            "primary_sources": json.dumps(["steam"]),
+        }
+        response = api.request("get", "/list/mods/", params=params)
+        if response.status_code >= 500:
+            params.pop("primary_sources", None)
+            response = api.request("get", "/list/mods/", params=params)
         response.raise_for_status()
         return response.json()
 
@@ -117,16 +139,9 @@ def ow_add_game(api: ApiClient, name: str, short_desc: str, desc: str) -> int:
     )
     if response.status_code not in (200, 201):
         raise RuntimeError(f"Failed to add game: {response.status_code} {response.text}")
-    try:
-        payload = response.json()
-    except Exception:
-        payload = None
-    if isinstance(payload, dict):
-        game_id = payload.get("id") or payload.get("game_id")
-        if game_id:
-            return int(game_id)
-    if isinstance(payload, int):
-        return int(payload)
+    game_id = _extract_id(response)
+    if game_id is not None:
+        return game_id
     raise RuntimeError("Failed to parse game id from response")
 
 
@@ -186,16 +201,9 @@ def ow_add_mod(
         response = api.request("post", "/add/mod", data=data, files=files)
     if response.status_code not in (200, 201):
         raise RuntimeError(f"Failed to add mod: {response.status_code} {response.text}")
-    try:
-        payload = response.json()
-    except Exception:
-        payload = None
-    if isinstance(payload, dict):
-        mod_id = payload.get("id") or payload.get("mod_id")
-        if mod_id:
-            return int(mod_id)
-    if isinstance(payload, int):
-        return int(payload)
+    mod_id = _extract_id(response)
+    if mod_id is not None:
+        return mod_id
     raise RuntimeError("Failed to parse mod id from response")
 
 
@@ -252,18 +260,11 @@ def ow_list_tags(api: ApiClient, game_id: int, page_size: int) -> List[Dict[str,
 
 def ow_add_tag(api: ApiClient, name: str) -> int:
     response = api.request("post", "/add/tag", data={"tag_name": truncate(name, 128)})
-    if response.status_code not in (200, 201):
+    if response.status_code not in (200, 201, 202):
         raise RuntimeError(f"Failed to add tag: {response.status_code} {response.text}")
-    try:
-        payload = response.json()
-    except Exception:
-        payload = None
-    if isinstance(payload, dict):
-        tag_id = payload.get("id") or payload.get("tag_id")
-        if tag_id:
-            return int(tag_id)
-    if isinstance(payload, int):
-        return int(payload)
+    tag_id = _extract_id(response)
+    if tag_id is not None:
+        return tag_id
     raise RuntimeError("Failed to parse tag id from response")
 
 
@@ -273,7 +274,7 @@ def ow_associate_game_tag(api: ApiClient, game_id: int, tag_id: int) -> None:
         "/association/game/tag",
         data={"game_id": game_id, "tag_id": tag_id, "mode": "true"},
     )
-    if response.status_code not in (200, 204):
+    if response.status_code not in (200, 202, 204, 409):
         logging.warning("Failed to associate tag %s with game %s", tag_id, game_id)
 
 
@@ -297,7 +298,7 @@ def ow_get_mod_tags(api: ApiClient, mod_id: int) -> List[int]:
 
 def ow_add_mod_tag(api: ApiClient, mod_id: int, tag_id: int) -> None:
     response = api.request("post", f"/mods/{mod_id}/tags/{tag_id}")
-    if response.status_code not in (200, 201, 204):
+    if response.status_code not in (200, 201, 202, 204):
         logging.warning("Failed to add tag %s to mod %s", tag_id, mod_id)
 
 
@@ -327,7 +328,7 @@ def ow_get_mod_dependencies(api: ApiClient, mod_id: int) -> List[int]:
 
 def ow_add_mod_dependency(api: ApiClient, mod_id: int, dep_id: int) -> None:
     response = api.request("post", f"/mods/{mod_id}/dependencies/{dep_id}")
-    if response.status_code not in (200, 201, 204):
+    if response.status_code not in (200, 201, 202, 204):
         logging.warning("Failed to add dependency %s to mod %s", dep_id, mod_id)
 
 
@@ -358,7 +359,7 @@ def ow_add_resource(api: ApiClient, owner_type: str, owner_id: int, res_type: st
             "resource_owner_id": owner_id,
         },
     )
-    if response.status_code not in (200, 201, 204):
+    if response.status_code not in (200, 201, 202, 204):
         logging.warning("Failed to add resource %s to %s %s", url, owner_type, owner_id)
 
 

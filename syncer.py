@@ -256,18 +256,18 @@ def sync_mods(
                 continue
 
             title = details.get("title", "")
-            description = details.get("description", "")
+            raw_description = details.get("description", "")
             updated = int(details.get("time_updated") or 0)
             tags = [t.get("tag") for t in details.get("tags", []) if t.get("tag")]
             tags = [t.strip() for t in tags if t and t.strip()]
 
-            short_desc = strip_bbcode(description)
+            short_desc = strip_bbcode(raw_description)
             if not short_desc:
                 short_desc = title
             short_desc = truncate(short_desc, 256)
-            description = truncate(description, 10000)
+            description = truncate(raw_description, 10000)
 
-            images = parse_images(description, details.get("preview_url"), max_screenshots)
+            images = parse_images(raw_description, details.get("preview_url"), max_screenshots)
 
             mod_state = mods_state.get(str(workshop_id), {})
             previous_updated = int(mod_state.get("steam_updated") or 0)
