@@ -6,17 +6,22 @@ from pathlib import Path
 from config import load_config
 from ow_api import ApiClient, ow_get_game
 from syncer import ensure_game, sync_mods
+from steam_api import set_steam_request_logging, set_steam_request_policy
 from utils import ensure_dir
 
 
 def main() -> int:
+    cfg = load_config()
+    log_level = getattr(logging, cfg.log_level.upper(), logging.INFO)
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.StreamHandler()],
     )
-
-    cfg = load_config()
+    set_steam_request_logging(cfg.log_steam_requests)
+    set_steam_request_policy(
+        cfg.steam_http_retries, cfg.steam_http_backoff, cfg.steam_request_delay
+    )
     if not cfg.login_name or not cfg.password:
         logging.error("OW_LOGIN and OW_PASSWORD are required")
         return 2
@@ -24,7 +29,14 @@ def main() -> int:
         logging.error("OW_STEAM_APP_ID or OW_GAME_ID is required")
         return 2
 
-    api = ApiClient(cfg.api_base, cfg.login_name, cfg.password, cfg.timeout)
+    api = ApiClient(
+        cfg.api_base,
+        cfg.login_name,
+        cfg.password,
+        cfg.timeout,
+        retries=cfg.http_retries,
+        retry_backoff=cfg.http_retry_backoff,
+    )
     try:
         api.login()
     except Exception as exc:
@@ -68,7 +80,6 @@ def main() -> int:
                 state_file,
                 cfg.page_size,
                 cfg.timeout,
-                cfg.steam_api_key,
                 cfg.steam_max_pages,
                 cfg.steam_max_items,
                 cfg.steam_delay,
@@ -83,6 +94,8 @@ def main() -> int:
                 cfg.prune_resources,
                 cfg.upload_resource_files,
                 cfg.scrape_preview_images,
+                cfg.scrape_required_items,
+                cfg.force_required_item_id,
                 cfg.language,
                 Path(cfg.steamcmd_path),
             )

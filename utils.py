@@ -1,5 +1,6 @@
 import html
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -7,6 +8,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import urlparse
 
 import requests
 
@@ -47,6 +49,37 @@ def normalize_image_url(url: str) -> str:
     if "?" in value:
         value = value.split("?", 1)[0]
     return value
+
+
+def _image_fingerprint(url: str) -> str:
+    normalized = normalize_image_url(url)
+    if not normalized:
+        return ""
+    parsed = urlparse(normalized)
+    host = (parsed.netloc or "").lower()
+    if host.endswith(
+        (
+            "steamusercontent.com",
+            "steamusercontent-a.akamaihd.net",
+            "steamuserimages-a.akamaihd.net",
+        )
+    ):
+        parts = [part for part in (parsed.path or "").split("/") if part]
+        if parts:
+            return parts[-1].lower()
+    return normalized.lower()
+
+
+def dedupe_images(urls: List[str]) -> List[str]:
+    deduped: List[str] = []
+    seen = set()
+    for url in urls:
+        fingerprint = _image_fingerprint(url)
+        if not fingerprint or fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        deduped.append(url)
+    return deduped
 
 
 def parse_images(description: str, preview_url: str | None, max_images: int) -> List[str]:
@@ -97,6 +130,11 @@ def download_url_to_file(url: str, dest_dir: Path, basename: str, timeout: int) 
     ensure_dir(dest_dir)
     response = requests.get(url, stream=True, timeout=timeout)
     if response.status_code != 200:
+        logging.warning(
+            "Failed to download %s: %s",
+            url,
+            response.status_code,
+        )
         return None
     ext = _extension_from_headers(response.headers)
     if not ext:

@@ -1,5 +1,7 @@
 import json
 import logging
+import random
+import time
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -8,13 +10,24 @@ from utils import truncate
 
 
 class ApiClient:
-    def __init__(self, base_url: str, login: str, password: str, timeout: int) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        login: str,
+        password: str,
+        timeout: int,
+        retries: int = 3,
+        retry_backoff: float = 1.0,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.login_name = login
         self.password = password
         self.timeout = timeout
+        self.retries = max(0, int(retries))
+        self.retry_backoff = max(0.0, float(retry_backoff))
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "openworkshop-mirror/2.0"})
+        self._retry_statuses = {500, 502, 503, 504}
 
     def login(self) -> None:
         if not self.login_name or not self.password:
@@ -32,14 +45,82 @@ class ApiClient:
 
     def request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         url = f"{self.base_url}{path}"
-        response = self.session.request(method, url, timeout=self.timeout, **kwargs)
-        if response.status_code in (401, 403):
-            logging.warning("Session expired, re-authenticating")
-            self.login()
-            response = self.session.request(
-                method, url, timeout=self.timeout, **kwargs
-            )
+        files = kwargs.get("files")
+
+        def reset_files() -> None:
+            if not files:
+                return
+            for value in files.values():
+                file_obj = None
+                if isinstance(value, tuple):
+                    if len(value) >= 2:
+                        file_obj = value[1]
+                else:
+                    file_obj = value
+                if file_obj is None:
+                    continue
+                seek = getattr(file_obj, "seek", None)
+                if callable(seek):
+                    try:
+                        seek(0)
+                    except Exception:
+                        pass
+
+        attempts = self.retries + 1
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            if attempt > 1:
+                reset_files()
+            try:
+                response = self.session.request(
+                    method, url, timeout=self.timeout, **kwargs
+                )
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt >= attempts:
+                    raise
+                self._sleep_backoff(attempt, method, url, exc)
+                continue
+
+            if response.status_code in (401, 403):
+                logging.warning("Session expired, re-authenticating")
+                self.login()
+                if attempt > 1:
+                    reset_files()
+                response = self.session.request(
+                    method, url, timeout=self.timeout, **kwargs
+                )
+
+            if response.status_code in self._retry_statuses and attempt < attempts:
+                self._sleep_backoff(
+                    attempt,
+                    method,
+                    url,
+                    RuntimeError(f"HTTP {response.status_code}"),
+                )
+                continue
+
+            return response
+
+        if last_exc:
+            raise last_exc
         return response
+
+    def _sleep_backoff(self, attempt: int, method: str, url: str, exc: Exception) -> None:
+        if self.retry_backoff <= 0:
+            return
+        delay = self.retry_backoff * (2 ** (attempt - 1))
+        delay += random.uniform(0.0, self.retry_backoff)
+        logging.warning(
+            "HTTP retry %s/%s after error for %s %s: %s (sleep %.1fs)",
+            attempt,
+            self.retries,
+            method.upper(),
+            url,
+            exc,
+            delay,
+        )
+        time.sleep(delay)
 
 
 def _extract_id(response: requests.Response) -> Optional[int]:
@@ -218,24 +299,26 @@ def ow_edit_mod(
     game_id: int,
     public_mode: int,
     file_path=None,
+    set_source: bool = True,
 ) -> None:
     data = {
         "mod_id": mod_id,
         "mod_name": truncate(name, 128),
         "mod_short_description": truncate(short_desc, 256),
         "mod_description": truncate(desc, 10000),
-        "mod_source": source,
-        "mod_source_id": source_id,
         "mod_game": game_id,
         "mod_public": public_mode,
     }
+    if set_source:
+        data["mod_source"] = source
+        data["mod_source_id"] = source_id
     if file_path:
         with file_path.open("rb") as handle:
             files = {"mod_file": (file_path.name, handle)}
             response = api.request("post", "/edit/mod", data=data, files=files)
     else:
         response = api.request("post", "/edit/mod", data=data)
-    if response.status_code not in (200, 204):
+    if response.status_code not in (200, 201, 202, 204):
         raise RuntimeError(
             f"Failed to edit mod {mod_id}: {response.status_code} {response.text}"
         )
@@ -275,7 +358,13 @@ def ow_associate_game_tag(api: ApiClient, game_id: int, tag_id: int) -> None:
         data={"game_id": game_id, "tag_id": tag_id, "mode": "true"},
     )
     if response.status_code not in (200, 202, 204, 409):
-        logging.warning("Failed to associate tag %s with game %s", tag_id, game_id)
+        logging.warning(
+            "Failed to associate tag %s with game %s: %s %s",
+            tag_id,
+            game_id,
+            response.status_code,
+            (response.text or "")[:200],
+        )
 
 
 def ow_get_mod_tags(api: ApiClient, mod_id: int) -> List[int]:
@@ -299,13 +388,25 @@ def ow_get_mod_tags(api: ApiClient, mod_id: int) -> List[int]:
 def ow_add_mod_tag(api: ApiClient, mod_id: int, tag_id: int) -> None:
     response = api.request("post", f"/mods/{mod_id}/tags/{tag_id}")
     if response.status_code not in (200, 201, 202, 204):
-        logging.warning("Failed to add tag %s to mod %s", tag_id, mod_id)
+        logging.warning(
+            "Failed to add tag %s to mod %s: %s %s",
+            tag_id,
+            mod_id,
+            response.status_code,
+            (response.text or "")[:200],
+        )
 
 
 def ow_delete_mod_tag(api: ApiClient, mod_id: int, tag_id: int) -> None:
     response = api.request("delete", f"/mods/{mod_id}/tags/{tag_id}")
     if response.status_code not in (200, 204):
-        logging.warning("Failed to delete tag %s from mod %s", tag_id, mod_id)
+        logging.warning(
+            "Failed to delete tag %s from mod %s: %s %s",
+            tag_id,
+            mod_id,
+            response.status_code,
+            (response.text or "")[:200],
+        )
 
 
 def ow_get_mod_dependencies(api: ApiClient, mod_id: int) -> List[int]:
@@ -329,13 +430,27 @@ def ow_get_mod_dependencies(api: ApiClient, mod_id: int) -> List[int]:
 def ow_add_mod_dependency(api: ApiClient, mod_id: int, dep_id: int) -> None:
     response = api.request("post", f"/mods/{mod_id}/dependencies/{dep_id}")
     if response.status_code not in (200, 201, 202, 204):
-        logging.warning("Failed to add dependency %s to mod %s", dep_id, mod_id)
+        logging.warning(
+            "Failed to add dependency %s to mod %s: %s %s",
+            dep_id,
+            mod_id,
+            response.status_code,
+            (response.text or "")[:200],
+        )
 
 
-def ow_delete_mod_dependency(api: ApiClient, mod_id: int, dep_id: int) -> None:
+def ow_delete_mod_dependency(api: ApiClient, mod_id: int, dep_id: int) -> bool:
     response = api.request("delete", f"/mods/{mod_id}/dependencies/{dep_id}")
-    if response.status_code not in (200, 204):
-        logging.warning("Failed to delete dependency %s from mod %s", dep_id, mod_id)
+    if response.status_code in (200, 202, 204, 404, 409, 412):
+        return True
+    logging.warning(
+        "Failed to delete dependency %s from mod %s: %s %s",
+        dep_id,
+        mod_id,
+        response.status_code,
+        (response.text or "")[:200],
+    )
+    return False
 
 
 def ow_get_mod_resources(api: ApiClient, mod_id: int) -> List[Dict[str, Any]]:
@@ -360,10 +475,23 @@ def ow_add_resource(api: ApiClient, owner_type: str, owner_id: int, res_type: st
         },
     )
     if response.status_code not in (200, 201, 202, 204):
-        logging.warning("Failed to add resource %s to %s %s", url, owner_type, owner_id)
+        logging.warning(
+            "Failed to add resource %s to %s %s: %s %s",
+            url,
+            owner_type,
+            owner_id,
+            response.status_code,
+            (response.text or "")[:200],
+        )
 
 
-def ow_add_resource_file(api: ApiClient, owner_type: str, owner_id: int, res_type: str, file_path) -> None:
+def ow_add_resource_file(
+    api: ApiClient,
+    owner_type: str,
+    owner_id: int,
+    res_type: str,
+    file_path,
+) -> bool:
     with file_path.open("rb") as handle:
         files = {"resource_file": (file_path.name, handle)}
         data = {
@@ -376,11 +504,25 @@ def ow_add_resource_file(api: ApiClient, owner_type: str, owner_id: int, res_typ
             data=data,
             files=files,
         )
-    if response.status_code not in (200, 201, 202, 204):
-        logging.warning("Failed to add resource file %s to %s %s", file_path, owner_type, owner_id)
+    if response.status_code not in (200, 201, 202, 204, 409):
+        logging.warning(
+            "Failed to add resource file %s to %s %s: %s %s",
+            file_path,
+            owner_type,
+            owner_id,
+            response.status_code,
+            (response.text or "")[:200],
+        )
+        return False
+    return True
 
 
 def ow_delete_resource(api: ApiClient, resource_id: int) -> None:
     response = api.request("delete", f"/resources/{resource_id}")
     if response.status_code not in (200, 204):
-        logging.warning("Failed to delete resource %s", resource_id)
+        logging.warning(
+            "Failed to delete resource %s: %s %s",
+            resource_id,
+            response.status_code,
+            (response.text or "")[:200],
+        )

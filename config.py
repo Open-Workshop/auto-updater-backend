@@ -3,13 +3,19 @@ import os
 
 DEFAULT_API_BASE = "https://api.openworkshop.miskler.ru"
 DEFAULT_PAGE_SIZE = 50
-DEFAULT_POLL_INTERVAL = 600
+DEFAULT_POLL_INTERVAL = 200
 DEFAULT_TIMEOUT = 60
+DEFAULT_HTTP_RETRIES = 3
+DEFAULT_HTTP_RETRY_BACKOFF = 2.0
 DEFAULT_STEAM_MAX_PAGES = 50
 DEFAULT_STEAM_PAGE_SIZE = 30
-DEFAULT_STEAM_DELAY = 1.0
+DEFAULT_STEAM_DELAY = 4.0
 DEFAULT_MAX_SCREENSHOTS = 8
 DEFAULT_STEAMCMD_PATH = "/opt/steamcmd/steamcmd.sh"
+DEFAULT_STEAM_HTTP_RETRIES = 2
+DEFAULT_STEAM_HTTP_BACKOFF = 2.0
+DEFAULT_STEAM_REQUEST_DELAY = 1.0
+DEFAULT_LOG_LEVEL = "INFO"
 
 
 def parse_bool(value: str | None, default: bool = False) -> bool:
@@ -40,8 +46,14 @@ class Config:
     page_size: int
     poll_interval: int
     timeout: int
+    http_retries: int
+    http_retry_backoff: float
     run_once: bool
-    steam_api_key: str | None
+    log_level: str
+    log_steam_requests: bool
+    steam_http_retries: int
+    steam_http_backoff: float
+    steam_request_delay: float
     steam_max_pages: int
     steam_max_items: int
     steam_delay: float
@@ -49,6 +61,8 @@ class Config:
     steamcmd_path: str
     upload_resource_files: bool
     scrape_preview_images: bool
+    scrape_required_items: bool
+    force_required_item_id: str | None
     public_mode: int
     without_author: bool
     sync_tags: bool
@@ -77,9 +91,23 @@ def load_config() -> Config:
     page_size = parse_int(os.environ.get("OW_PAGE_SIZE"), DEFAULT_PAGE_SIZE)
     poll_interval = parse_int(os.environ.get("OW_POLL_INTERVAL"), DEFAULT_POLL_INTERVAL)
     timeout = parse_int(os.environ.get("OW_HTTP_TIMEOUT"), DEFAULT_TIMEOUT)
+    http_retries = parse_int(os.environ.get("OW_HTTP_RETRIES"), DEFAULT_HTTP_RETRIES)
+    http_retry_backoff = float(
+        os.environ.get("OW_HTTP_RETRY_BACKOFF", DEFAULT_HTTP_RETRY_BACKOFF)
+    )
     run_once = parse_bool(os.environ.get("OW_RUN_ONCE"), False)
+    log_level = os.environ.get("OW_LOG_LEVEL", DEFAULT_LOG_LEVEL)
+    log_steam_requests = parse_bool(os.environ.get("OW_LOG_STEAM_REQUESTS"), False)
+    steam_http_retries = parse_int(
+        os.environ.get("OW_STEAM_HTTP_RETRIES"), DEFAULT_STEAM_HTTP_RETRIES
+    )
+    steam_http_backoff = float(
+        os.environ.get("OW_STEAM_HTTP_BACKOFF", DEFAULT_STEAM_HTTP_BACKOFF)
+    )
+    steam_request_delay = float(
+        os.environ.get("OW_STEAM_REQUEST_DELAY", DEFAULT_STEAM_REQUEST_DELAY)
+    )
 
-    steam_api_key = os.environ.get("STEAM_WEB_API_KEY")
     steam_max_pages = parse_int(os.environ.get("OW_STEAM_MAX_PAGES"), DEFAULT_STEAM_MAX_PAGES)
     steam_max_items = parse_int(os.environ.get("OW_STEAM_MAX_ITEMS"), 0)
     steam_delay = float(os.environ.get("OW_STEAM_DELAY", DEFAULT_STEAM_DELAY))
@@ -87,6 +115,8 @@ def load_config() -> Config:
     steamcmd_path = os.environ.get("STEAMCMD_PATH", DEFAULT_STEAMCMD_PATH)
     upload_resource_files = parse_bool(os.environ.get("OW_RESOURCE_UPLOAD_FILES"), True)
     scrape_preview_images = parse_bool(os.environ.get("OW_SCRAPE_PREVIEW_IMAGES"), True)
+    scrape_required_items = parse_bool(os.environ.get("OW_SCRAPE_REQUIRED_ITEMS"), True)
+    force_required_item_id = os.environ.get("OW_FORCE_REQUIRED_ITEM_ID")
     public_mode = parse_int(os.environ.get("OW_MOD_PUBLIC"), 0)
     without_author = parse_bool(os.environ.get("OW_WITHOUT_AUTHOR"), False)
 
@@ -110,8 +140,14 @@ def load_config() -> Config:
         page_size=page_size,
         poll_interval=poll_interval,
         timeout=timeout,
+        http_retries=http_retries,
+        http_retry_backoff=http_retry_backoff,
         run_once=run_once,
-        steam_api_key=steam_api_key,
+        log_level=log_level,
+        log_steam_requests=log_steam_requests,
+        steam_http_retries=steam_http_retries,
+        steam_http_backoff=steam_http_backoff,
+        steam_request_delay=steam_request_delay,
         steam_max_pages=steam_max_pages,
         steam_max_items=steam_max_items,
         steam_delay=steam_delay,
@@ -119,6 +155,8 @@ def load_config() -> Config:
         steamcmd_path=steamcmd_path,
         upload_resource_files=upload_resource_files,
         scrape_preview_images=scrape_preview_images,
+        scrape_required_items=scrape_required_items,
+        force_required_item_id=force_required_item_id,
         public_mode=public_mode,
         without_author=without_author,
         sync_tags=sync_tags,
