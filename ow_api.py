@@ -9,13 +9,13 @@ import requests
 from utils import truncate
 
 _DEFAULT_LIMITS: Dict[str, int] = {
-    "game_name": 128,
-    "game_short_desc": 256,
-    "game_desc": 10000,
-    "mod_name": 128,
-    "mod_short_description": 256,
-    "mod_description": 10000,
-    "tag_name": 128,
+    "game_name": 127,
+    "game_short_desc": 255,
+    "game_desc": 9999,
+    "mod_name": 127,
+    "mod_short_description": 255,
+    "mod_description": 9999,
+    "tag_name": 127,
 }
 _LIMITS: Dict[str, int] = dict(_DEFAULT_LIMITS)
 
