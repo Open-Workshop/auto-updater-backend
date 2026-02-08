@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import logging
 import re
 import time
@@ -123,7 +124,11 @@ class SteamMod:
             else ""
         )
         description_node = parser.css_first("div.workshopItemDescription")
-        description = _clean_text(description_node.text() if description_node else "")
+        if description_node is None:
+            description = ""
+        else:
+            raw_html = description_node.html or description_node.text() or ""
+            description = _clean_description(raw_html)
 
         logo_node = parser.css_first(
             "div.col_right.responsive_local_menu div.workshopItemPreviewImageMain a img"
@@ -479,6 +484,23 @@ def _clean_text(value: str | None) -> str:
     if not value:
         return ""
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _clean_description(value: str | None) -> str:
+    if not value:
+        return ""
+    text = html.unescape(value)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"(?i)<br\\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</p\\s*>", "\n\n", text)
+    text = re.sub(r"(?i)</div\\s*>", "\n", text)
+    text = re.sub(r"(?i)<p\\b[^>]*>", "", text)
+    text = re.sub(r"(?i)<div\\b[^>]*>", "", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = text.replace("\xa0", " ")
+    text = "\n".join(line.rstrip() for line in text.splitlines())
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
 
 
 def _dedupe_keep_order(values: List[str]) -> List[str]:
