@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import aiohttp
+import requests
 
 from PIL import Image, ImageOps
 import imagehash
@@ -577,6 +578,9 @@ class ResourceSyncer:
             url_to_ids.setdefault(url, []).append(int(res_id))
 
         if url_to_ids:
+            self._prune_missing_resource_urls(url_to_ids, cached_resources)
+
+        if url_to_ids:
             targets: List[tuple[str, str, str]] = []
             for idx, url in enumerate(url_to_ids.keys()):
                 targets.append(("existing", url, f"existing_{idx}"))
@@ -601,6 +605,35 @@ class ResourceSyncer:
 
         self._save_hash_cache(cache_path, cache)
         return hashes_by_id, cache
+
+    def _prune_missing_resource_urls(
+        self,
+        url_to_ids: Dict[str, List[int]],
+        cached_resources: Dict[str, Any],
+    ) -> None:
+        if not url_to_ids:
+            return
+        for url, res_ids in list(url_to_ids.items()):
+            status = self._head_status(url)
+            if status != 404:
+                continue
+            logging.warning("Deleting OW resource(s) with missing URL: %s", url)
+            for res_id in res_ids:
+                self.api.delete_resource(int(res_id))
+                if isinstance(cached_resources, dict):
+                    cached_resources.pop(str(res_id), None)
+            url_to_ids.pop(url, None)
+
+    def _head_status(self, url: str) -> int | None:
+        try:
+            response = requests.head(url, timeout=self.timeout, allow_redirects=True)
+        except requests.RequestException as exc:
+            logging.debug("Failed to probe resource %s: %s", url, exc)
+            return None
+        try:
+            return int(response.status_code)
+        finally:
+            response.close()
 
     def _prune_duplicate_resources(
         self,
@@ -692,22 +725,30 @@ class SteamModLoader:
     def load_batch(self, item_ids: List[str]) -> Dict[str, SteamMod]:
         if not item_ids:
             return {}
+        logging.info("Steam batch load: items=%s", len(item_ids))
         return asyncio.run(self._load_sequential(item_ids))
 
     async def _load_sequential(self, item_ids: List[str]) -> Dict[str, SteamMod]:
         timeout_cfg = aiohttp.ClientTimeout(total=self.timeout)
         results: Dict[str, SteamMod] = {}
         async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
-            for item_id in item_ids:
+            total = len(item_ids)
+            for idx, item_id in enumerate(item_ids, start=1):
+                start = time.monotonic()
+                logging.info("Steam load %s/%s id=%s", idx, total, item_id)
                 mod = SteamMod(item_id)
                 ok = await mod.load(
                     timeout=self.timeout,
                     session=session,
                     language=self.language,
                 )
+                elapsed = time.monotonic() - start
                 if not ok:
-                    logging.warning("Steam page parse failed for %s", item_id)
+                    logging.warning(
+                        "Steam page parse failed for %s (%.2fs)", item_id, elapsed
+                    )
                     continue
+                logging.debug("Steam page loaded %s (%.2fs)", item_id, elapsed)
                 results[str(item_id)] = mod
         return results
 
@@ -817,6 +858,11 @@ class ModSyncer:
     def _fetch_next_page(self) -> bool:
         if self.options.max_pages > 0 and self.page > self.options.max_pages:
             return False
+        logging.info(
+            "Steam workshop page fetch: page=%s max_pages=%s",
+            self.page,
+            self.options.max_pages or "unlimited",
+        )
         page_ids = steam_fetch_workshop_page_ids_html(
             self.steam_app_id,
             self.page,
@@ -837,6 +883,9 @@ class ModSyncer:
 
     def _process_metadata_batch(self) -> None:
         batch_ids = self.queue.pop_meta_batch(30)
+        if not batch_ids:
+            return
+        logging.info("Process metadata batch: size=%s", len(batch_ids))
         mod_map = self.mod_loader.load_batch(batch_ids)
         self.steam_mod_cache.update(mod_map)
 
@@ -849,6 +898,11 @@ class ModSyncer:
             if payload is None:
                 continue
             if self._needs_file_update(mod, payload.ow_mod_id):
+                logging.info(
+                    "Queue download for %s (new=%s)",
+                    workshop_id,
+                    payload.ow_mod_id is None,
+                )
                 self.queue.enqueue_download(str(workshop_id), payload)
                 continue
 
@@ -881,6 +935,11 @@ class ModSyncer:
             )
 
     def _process_download_item(self, item_id: str, payload: ModPayload) -> None:
+        logging.info(
+            "Downloading Steam mod %s (new=%s)",
+            item_id,
+            payload.is_new,
+        )
         archive_path = self._download_mod_archive(item_id)
         if not archive_path:
             logging.warning("Steam download failed for %s", item_id)
@@ -888,6 +947,7 @@ class ModSyncer:
 
         ow_mod_id = payload.ow_mod_id
         if payload.is_new:
+            logging.info("Creating OW mod for %s", item_id)
             mod_id = self.api.add_mod(
                 payload.title,
                 payload.short_desc,
