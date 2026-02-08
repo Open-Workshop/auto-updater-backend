@@ -797,7 +797,8 @@ class ModSyncer:
         self.options = options
 
         self.queue = WorkQueue()
-        self.page = max(1, int(options.start_page))
+        self.start_page = max(1, int(options.start_page))
+        self.page = self.start_page
         self.listed_count = 0
         self.mod_index = ModIndex(api)
         self.steam_mod_cache: Dict[str, SteamMod] = {}
@@ -836,7 +837,7 @@ class ModSyncer:
         else:
             logging.info(
                 "Steam workshop listing: start_page=%s max_items=%s max_pages=%s",
-                self.page,
+                self.start_page,
                 self.options.max_items or "unlimited",
                 self.options.max_pages or "unlimited",
             )
@@ -873,8 +874,10 @@ class ModSyncer:
             )
 
     def _fetch_next_page(self) -> bool:
-        if self.options.max_pages > 0 and self.page > self.options.max_pages:
-            return False
+        if self.options.max_pages > 0:
+            last_page = self.start_page + self.options.max_pages - 1
+            if self.page > last_page:
+                return False
         logging.info(
             "Steam workshop page fetch: page=%s max_pages=%s",
             self.page,
