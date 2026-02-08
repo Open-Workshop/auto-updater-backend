@@ -96,6 +96,21 @@ def load_api_limits(api: "ApiClient") -> None:
     )
 
 
+def ow_limit_mod_fields(
+    name: str,
+    short_desc: str,
+    description: str,
+) -> tuple[str, str, str]:
+    name = truncate(name, _limit("mod_name", _DEFAULT_LIMITS["mod_name"]))
+    short_desc = truncate(
+        short_desc, _limit("mod_short_description", _DEFAULT_LIMITS["mod_short_description"])
+    )
+    description = truncate(
+        description, _limit("mod_description", _DEFAULT_LIMITS["mod_description"])
+    )
+    return name, short_desc, description
+
+
 class ApiClient:
     def __init__(
         self,

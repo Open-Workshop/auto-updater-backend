@@ -28,6 +28,7 @@ from ow_api import (
     ow_get_mod_dependencies,
     ow_get_mod_resources,
     ow_get_mod_tags,
+    ow_limit_mod_fields,
     ow_list_games_by_source,
     ow_list_mods,
     ow_list_tags,
@@ -682,6 +683,9 @@ def sync_mods(
                     short_desc = title
                 short_desc = truncate(short_desc, 256)
                 description = truncate(raw_description, 10000)
+                title, short_desc, description = ow_limit_mod_fields(
+                    title, short_desc, description
+                )
 
                 ow_mod = ow_by_source.get(str(workshop_id))
                 ow_mod_id = int(ow_mod.get("id")) if ow_mod else None
