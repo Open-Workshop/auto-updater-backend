@@ -8,9 +8,14 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import aiohttp
+
+from PIL import Image, ImageOps
+import imagehash
+
+_PHASH_AVAILABLE = True
 
 from ow_api import ApiClient
 from steam_api import (
@@ -67,6 +72,60 @@ class ModPayload:
     images_incomplete: bool
     ow_mod_id: Optional[int]
     is_new: bool
+
+
+PHASH_MAX_DISTANCE = 6
+
+
+@dataclass(frozen=True)
+class ImageHashes:
+    sha256: str | None
+    phash: str | None
+
+
+def _phash_from_path(path: Path) -> str | None:
+    if not _PHASH_AVAILABLE:
+        return None
+    try:
+        with Image.open(path) as img:
+            img = ImageOps.exif_transpose(img)
+            img = img.convert("RGB")
+            return str(imagehash.phash(img))
+    except Exception as exc:
+        logging.debug("Failed to compute phash for %s: %s", path, exc)
+        return None
+
+
+def _build_hashes(file_hash: str | None, file_path: Path) -> ImageHashes:
+    sha256 = file_hash if file_hash else None
+    phash = _phash_from_path(file_path)
+    return ImageHashes(sha256=sha256, phash=phash)
+
+
+def _phash_distance(left: str, right: str) -> Optional[int]:
+    if not _PHASH_AVAILABLE:
+        return None
+    try:
+        return imagehash.hex_to_hash(left) - imagehash.hex_to_hash(right)
+    except Exception:
+        return None
+
+
+def _hashes_match(left: ImageHashes, right: ImageHashes) -> bool:
+    if _PHASH_AVAILABLE and left.phash and right.phash:
+        distance = _phash_distance(left.phash, right.phash)
+        if distance is not None:
+            return distance <= PHASH_MAX_DISTANCE
+    if left.sha256 and right.sha256:
+        return left.sha256 == right.sha256
+    return False
+
+
+def _hash_matches_any(target: ImageHashes, candidates: Iterable[ImageHashes]) -> bool:
+    for candidate in candidates:
+        if _hashes_match(target, candidate):
+            return True
+    return False
 
 
 class WorkQueue:
@@ -368,40 +427,48 @@ class ResourceSyncer:
                     cached_resources.pop(str(res_id), None)
             self._save_hash_cache(cache_path, hash_cache)
 
-        existing_hashes: set[str] = set()
-        existing_logo_hashes: set[str] = set()
-        hash_to_resources: Dict[str, List[Dict[str, Any]]] = {}
+        existing_hashes: List[ImageHashes] = []
+        existing_logo_hashes: List[ImageHashes] = []
+        existing_sha256: set[str] = set()
+        existing_logo_sha256: set[str] = set()
+        sha256_to_resources: Dict[str, List[Dict[str, Any]]] = {}
         for resource in current_resources:
             res_id = resource.get("id")
             if res_id is None or int(res_id) in deleted_ids:
                 continue
-            file_hash = hashes_by_id.get(int(res_id))
-            if not file_hash:
+            hashes = hashes_by_id.get(int(res_id))
+            if not hashes:
                 continue
-            existing_hashes.add(file_hash)
+            existing_hashes.append(hashes)
             if resource.get("type") == "logo":
-                existing_logo_hashes.add(file_hash)
-            hash_to_resources.setdefault(file_hash, []).append(resource)
+                existing_logo_hashes.append(hashes)
+            if hashes.sha256:
+                existing_sha256.add(hashes.sha256)
+                if resource.get("type") == "logo":
+                    existing_logo_sha256.add(hashes.sha256)
+                sha256_to_resources.setdefault(hashes.sha256, []).append(resource)
 
         targets = self._build_image_targets(images)
 
-        desired_hashes: set[str] = set()
+        desired_hashes: List[ImageHashes] = []
         downloaded_count = 0
         if targets:
             downloads = self._download_steam_images(mod, targets, dest_dir)
             downloaded_count = len(downloads)
-            seen_hashes: set[str] = set()
+            seen_sha256: set[str] = set()
             for res_type, _, file_path, file_hash in downloads:
-                if not file_hash or file_hash in seen_hashes:
+                hashes = _build_hashes(file_hash, file_path)
+                if hashes.sha256 and hashes.sha256 in seen_sha256:
                     continue
-                seen_hashes.add(file_hash)
-                desired_hashes.add(file_hash)
+                if hashes.sha256:
+                    seen_sha256.add(hashes.sha256)
+                desired_hashes.append(hashes)
 
                 if res_type == "logo":
-                    if file_hash in existing_logo_hashes:
+                    if _hash_matches_any(hashes, existing_logo_hashes):
                         continue
                 else:
-                    if file_hash in existing_hashes:
+                    if _hash_matches_any(hashes, existing_hashes):
                         continue
 
                 if self.api.add_resource_file(
@@ -409,10 +476,11 @@ class ResourceSyncer:
                 ):
                     if (
                         res_type == "logo"
-                        and file_hash in existing_hashes
-                        and file_hash not in existing_logo_hashes
+                        and hashes.sha256
+                        and hashes.sha256 in existing_sha256
+                        and hashes.sha256 not in existing_logo_sha256
                     ):
-                        for resource in hash_to_resources.get(file_hash, []):
+                        for resource in sha256_to_resources.get(hashes.sha256, []):
                             res_id = resource.get("id")
                             if res_id is None:
                                 continue
@@ -422,9 +490,13 @@ class ResourceSyncer:
                             if isinstance(cached_resources, dict):
                                 cached_resources.pop(str(res_id), None)
                         self._save_hash_cache(cache_path, hash_cache)
-                    existing_hashes.add(file_hash)
+                    existing_hashes.append(hashes)
                     if res_type == "logo":
-                        existing_logo_hashes.add(file_hash)
+                        existing_logo_hashes.append(hashes)
+                    if hashes.sha256:
+                        existing_sha256.add(hashes.sha256)
+                        if res_type == "logo":
+                            existing_logo_sha256.add(hashes.sha256)
 
         if self.prune and images_incomplete:
             logging.debug(
@@ -436,8 +508,8 @@ class ResourceSyncer:
                 res_id = resource.get("id")
                 if res_id is None or int(res_id) in deleted_ids:
                     continue
-                file_hash = hashes_by_id.get(int(res_id))
-                if not file_hash or file_hash in desired_hashes:
+                hashes = hashes_by_id.get(int(res_id))
+                if not hashes or _hash_matches_any(hashes, desired_hashes):
                     continue
                 self.api.delete_resource(int(res_id))
                 if isinstance(cached_resources, dict):
@@ -465,7 +537,7 @@ class ResourceSyncer:
         mod: SteamMod,
         resources: List[Dict[str, Any]],
         dest_dir: Path,
-    ) -> tuple[Dict[int, str], Dict[str, Any]]:
+    ) -> tuple[Dict[int, ImageHashes], Dict[str, Any]]:
         cache_path = dest_dir / "resource_hashes.json"
         cache = self._load_hash_cache(cache_path)
         cached_resources = cache.get("resources")
@@ -482,7 +554,7 @@ class ResourceSyncer:
             if cached_id not in valid_ids:
                 cached_resources.pop(cached_id, None)
 
-        hashes_by_id: Dict[int, str] = {}
+        hashes_by_id: Dict[int, ImageHashes] = {}
         url_to_ids: Dict[str, List[int]] = {}
         for resource in resources:
             res_id = resource.get("id")
@@ -490,13 +562,18 @@ class ResourceSyncer:
             if res_id is None or not url:
                 continue
             cached_entry = cached_resources.get(str(res_id))
-            if (
-                isinstance(cached_entry, dict)
-                and cached_entry.get("url") == url
-                and cached_entry.get("hash")
-            ):
-                hashes_by_id[int(res_id)] = str(cached_entry["hash"])
-                continue
+            if isinstance(cached_entry, dict) and cached_entry.get("url") == url:
+                cached_sha256 = cached_entry.get("sha256") or cached_entry.get("hash")
+                cached_phash = cached_entry.get("phash")
+                if cached_sha256 or cached_phash:
+                    if _PHASH_AVAILABLE and not cached_phash:
+                        url_to_ids.setdefault(url, []).append(int(res_id))
+                    else:
+                        hashes_by_id[int(res_id)] = ImageHashes(
+                            sha256=str(cached_sha256) if cached_sha256 else None,
+                            phash=str(cached_phash) if cached_phash else None,
+                        )
+                    continue
             url_to_ids.setdefault(url, []).append(int(res_id))
 
         if url_to_ids:
@@ -505,11 +582,16 @@ class ResourceSyncer:
                 targets.append(("existing", url, f"existing_{idx}"))
             downloads = self._download_steam_images(mod, targets, dest_dir)
             for _, url, file_path, file_hash in downloads:
-                if not file_hash:
+                if not file_hash and not _PHASH_AVAILABLE:
                     continue
+                hashes = _build_hashes(file_hash, file_path)
                 for res_id in url_to_ids.get(url, []):
-                    hashes_by_id[res_id] = file_hash
-                    cached_resources[str(res_id)] = {"url": url, "hash": file_hash}
+                    hashes_by_id[res_id] = hashes
+                    cached_resources[str(res_id)] = {
+                        "url": url,
+                        "sha256": hashes.sha256,
+                        "phash": hashes.phash,
+                    }
                 try:
                     file_path.unlink()
                 except FileNotFoundError:
@@ -523,17 +605,20 @@ class ResourceSyncer:
     def _prune_duplicate_resources(
         self,
         resources: List[Dict[str, Any]],
-        hashes_by_id: Dict[int, str],
+        hashes_by_id: Dict[int, ImageHashes],
     ) -> set[int]:
         by_hash: Dict[str, List[Dict[str, Any]]] = {}
         for resource in resources:
             res_id = resource.get("id")
             if res_id is None:
                 continue
-            file_hash = hashes_by_id.get(int(res_id))
-            if not file_hash:
+            hashes = hashes_by_id.get(int(res_id))
+            if not hashes:
                 continue
-            by_hash.setdefault(file_hash, []).append(resource)
+            key = hashes.sha256 or hashes.phash
+            if not key:
+                continue
+            by_hash.setdefault(key, []).append(resource)
 
         deleted_ids: set[int] = set()
         for _, group in by_hash.items():
