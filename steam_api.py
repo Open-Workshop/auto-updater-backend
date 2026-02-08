@@ -370,6 +370,7 @@ def steam_scrape_workshop_page(
     item_id: str,
     timeout: int,
     include_required: bool = True,
+    include_images: bool = True,
 ) -> tuple[List[str], List[str], bool]:
     url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={item_id}"
     if include_required:
@@ -392,6 +393,6 @@ def steam_scrape_workshop_page(
         )
         return [], [], False
     text = response.text
-    images = _extract_images_from_html(text)
+    images = _extract_images_from_html(text) if include_images else []
     deps = _extract_required_items_from_html(text) if include_required else []
     return images, deps, True

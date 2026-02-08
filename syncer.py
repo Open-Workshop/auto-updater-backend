@@ -307,28 +307,57 @@ def sync_mods(
 
             ow_mod = ow_by_source.get(str(workshop_id))
             ow_mod_id = int(ow_mod.get("id")) if ow_mod else None
+            is_existing_mod = ow_mod_id is not None
 
-            images = parse_images(raw_description, details.get("preview_url"), max_screenshots)
+            mod_state = mods_state.get(str(workshop_id), {})
+            cached_images_raw = mod_state.get("image_urls")
+            has_cached_images = isinstance(cached_images_raw, list)
+            cached_images = cached_images_raw if has_cached_images else []
+            reuse_images = has_cached_images and is_existing_mod
+            allow_image_scrape = scrape_preview_images and not is_existing_mod
+            images_incomplete = False
+
+            images: List[str] = []
             page_images: List[str] = []
             page_deps: List[str] = []
             page_ok = True
-            if scrape_preview_images or scrape_required_items:
-                page_images, page_deps, page_ok = steam_scrape_workshop_page(
-                    str(workshop_id),
-                    timeout,
-                    include_required=scrape_required_items,
-                )
-                if not page_ok and ow_mod_id is None:
-                    logging.warning(
-                        "Skipping new workshop %s due to Steam scrape failure",
-                        workshop_id,
+            if reuse_images:
+                images = [
+                    url for url in cached_images if isinstance(url, str) and url
+                ]
+                if scrape_required_items:
+                    page_images, page_deps, page_ok = steam_scrape_workshop_page(
+                        str(workshop_id),
+                        timeout,
+                        include_required=scrape_required_items,
+                        include_images=False,
                     )
-                    continue
-            if scrape_preview_images and page_images:
-                for url in page_images:
-                    if url not in images:
-                        images.append(url)
+            else:
+                images = parse_images(
+                    raw_description, details.get("preview_url"), max_screenshots
+                )
+                if scrape_required_items or allow_image_scrape:
+                    page_images, page_deps, page_ok = steam_scrape_workshop_page(
+                        str(workshop_id),
+                        timeout,
+                        include_required=scrape_required_items,
+                        include_images=allow_image_scrape,
+                    )
+                    if not page_ok and ow_mod_id is None:
+                        logging.warning(
+                            "Skipping new workshop %s due to Steam scrape failure",
+                            workshop_id,
+                        )
+                        continue
+                if allow_image_scrape and page_images:
+                    for url in page_images:
+                        if url not in images:
+                            images.append(url)
+                if is_existing_mod and not has_cached_images:
+                    images_incomplete = True
+
             images = dedupe_images(images)
+            mod_state["image_urls"] = images
             logging.debug(
                 "Steam %s images: %s (preview=%s extra=%s)",
                 workshop_id,
@@ -337,7 +366,6 @@ def sync_mods(
                 "on" if scrape_preview_images else "off",
             )
 
-            mod_state = mods_state.get(str(workshop_id), {})
             previous_updated = int(mod_state.get("steam_updated") or 0)
             need_file = updated != previous_updated or str(workshop_id) not in mods_state
 
@@ -576,7 +604,12 @@ def sync_mods(
                         if (res_type, url) not in current_urls:
                             ow_add_resource(api, "mods", ow_mod_id, res_type, url)
 
-                    if prune_resources:
+                    if prune_resources and images_incomplete:
+                        logging.debug(
+                            "Skip resource prune for %s due to missing image cache",
+                            workshop_id,
+                        )
+                    elif prune_resources:
                         desired_set = set(desired_resources)
                         for (res_type, url), res_id in current_urls.items():
                             if (res_type, url) not in desired_set:
@@ -587,6 +620,7 @@ def sync_mods(
                 "ow_mod_id": ow_mod_id,
                 "steam_updated": updated,
                 "last_sync": utc_now(),
+                "image_urls": mod_state.get("image_urls", []),
                 "resource_urls": mod_state.get("resource_urls", []),
                 "resource_hashes": mod_state.get("resource_hashes", []),
             }
