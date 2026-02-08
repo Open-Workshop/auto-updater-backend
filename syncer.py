@@ -310,7 +310,7 @@ def sync_mods(
             ow_mod_id = int(ow_mod.get("id")) if ow_mod else None
             is_existing_mod = ow_mod_id is not None
 
-            allow_image_scrape = scrape_preview_images and not is_existing_mod
+            allow_image_scrape = (not is_existing_mod) or scrape_preview_images
             images_incomplete = is_existing_mod and not allow_image_scrape
 
             images = parse_images(
