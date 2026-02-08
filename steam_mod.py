@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Mapping, Tuple
+from typing import List, Tuple
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
@@ -295,7 +295,7 @@ class SteamWorkshopClient:
                             return None
                         html_text = await response.text()
                         break
-                except aiohttp.ClientError as exc:
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                     last_exc = exc
                     if attempt >= attempts:
                         logging.warning("Steam page fetch failed for %s: %s", item_id, exc)
@@ -419,7 +419,7 @@ class SteamWorkshopClient:
                                 temp_path.replace(path)
                                 temp_path = None
                                 return (res_type, url, path, digest.hexdigest())
-                        except aiohttp.ClientError as exc:
+                        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                             last_exc = exc
                             if attempt >= attempts:
                                 logging.warning(
