@@ -51,7 +51,6 @@ class Config:
     game_id: int
     mirror_root: str
     steam_root: str
-    state_file: str
     page_size: int
     poll_interval: int
     timeout: int
@@ -97,7 +96,6 @@ def load_config() -> Config:
 
     mirror_root = os.environ.get("OW_MIRROR_DIR", "/data/mirror")
     steam_root = os.environ.get("STEAM_ROOT", f"{mirror_root}/steam")
-    state_file = os.environ.get("OW_STATE_FILE", f"{mirror_root}/state.json")
     page_size = parse_int(os.environ.get("OW_PAGE_SIZE"), DEFAULT_PAGE_SIZE)
     poll_interval = parse_int(os.environ.get("OW_POLL_INTERVAL"), DEFAULT_POLL_INTERVAL)
     timeout = parse_int(os.environ.get("OW_HTTP_TIMEOUT"), DEFAULT_TIMEOUT)
@@ -149,7 +147,6 @@ def load_config() -> Config:
         game_id=game_id,
         mirror_root=mirror_root,
         steam_root=steam_root,
-        state_file=state_file,
         page_size=page_size,
         poll_interval=poll_interval,
         timeout=timeout,

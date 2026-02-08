@@ -20,7 +20,6 @@
 - `OW_API_BASE` — базовый URL API, по умолчанию `https://api.openworkshop.miskler.ru`
 - `OW_MIRROR_DIR` — корень зеркала, по умолчанию `/data/mirror`
 - `STEAM_ROOT` — корень данных steamcmd, по умолчанию `${OW_MIRROR_DIR}/steam`
-- `OW_STATE_FILE` — путь к файлу состояния, по умолчанию `${OW_MIRROR_DIR}/state.json`
 - `OW_PAGE_SIZE` — размер страницы API, по умолчанию `50`
 - `OW_POLL_INTERVAL` — интервал синхронизации в секундах, по умолчанию `600`
 - `OW_HTTP_TIMEOUT` — таймаут запросов, по умолчанию `60`

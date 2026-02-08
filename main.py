@@ -70,7 +70,6 @@ def main() -> int:
 
     mirror_root = Path(cfg.mirror_root)
     steam_root = Path(cfg.steam_root)
-    state_file = Path(cfg.state_file)
 
     logging.info("Using OW game %s for steam app %s", game_id, steam_app_id)
     ensure_dir(mirror_root)
@@ -84,7 +83,6 @@ def main() -> int:
                 game_id,
                 mirror_root,
                 steam_root,
-                state_file,
                 cfg.page_size,
                 cfg.timeout,
                 cfg.steam_max_pages,

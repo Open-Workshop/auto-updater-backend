@@ -1,6 +1,5 @@
 import hashlib
 import html
-import json
 import logging
 import mimetypes
 import os
@@ -8,9 +7,8 @@ import random
 import re
 import time
 import zipfile
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Dict, List
 from urllib.parse import urlparse
 
 import requests
@@ -24,10 +22,6 @@ def set_download_request_policy(retries: int, backoff: float) -> None:
     global _DOWNLOAD_HTTP_RETRIES, _DOWNLOAD_HTTP_BACKOFF
     _DOWNLOAD_HTTP_RETRIES = max(0, int(retries))
     _DOWNLOAD_HTTP_BACKOFF = max(0.0, float(backoff))
-
-
-def utc_now() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
 def ensure_dir(path: Path) -> None:
@@ -278,26 +272,3 @@ def download_url_to_file_with_hash(
     if last_exc:
         logging.warning("Failed to download %s: %s", url, last_exc)
     return None, None
-
-
-def load_state(path: Path) -> Dict[str, Any]:
-    if not path.exists():
-        return {"version": 2, "mods": {}}
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        if not isinstance(data, dict) or "mods" not in data:
-            raise ValueError("Invalid state format")
-        if data.get("version") != 2:
-            data = {"version": 2, "mods": {}}
-        return data
-    except Exception:
-        return {"version": 2, "mods": {}}
-
-
-def save_state(path: Path, state: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(".tmp")
-    with temp_path.open("w", encoding="utf-8") as handle:
-        json.dump(state, handle, ensure_ascii=True, indent=2, sort_keys=True)
-    temp_path.replace(path)

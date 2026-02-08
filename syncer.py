@@ -1,5 +1,6 @@
 import logging
 import time
+from datetime import datetime, timezone
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -38,16 +39,11 @@ from steam_api import (
 )
 from steamcmd import download_steam_mod
 from utils import (
-    download_url_to_file,
     download_url_to_file_with_hash,
     has_files,
-    load_state,
-    normalize_image_url,
     parse_images,
-    save_state,
     strip_bbcode,
     truncate,
-    utc_now,
     zip_directory,
     dedupe_images,
 )
@@ -90,13 +86,24 @@ def ensure_game(
     return game_id
 
 
+def _parse_ow_datetime(value: str | None) -> int:
+    if not value:
+        return 0
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
 def sync_mods(
     api: ApiClient,
     steam_app_id: int,
     game_id: int,
     mirror_root: Path,
     steam_root: Path,
-    state_file: Path,
     page_size: int,
     timeout: int,
     max_pages: int,
@@ -118,8 +125,6 @@ def sync_mods(
     language: str,
     steamcmd_path: Path,
 ) -> None:
-    state = load_state(state_file)
-    mods_state: Dict[str, Any] = state.setdefault("mods", {})
     steam_stats_reset()
 
     ow_mods = ow_list_mods(api, game_id, page_size)
@@ -241,30 +246,24 @@ def sync_mods(
             without_author,
             archive_path,
         )
-        ow_by_source[str(item_id)] = {"id": mod_id, "source_id": int(item_id)}
-        mod_state = {
-            "ow_mod_id": mod_id,
-            "steam_updated": int(details.get("time_updated") or 0),
-            "last_sync": utc_now(),
+        ow_by_source[str(item_id)] = {
+            "id": mod_id,
+            "source_id": int(item_id),
+            "date_update_file": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         if sync_resources and preview_url:
             if upload_resource_files:
                 dest_dir = mirror_root / "resources" / str(item_id)
-                file_path, file_hash = download_url_to_file_with_hash(
+                file_path, _ = download_url_to_file_with_hash(
                     preview_url,
                     dest_dir,
                     "logo",
                     timeout,
                 )
-                if file_path and file_hash:
-                    if ow_add_resource_file(api, "mods", mod_id, "logo", file_path):
-                        mod_state["resource_urls"] = [normalize_image_url(preview_url)]
-                        mod_state["resource_hashes"] = [file_hash]
+                if file_path:
+                    ow_add_resource_file(api, "mods", mod_id, "logo", file_path)
             else:
                 ow_add_resource(api, "mods", mod_id, "logo", preview_url)
-                mod_state["resource_urls"] = [normalize_image_url(preview_url)]
-        mods_state[str(item_id)] = mod_state
-        save_state(state_file, state)
         return mod_id
 
     while True:
@@ -295,6 +294,8 @@ def sync_mods(
             title = details.get("title", "")
             raw_description = details.get("description", "")
             updated = int(details.get("time_updated") or 0)
+            created = int(details.get("time_created") or 0)
+            steam_latest_ts = max(updated, created)
             tags = [t.get("tag") for t in details.get("tags", []) if t.get("tag")]
             tags = [t.strip() for t in tags if t and t.strip()]
             logging.debug("Steam %s tags: %s", workshop_id, tags)
@@ -309,55 +310,34 @@ def sync_mods(
             ow_mod_id = int(ow_mod.get("id")) if ow_mod else None
             is_existing_mod = ow_mod_id is not None
 
-            mod_state = mods_state.get(str(workshop_id), {})
-            cached_images_raw = mod_state.get("image_urls")
-            has_cached_images = isinstance(cached_images_raw, list)
-            cached_images = cached_images_raw if has_cached_images else []
-            reuse_images = has_cached_images and is_existing_mod
             allow_image_scrape = scrape_preview_images and not is_existing_mod
-            images_incomplete = False
+            images_incomplete = is_existing_mod and not allow_image_scrape
 
-            images: List[str] = []
+            images = parse_images(
+                raw_description, details.get("preview_url"), max_screenshots
+            )
             page_images: List[str] = []
             page_deps: List[str] = []
             page_ok = True
-            if reuse_images:
-                images = [
-                    url for url in cached_images if isinstance(url, str) and url
-                ]
-                if scrape_required_items:
-                    page_images, page_deps, page_ok = steam_scrape_workshop_page(
-                        str(workshop_id),
-                        timeout,
-                        include_required=scrape_required_items,
-                        include_images=False,
-                    )
-            else:
-                images = parse_images(
-                    raw_description, details.get("preview_url"), max_screenshots
+            if scrape_required_items or allow_image_scrape:
+                page_images, page_deps, page_ok = steam_scrape_workshop_page(
+                    str(workshop_id),
+                    timeout,
+                    include_required=scrape_required_items,
+                    include_images=allow_image_scrape,
                 )
-                if scrape_required_items or allow_image_scrape:
-                    page_images, page_deps, page_ok = steam_scrape_workshop_page(
-                        str(workshop_id),
-                        timeout,
-                        include_required=scrape_required_items,
-                        include_images=allow_image_scrape,
+                if not page_ok and ow_mod_id is None:
+                    logging.warning(
+                        "Skipping new workshop %s due to Steam scrape failure",
+                        workshop_id,
                     )
-                    if not page_ok and ow_mod_id is None:
-                        logging.warning(
-                            "Skipping new workshop %s due to Steam scrape failure",
-                            workshop_id,
-                        )
-                        continue
-                if allow_image_scrape and page_images:
-                    for url in page_images:
-                        if url not in images:
-                            images.append(url)
-                if is_existing_mod and not has_cached_images:
-                    images_incomplete = True
+                    continue
+            if allow_image_scrape and page_images:
+                for url in page_images:
+                    if url not in images:
+                        images.append(url)
 
             images = dedupe_images(images)
-            mod_state["image_urls"] = images
             logging.debug(
                 "Steam %s images: %s (preview=%s extra=%s)",
                 workshop_id,
@@ -366,12 +346,17 @@ def sync_mods(
                 "on" if scrape_preview_images else "off",
             )
 
-            previous_updated = int(mod_state.get("steam_updated") or 0)
-            need_file = updated != previous_updated or str(workshop_id) not in mods_state
-
             if ow_mod_id is None:
                 ow_mod_id = ensure_mod_exists(str(workshop_id), details)
             else:
+                ow_updated_file_ts = _parse_ow_datetime(
+                    (ow_mod.get("date_update_file") or ow_mod.get("date_creation"))
+                    if ow_mod
+                    else None
+                )
+                ow_created_ts = _parse_ow_datetime(ow_mod.get("date_creation") if ow_mod else None)
+                ow_latest_ts = max(ow_updated_file_ts, ow_created_ts)
+                need_file = steam_latest_ts > ow_latest_ts
                 try:
                     ow_details = ow_get_mod_details(api, ow_mod_id)
                 except Exception as exc:
@@ -536,18 +521,6 @@ def sync_mods(
                                 "Resource pruning is disabled when OW_RESOURCE_UPLOAD_FILES=true"
                             )
                             warned_resource_prune = True
-                    resource_state = mod_state.get("resource_urls", [])
-                    if not isinstance(resource_state, list):
-                        resource_state = []
-                    resource_state = [
-                        normalize_image_url(u)
-                        for u in resource_state
-                        if isinstance(u, str)
-                    ]
-                    resource_hashes = mod_state.get("resource_hashes", [])
-                    if not isinstance(resource_hashes, list):
-                        resource_hashes = []
-                    seen_hashes = {h for h in resource_hashes if isinstance(h, str) and h}
                     current_logo = any(r.get("type") == "logo" for r in current_resources)
                     current_screens = sum(
                         1 for r in current_resources if r.get("type") == "screenshot"
@@ -564,41 +537,34 @@ def sync_mods(
                         current_screens < desired_screens
                     )
                     if needs_fill:
-                        resource_state = []
-                        resource_hashes = []
-                        seen_hashes = set()
-                    for idx_img, url in enumerate(images):
-                        if url in resource_state:
-                            continue
-                        res_type = "logo" if idx_img == 0 else "screenshot"
-                        if res_type == "logo" and current_logo:
-                            continue
-                        if res_type == "screenshot" and not needs_fill and current_screens >= desired_screens:
-                            continue
-                        dest_dir = mirror_root / "resources" / str(workshop_id)
-                        file_path, file_hash = download_url_to_file_with_hash(
-                            url,
-                            dest_dir,
-                            f"{idx_img}",
-                            timeout,
-                        )
-                        if not file_path or not file_hash:
-                            continue
-                        if file_hash in seen_hashes:
-                            resource_state.append(url)
-                            continue
-                        if ow_add_resource_file(
-                            api, "mods", ow_mod_id, res_type, file_path
-                        ):
-                            resource_state.append(url)
-                            resource_hashes.append(file_hash)
-                            seen_hashes.add(file_hash)
-                            if res_type == "logo":
-                                current_logo = True
-                            else:
-                                current_screens += 1
-                    mod_state["resource_urls"] = resource_state
-                    mod_state["resource_hashes"] = resource_hashes
+                        seen_hashes: set[str] = set()
+                        for idx_img, url in enumerate(images):
+                            if current_logo and current_screens >= desired_screens:
+                                break
+                            res_type = "logo" if idx_img == 0 else "screenshot"
+                            if res_type == "logo" and current_logo:
+                                continue
+                            if res_type == "screenshot" and current_screens >= desired_screens:
+                                continue
+                            dest_dir = mirror_root / "resources" / str(workshop_id)
+                            file_path, file_hash = download_url_to_file_with_hash(
+                                url,
+                                dest_dir,
+                                f"{idx_img}",
+                                timeout,
+                            )
+                            if not file_path or not file_hash:
+                                continue
+                            if file_hash in seen_hashes:
+                                continue
+                            if ow_add_resource_file(
+                                api, "mods", ow_mod_id, res_type, file_path
+                            ):
+                                seen_hashes.add(file_hash)
+                                if res_type == "logo":
+                                    current_logo = True
+                                else:
+                                    current_screens += 1
                 else:
                     for res_type, url in desired_resources:
                         if (res_type, url) not in current_urls:
@@ -615,16 +581,6 @@ def sync_mods(
                             if (res_type, url) not in desired_set:
                                 if res_id is not None:
                                     ow_delete_resource(api, int(res_id))
-
-            mods_state[str(workshop_id)] = {
-                "ow_mod_id": ow_mod_id,
-                "steam_updated": updated,
-                "last_sync": utc_now(),
-                "image_urls": mod_state.get("image_urls", []),
-                "resource_urls": mod_state.get("resource_urls", []),
-                "resource_hashes": mod_state.get("resource_hashes", []),
-            }
-            save_state(state_file, state)
 
     stats = steam_stats_snapshot()
     if stats.get("total"):
