@@ -11,7 +11,7 @@ from steam_api import (
     set_steam_request_policy,
     set_steam_proxy_pool,
 )
-from utils import ensure_dir
+from utils import ensure_dir, set_download_request_policy
 
 
 def main() -> int:
@@ -26,6 +26,7 @@ def main() -> int:
     set_steam_request_policy(
         cfg.steam_http_retries, cfg.steam_http_backoff, cfg.steam_request_delay
     )
+    set_download_request_policy(cfg.steam_http_retries, cfg.steam_http_backoff)
     set_steam_proxy_pool(cfg.steam_proxy_pool)
     if not cfg.login_name or not cfg.password:
         logging.error("OW_LOGIN and OW_PASSWORD are required")

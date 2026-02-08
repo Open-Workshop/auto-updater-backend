@@ -4,7 +4,9 @@ import json
 import logging
 import mimetypes
 import os
+import random
 import re
+import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +14,16 @@ from typing import Any, Dict, List
 from urllib.parse import urlparse
 
 import requests
+
+_DOWNLOAD_HTTP_RETRIES = 0
+_DOWNLOAD_HTTP_BACKOFF = 0.0
+_DOWNLOAD_RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+
+def set_download_request_policy(retries: int, backoff: float) -> None:
+    global _DOWNLOAD_HTTP_RETRIES, _DOWNLOAD_HTTP_BACKOFF
+    _DOWNLOAD_HTTP_RETRIES = max(0, int(retries))
+    _DOWNLOAD_HTTP_BACKOFF = max(0.0, float(backoff))
 
 
 def utc_now() -> str:
@@ -130,51 +142,142 @@ def _extension_from_headers(headers: Dict[str, str]) -> str:
     return ext
 
 
+def _sleep_download_backoff(attempt: int, exc: Exception) -> None:
+    if _DOWNLOAD_HTTP_BACKOFF <= 0:
+        return
+    delay = _DOWNLOAD_HTTP_BACKOFF * (2 ** (attempt - 1))
+    delay += random.uniform(0.0, _DOWNLOAD_HTTP_BACKOFF)
+    logging.warning(
+        "Download retry %s/%s after error: %s (sleep %.1fs)",
+        attempt,
+        _DOWNLOAD_HTTP_RETRIES,
+        exc,
+        delay,
+    )
+    time.sleep(delay)
+
+
 def download_url_to_file(url: str, dest_dir: Path, basename: str, timeout: int) -> Path | None:
     ensure_dir(dest_dir)
-    response = requests.get(url, stream=True, timeout=timeout)
-    if response.status_code != 200:
-        logging.warning(
-            "Failed to download %s: %s",
-            url,
-            response.status_code,
-        )
-        return None
-    ext = _extension_from_headers(response.headers)
-    if not ext:
-        ext = ".bin"
-    path = dest_dir / f"{basename}{ext}"
-    with path.open("wb") as handle:
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
-            if chunk:
-                handle.write(chunk)
-    return path
+    attempts = _DOWNLOAD_HTTP_RETRIES + 1
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        response = None
+        temp_path: Path | None = None
+        try:
+            response = requests.get(url, stream=True, timeout=timeout)
+            if response.status_code in _DOWNLOAD_RETRY_STATUSES and attempt < attempts:
+                retry_after = response.headers.get("retry-after")
+                if retry_after:
+                    try:
+                        time.sleep(float(retry_after))
+                    except ValueError:
+                        pass
+                _sleep_download_backoff(
+                    attempt,
+                    RuntimeError(f"HTTP {response.status_code}"),
+                )
+                continue
+            if response.status_code != 200:
+                logging.warning(
+                    "Failed to download %s: %s",
+                    url,
+                    response.status_code,
+                )
+                return None
+            ext = _extension_from_headers(response.headers)
+            if not ext:
+                ext = ".bin"
+            path = dest_dir / f"{basename}{ext}"
+            temp_path = path.with_suffix(f"{path.suffix}.part")
+            with temp_path.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        handle.write(chunk)
+            temp_path.replace(path)
+            return path
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt >= attempts:
+                logging.warning("Failed to download %s: %s", url, exc)
+                return None
+            _sleep_download_backoff(attempt, exc)
+            continue
+        finally:
+            if response is not None:
+                response.close()
+            if temp_path and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except FileNotFoundError:
+                    pass
+    if last_exc:
+        logging.warning("Failed to download %s: %s", url, last_exc)
+    return None
 
 
 def download_url_to_file_with_hash(
     url: str, dest_dir: Path, basename: str, timeout: int
 ) -> tuple[Path | None, str | None]:
     ensure_dir(dest_dir)
-    response = requests.get(url, stream=True, timeout=timeout)
-    if response.status_code != 200:
-        logging.warning(
-            "Failed to download %s: %s",
-            url,
-            response.status_code,
-        )
-        return None, None
-    ext = _extension_from_headers(response.headers)
-    if not ext:
-        ext = ".bin"
-    path = dest_dir / f"{basename}{ext}"
-    hasher = hashlib.sha256()
-    with path.open("wb") as handle:
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
-            if not chunk:
+    attempts = _DOWNLOAD_HTTP_RETRIES + 1
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        response = None
+        temp_path: Path | None = None
+        try:
+            response = requests.get(url, stream=True, timeout=timeout)
+            if response.status_code in _DOWNLOAD_RETRY_STATUSES and attempt < attempts:
+                retry_after = response.headers.get("retry-after")
+                if retry_after:
+                    try:
+                        time.sleep(float(retry_after))
+                    except ValueError:
+                        pass
+                _sleep_download_backoff(
+                    attempt,
+                    RuntimeError(f"HTTP {response.status_code}"),
+                )
                 continue
-            hasher.update(chunk)
-            handle.write(chunk)
-    return path, hasher.hexdigest()
+            if response.status_code != 200:
+                logging.warning(
+                    "Failed to download %s: %s",
+                    url,
+                    response.status_code,
+                )
+                return None, None
+            ext = _extension_from_headers(response.headers)
+            if not ext:
+                ext = ".bin"
+            path = dest_dir / f"{basename}{ext}"
+            temp_path = path.with_suffix(f"{path.suffix}.part")
+            hasher = hashlib.sha256()
+            with temp_path.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    hasher.update(chunk)
+                    handle.write(chunk)
+            temp_path.replace(path)
+            return path, hasher.hexdigest()
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt >= attempts:
+                logging.warning("Failed to download %s: %s", url, exc)
+                return None, None
+            _sleep_download_backoff(attempt, exc)
+            continue
+        finally:
+            if response is not None:
+                response.close()
+            if temp_path and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except FileNotFoundError:
+                    pass
+    if last_exc:
+        logging.warning("Failed to download %s: %s", url, last_exc)
+    return None, None
 
 
 def load_state(path: Path) -> Dict[str, Any]:

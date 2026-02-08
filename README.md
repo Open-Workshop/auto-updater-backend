@@ -29,8 +29,8 @@
 - `OW_RUN_ONCE` — выполнить одну синхронизацию и завершить (`true/false`)
 - `OW_LOG_LEVEL` — уровень логирования (`INFO`, `DEBUG`), по умолчанию `INFO`
 - `OW_LOG_STEAM_REQUESTS` — логировать каждый запрос к Steam (`true/false`)
-- `OW_STEAM_HTTP_RETRIES` — ретраи для запросов к Steam, по умолчанию `2`
-- `OW_STEAM_HTTP_BACKOFF` — базовая задержка backoff для Steam, по умолчанию `1.0`
+- `OW_STEAM_HTTP_RETRIES` — ретраи для запросов к Steam и загрузки изображений, по умолчанию `2`
+- `OW_STEAM_HTTP_BACKOFF` — базовая задержка backoff для Steam и загрузки изображений, по умолчанию `1.0`
 - `OW_STEAM_REQUEST_DELAY` — минимальная задержка между запросами к Steam (сек), по умолчанию `0.0`
 - `OW_STEAM_PROXY_POOL` — список прокси для Steam (через запятую или пробел), например `http://user:pass@host:port,socks5://host:1080`
 
