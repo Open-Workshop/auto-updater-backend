@@ -1,4 +1,3 @@
-import html
 import logging
 import random
 import re
@@ -7,8 +6,6 @@ from typing import Any, Dict, List
 from urllib.parse import urlparse
 
 import requests
-
-from utils import normalize_image_url
 
 _LOG_STEAM_REQUESTS = False
 _STEAM_STATS = {"total": 0, "success": 0, "failed": 0, "by_endpoint": {}}
@@ -217,53 +214,6 @@ def steam_get_app_details(app_id: int, language: str, timeout: int) -> Dict[str,
     }
 
 
-def steam_list_workshop_ids_html(
-    app_id: int,
-    max_pages: int,
-    max_items: int,
-    delay: float,
-    language: str,
-    timeout: int,
-) -> List[str]:
-    ids: List[str] = []
-    seen = set()
-    page = 1
-    while True:
-        if max_pages > 0 and page > max_pages:
-            break
-        url = "https://steamcommunity.com/workshop/browse/"
-        params = {
-            "appid": app_id,
-            "browsesort": "mostrecent",
-            "section": "readytouseitems",
-            "p": page,
-            "l": language,
-        }
-        response = _steam_request(
-            "get",
-            url,
-            params=params,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=timeout,
-        )
-        if response.status_code != 200:
-            break
-        page_ids = re.findall(r"data-publishedfileid=\"(\d+)\"", response.text)
-        if not page_ids:
-            break
-        for item_id in page_ids:
-            if item_id in seen:
-                continue
-            seen.add(item_id)
-            ids.append(item_id)
-            if max_items > 0 and len(ids) >= max_items:
-                return ids
-        page += 1
-        if delay > 0:
-            time.sleep(delay)
-    return ids
-
-
 def steam_fetch_workshop_page_ids_html(
     app_id: int,
     page: int,
@@ -289,110 +239,3 @@ def steam_fetch_workshop_page_ids_html(
         return []
     return re.findall(r"data-publishedfileid=\"(\d+)\"", response.text)
 
-
-def steam_get_published_file_details(
-    ids: List[str], timeout: int
-) -> Dict[str, Dict[str, Any]]:
-    if not ids:
-        return {}
-    params: Dict[str, Any] = {"itemcount": len(ids)}
-    for idx, item_id in enumerate(ids):
-        params[f"publishedfileids[{idx}]"] = item_id
-    response = _steam_request(
-        "post",
-        "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/",
-        data=params,
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    payload = response.json().get("response", {})
-    details: Dict[str, Dict[str, Any]] = {}
-    for entry in payload.get("publishedfiledetails", []):
-        file_id = entry.get("publishedfileid")
-        if file_id:
-            details[str(file_id)] = entry
-    return details
-
-
-def _extract_images_from_html(text: str) -> List[str]:
-    normalized: List[str] = []
-    seen = set()
-
-    def add_url(raw: str) -> None:
-        url = normalize_image_url(html.unescape(raw))
-        if not url or url in seen:
-            return
-        seen.add(url)
-        normalized.append(url)
-
-    for key in ("rgFullScreenshotURLs", "rgScreenshotURLs"):
-        match = re.search(rf"{key}\s*=\s*(\[.*?\])", text, flags=re.S)
-        if match:
-            block = match.group(1)
-            for raw in re.findall(r"https?://[^\"'\s>]+", block):
-                add_url(raw)
-
-    for raw in re.findall(
-        r"highlight_strip_item[^>]*highlight_strip_screenshot[^>]*>\s*<img[^>]+src=\"([^\"]+)\"",
-        text,
-        flags=re.I,
-    ):
-        add_url(raw)
-
-    for raw in re.findall(
-        r"https?://(?:images\.steamusercontent\.com|steamusercontent-a\.akamaihd\.net|steamuserimages-a\.akamaihd\.net)/ugc/[^\"'\s>]+",
-        text,
-        flags=re.I,
-    ):
-        add_url(raw)
-
-    return normalized
-
-
-def _extract_required_items_from_html(text: str) -> List[str]:
-    required_block_match = re.search(
-        r"<div class=\"requiredItemsContainer\" id=\"RequiredItems\">(.*?)</div>",
-        text,
-        flags=re.S | re.I,
-    )
-    block = required_block_match.group(1) if required_block_match else text
-    ids = set()
-    for pat in [
-        r"workshop/filedetails/\?id=(\d+)",
-        r"sharedfiles/filedetails/\?id=(\d+)",
-    ]:
-        for match in re.findall(pat, block):
-            ids.add(match)
-    return list(ids)
-
-
-def steam_scrape_workshop_page(
-    item_id: str,
-    timeout: int,
-    include_required: bool = True,
-    include_images: bool = True,
-) -> tuple[List[str], List[str], bool]:
-    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={item_id}"
-    if include_required:
-        url += "&requireditems=1"
-    try:
-        response = _steam_request(
-            "get",
-            url,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=timeout,
-        )
-    except requests.RequestException as exc:
-        logging.warning("Steam scrape failed for %s: %s", item_id, exc)
-        return [], [], False
-    if response.status_code != 200:
-        logging.warning(
-            "Steam scrape failed for %s: HTTP %s",
-            item_id,
-            response.status_code,
-        )
-        return [], [], False
-    text = response.text
-    images = _extract_images_from_html(text) if include_images else []
-    deps = _extract_required_items_from_html(text) if include_required else []
-    return images, deps, True

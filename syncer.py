@@ -1,9 +1,13 @@
+import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timezone
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import aiohttp
 
 from ow_api import (
     ApiClient,
@@ -22,7 +26,6 @@ from ow_api import (
     ow_edit_mod,
     ow_get_game,
     ow_get_mod_dependencies,
-    ow_get_mod_details,
     ow_get_mod_resources,
     ow_get_mod_tags,
     ow_list_games_by_source,
@@ -31,17 +34,15 @@ from ow_api import (
 )
 from steam_api import (
     steam_get_app_details,
-    steam_get_published_file_details,
     steam_fetch_workshop_page_ids_html,
-    steam_scrape_workshop_page,
     steam_stats_reset,
     steam_stats_snapshot,
 )
+from steam_mod import SteamMod
 from steamcmd import download_steam_mod
 from utils import (
-    download_url_to_file_with_hash,
+    ensure_dir,
     has_files,
-    parse_images,
     strip_bbcode,
     truncate,
     zip_directory,
@@ -96,6 +97,183 @@ def _parse_ow_datetime(value: str | None) -> int:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return int(dt.timestamp())
+
+
+async def _load_steam_mods_sequential(
+    item_ids: List[str],
+    timeout: int,
+    language: str,
+) -> Dict[str, SteamMod]:
+    timeout_cfg = aiohttp.ClientTimeout(total=timeout)
+    results: Dict[str, SteamMod] = {}
+    async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
+        for item_id in item_ids:
+            mod = SteamMod(item_id)
+            ok = await mod.load(timeout=timeout, session=session, language=language)
+            if not ok:
+                logging.warning("Steam page parse failed for %s", item_id)
+                continue
+            results[str(item_id)] = mod
+    return results
+
+
+def _load_steam_mods(
+    item_ids: List[str],
+    timeout: int,
+    language: str,
+) -> Dict[str, SteamMod]:
+    if not item_ids:
+        return {}
+    return asyncio.run(_load_steam_mods_sequential(item_ids, timeout, language))
+
+
+def _load_hash_cache(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {"version": 1, "resources": {}}
+    try:
+        payload = json.loads(path.read_text("utf-8"))
+    except Exception:
+        return {"version": 1, "resources": {}}
+    if not isinstance(payload, dict):
+        return {"version": 1, "resources": {}}
+    resources = payload.get("resources")
+    if not isinstance(resources, dict):
+        payload["resources"] = {}
+    if "version" not in payload:
+        payload["version"] = 1
+    return payload
+
+
+def _save_hash_cache(path: Path, cache: Dict[str, Any]) -> None:
+    ensure_dir(path.parent)
+    try:
+        path.write_text(json.dumps(cache, ensure_ascii=True, indent=2), "utf-8")
+    except Exception as exc:
+        logging.warning("Failed to write hash cache %s: %s", path, exc)
+
+
+def _build_resource_hashes(
+    mod: SteamMod,
+    resources: List[Dict[str, Any]],
+    dest_dir: Path,
+    timeout: int,
+) -> tuple[Dict[int, str], Dict[str, Any]]:
+    cache_path = dest_dir / "resource_hashes.json"
+    cache = _load_hash_cache(cache_path)
+    cached_resources = cache.get("resources")
+    if not isinstance(cached_resources, dict):
+        cached_resources = {}
+        cache["resources"] = cached_resources
+
+    valid_ids = {
+        str(res_id)
+        for res_id in (r.get("id") for r in resources)
+        if res_id is not None
+    }
+    for cached_id in list(cached_resources.keys()):
+        if cached_id not in valid_ids:
+            cached_resources.pop(cached_id, None)
+
+    hashes_by_id: Dict[int, str] = {}
+    url_to_ids: Dict[str, List[int]] = {}
+    for resource in resources:
+        res_id = resource.get("id")
+        url = resource.get("url") or ""
+        if res_id is None or not url:
+            continue
+        cached_entry = cached_resources.get(str(res_id))
+        if (
+            isinstance(cached_entry, dict)
+            and cached_entry.get("url") == url
+            and cached_entry.get("hash")
+        ):
+            hashes_by_id[int(res_id)] = str(cached_entry["hash"])
+            continue
+        url_to_ids.setdefault(url, []).append(int(res_id))
+
+    if url_to_ids:
+        targets: List[tuple[str, str, str]] = []
+        for idx, url in enumerate(url_to_ids.keys()):
+            targets.append(("existing", url, f"existing_{idx}"))
+        downloads = _download_steam_images(mod, targets, dest_dir, timeout)
+        for _, url, file_path, file_hash in downloads:
+            if not file_hash:
+                continue
+            for res_id in url_to_ids.get(url, []):
+                hashes_by_id[res_id] = file_hash
+                cached_resources[str(res_id)] = {"url": url, "hash": file_hash}
+            try:
+                file_path.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                logging.debug("Failed to remove hash temp %s", file_path)
+
+    _save_hash_cache(cache_path, cache)
+    return hashes_by_id, cache
+
+
+def _prune_duplicate_resources(
+    api: ApiClient,
+    resources: List[Dict[str, Any]],
+    hashes_by_id: Dict[int, str],
+) -> set[int]:
+    by_hash: Dict[str, List[Dict[str, Any]]] = {}
+    for resource in resources:
+        res_id = resource.get("id")
+        if res_id is None:
+            continue
+        file_hash = hashes_by_id.get(int(res_id))
+        if not file_hash:
+            continue
+        by_hash.setdefault(file_hash, []).append(resource)
+
+    deleted_ids: set[int] = set()
+    for _, group in by_hash.items():
+        if len(group) <= 1:
+            continue
+        keep = None
+        for resource in group:
+            if resource.get("type") == "logo":
+                keep = resource
+                break
+        if keep is None:
+            keep = group[0]
+        for resource in group:
+            if resource is keep:
+                continue
+            res_id = resource.get("id")
+            if res_id is None:
+                continue
+            ow_delete_resource(api, int(res_id))
+            deleted_ids.add(int(res_id))
+    return deleted_ids
+
+
+async def _download_steam_images_sequential(
+    mod: SteamMod,
+    targets: List[tuple[str, str, str]],
+    dest_dir: Path,
+    timeout: int,
+) -> List[tuple[str, str, Path, str]]:
+    return await mod.download_images(
+        dest_dir,
+        targets,
+        timeout=timeout,
+    )
+
+
+def _download_steam_images(
+    mod: SteamMod,
+    targets: List[tuple[str, str, str]],
+    dest_dir: Path,
+    timeout: int,
+) -> List[tuple[str, str, Path, str]]:
+    if not targets:
+        return []
+    return asyncio.run(
+        _download_steam_images_sequential(mod, targets, dest_dir, timeout)
+    )
 
 
 def sync_mods(
@@ -187,29 +365,29 @@ def sync_mods(
                 tag_cache[str(name).lower()] = int(tag_id)
                 tag_id_to_name[int(tag_id)] = str(name)
 
-    steam_details_cache: Dict[str, Dict[str, Any]] = {}
-    warned_resource_prune = False
+    steam_mod_cache: Dict[str, SteamMod] = {}
+    # resource hash cache handles dedupe/prune when uploading files
 
-    def get_details(item_id: str) -> Optional[Dict[str, Any]]:
-        if item_id in steam_details_cache:
-            return steam_details_cache[item_id]
-        details = steam_get_published_file_details([item_id], timeout)
-        if item_id in details:
-            steam_details_cache[item_id] = details[item_id]
-            return details[item_id]
+    def get_mod(item_id: str) -> Optional[SteamMod]:
+        if item_id in steam_mod_cache:
+            return steam_mod_cache[item_id]
+        mods = _load_steam_mods([item_id], timeout, language)
+        mod = mods.get(str(item_id))
+        if mod:
+            steam_mod_cache[str(item_id)] = mod
+            return mod
         return None
 
-    def ensure_mod_exists(item_id: str, details: Optional[Dict[str, Any]] = None) -> Optional[int]:
+    def ensure_mod_exists(item_id: str, mod: Optional[SteamMod] = None) -> Optional[int]:
         existing = ow_by_source.get(str(item_id))
         if existing:
             return int(existing.get("id"))
-        if details is None:
-            details = get_details(str(item_id))
-        if not details or int(details.get("result", 1)) != 1:
+        if mod is None:
+            mod = get_mod(str(item_id))
+        if not mod:
             return None
-        title = details.get("title", "")
-        description = details.get("description", "")
-        preview_url = details.get("preview_url") or ""
+        title = mod.title
+        description = mod.description
         short_desc = strip_bbcode(description) or title
         short_desc = truncate(short_desc, 256)
         description = truncate(description, 10000)
@@ -251,19 +429,20 @@ def sync_mods(
             "source_id": int(item_id),
             "date_update_file": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        if sync_resources and preview_url:
+        if sync_resources and mod.logo:
             if upload_resource_files:
                 dest_dir = mirror_root / "resources" / str(item_id)
-                file_path, _ = download_url_to_file_with_hash(
-                    preview_url,
+                downloads = _download_steam_images(
+                    mod,
+                    [("logo", mod.logo, "logo")],
                     dest_dir,
-                    "logo",
                     timeout,
                 )
-                if file_path:
+                for _, _, file_path, _ in downloads:
                     ow_add_resource_file(api, "mods", mod_id, "logo", file_path)
+                    break
             else:
-                ow_add_resource(api, "mods", mod_id, "logo", preview_url)
+                ow_add_resource(api, "mods", mod_id, "logo", mod.logo)
         return mod_id
 
     while True:
@@ -280,24 +459,20 @@ def sync_mods(
         batch_ids: List[str] = []
         while queue and len(batch_ids) < 30:
             batch_ids.append(queue.popleft())
-        details_map = steam_get_published_file_details(batch_ids, timeout)
-        steam_details_cache.update(details_map)
+        mod_map = _load_steam_mods(batch_ids, timeout, language)
+        steam_mod_cache.update(mod_map)
         for workshop_id in batch_ids:
-            details = steam_details_cache.get(str(workshop_id))
-            if not details:
-                logging.warning("Steam details missing for %s", workshop_id)
-                continue
-            if int(details.get("result", 1)) != 1:
-                logging.warning("Steam details error for %s", workshop_id)
+            mod = steam_mod_cache.get(str(workshop_id))
+            if not mod:
+                logging.warning("Steam page missing for %s", workshop_id)
                 continue
 
-            title = details.get("title", "")
-            raw_description = details.get("description", "")
-            updated = int(details.get("time_updated") or 0)
-            created = int(details.get("time_created") or 0)
+            title = mod.title
+            raw_description = mod.description
+            updated = mod.updated_ts
+            created = mod.created_ts
             steam_latest_ts = max(updated, created)
-            tags = [t.get("tag") for t in details.get("tags", []) if t.get("tag")]
-            tags = [t.strip() for t in tags if t and t.strip()]
+            tags = mod.tags
             logging.debug("Steam %s tags: %s", workshop_id, tags)
 
             short_desc = strip_bbcode(raw_description)
@@ -313,41 +488,33 @@ def sync_mods(
             allow_image_scrape = (not is_existing_mod) or scrape_preview_images
             images_incomplete = is_existing_mod and not allow_image_scrape
 
-            images = parse_images(
-                raw_description, details.get("preview_url"), max_screenshots
-            )
-            page_images: List[str] = []
-            page_deps: List[str] = []
-            page_ok = True
-            if scrape_required_items or allow_image_scrape:
-                page_images, page_deps, page_ok = steam_scrape_workshop_page(
-                    str(workshop_id),
-                    timeout,
-                    include_required=scrape_required_items,
-                    include_images=allow_image_scrape,
-                )
-                if not page_ok and ow_mod_id is None:
-                    logging.warning(
-                        "Skipping new workshop %s due to Steam scrape failure",
-                        workshop_id,
-                    )
-                    continue
-            if allow_image_scrape and page_images:
-                for url in page_images:
-                    if url not in images:
-                        images.append(url)
-
+            page_deps = mod.dependencies
+            page_ok = mod.page_ok
+            images: List[str] = []
+            if mod.logo:
+                images.append(mod.logo)
+            if allow_image_scrape:
+                images.extend(mod.screenshots)
+            images = [url for url in images if url]
             images = dedupe_images(images)
+            if not allow_image_scrape and mod.logo:
+                images = [mod.logo]
+            if max_screenshots > 0 and images:
+                logo = images[0]
+                screenshots = images[1:]
+                if len(screenshots) > max_screenshots:
+                    screenshots = screenshots[:max_screenshots]
+                images = [logo] + screenshots
             logging.debug(
-                "Steam %s images: %s (preview=%s extra=%s)",
+                "Steam %s images: %s (logo=%s extra=%s)",
                 workshop_id,
                 len(images),
-                bool(details.get("preview_url")),
-                "on" if scrape_preview_images else "off",
+                bool(mod.logo),
+                "on" if allow_image_scrape else "off",
             )
 
             if ow_mod_id is None:
-                ow_mod_id = ensure_mod_exists(str(workshop_id), details)
+                ow_mod_id = ensure_mod_exists(str(workshop_id), mod)
             else:
                 ow_updated_file_ts = _parse_ow_datetime(
                     (ow_mod.get("date_update_file") or ow_mod.get("date_creation"))
@@ -357,25 +524,6 @@ def sync_mods(
                 ow_created_ts = _parse_ow_datetime(ow_mod.get("date_creation") if ow_mod else None)
                 ow_latest_ts = max(ow_updated_file_ts, ow_created_ts)
                 need_file = steam_latest_ts > ow_latest_ts
-                try:
-                    ow_details = ow_get_mod_details(api, ow_mod_id)
-                except Exception as exc:
-                    logging.warning("Failed to fetch OW mod %s: %s", ow_mod_id, exc)
-                    ow_details = {}
-
-                needs_update = False
-                result_info = ow_details.get("result") if isinstance(ow_details, dict) else {}
-                if isinstance(result_info, dict) and result_info:
-                    if result_info.get("name") != title:
-                        needs_update = True
-                    if result_info.get("short_description") != short_desc:
-                        needs_update = True
-                    if result_info.get("description") != description:
-                        needs_update = True
-                elif isinstance(ow_details, dict):
-                    if ow_details.get("name") and ow_details.get("name") != title:
-                        needs_update = True
-
                 if need_file:
                     logging.info("Updating OW mod %s file", ow_mod_id)
                     if download_steam_mod(
@@ -411,7 +559,19 @@ def sync_mods(
                         )
                     else:
                         logging.warning("Steam download failed for %s", workshop_id)
-                elif needs_update:
+                        ow_edit_mod(
+                            api,
+                            ow_mod_id,
+                            title,
+                            short_desc,
+                            description,
+                            "steam",
+                            int(workshop_id),
+                            game_id,
+                            public_mode,
+                            set_source=False,
+                        )
+                else:
                     logging.info("Updating OW mod %s metadata", ow_mod_id)
                     ow_edit_mod(
                         api,
@@ -515,56 +675,106 @@ def sync_mods(
                     desired_resources.append((res_type, url))
 
                 if upload_resource_files:
-                    if prune_resources:
-                        if not warned_resource_prune:
-                            logging.warning(
-                                "Resource pruning is disabled when OW_RESOURCE_UPLOAD_FILES=true"
-                            )
-                            warned_resource_prune = True
-                    current_logo = any(r.get("type") == "logo" for r in current_resources)
-                    current_screens = sum(
-                        1 for r in current_resources if r.get("type") == "screenshot"
+                    dest_dir = mirror_root / "resources" / str(workshop_id)
+                    hashes_by_id, hash_cache = _build_resource_hashes(
+                        mod, current_resources, dest_dir, timeout
                     )
-                    desired_screens = max(0, len(images) - 1)
-                    logging.debug(
-                        "OW mod %s resources: current_logo=%s current_screens=%s desired_screens=%s",
-                        ow_mod_id,
-                        current_logo,
-                        current_screens,
-                        desired_screens,
+                    cache_path = dest_dir / "resource_hashes.json"
+                    cached_resources = hash_cache.get("resources", {})
+
+                    deleted_ids = _prune_duplicate_resources(
+                        api, current_resources, hashes_by_id
                     )
-                    needs_fill = (not current_logo and len(images) > 0) or (
-                        current_screens < desired_screens
-                    )
-                    if needs_fill:
+                    if deleted_ids:
+                        for res_id in deleted_ids:
+                            hashes_by_id.pop(res_id, None)
+                            if isinstance(cached_resources, dict):
+                                cached_resources.pop(str(res_id), None)
+                        _save_hash_cache(cache_path, hash_cache)
+
+                    existing_hashes: set[str] = set()
+                    existing_logo_hashes: set[str] = set()
+                    hash_to_resources: Dict[str, List[Dict[str, Any]]] = {}
+                    for resource in current_resources:
+                        res_id = resource.get("id")
+                        if res_id is None or int(res_id) in deleted_ids:
+                            continue
+                        file_hash = hashes_by_id.get(int(res_id))
+                        if not file_hash:
+                            continue
+                        existing_hashes.add(file_hash)
+                        if resource.get("type") == "logo":
+                            existing_logo_hashes.add(file_hash)
+                        hash_to_resources.setdefault(file_hash, []).append(resource)
+
+                    targets: List[tuple[str, str, str]] = []
+                    for idx_img, url in enumerate(images):
+                        res_type = "logo" if idx_img == 0 else "screenshot"
+                        basename = "logo" if idx_img == 0 else f"{idx_img}"
+                        targets.append((res_type, url, basename))
+
+                    desired_hashes: set[str] = set()
+                    downloaded_count = 0
+                    if targets:
+                        downloads = _download_steam_images(mod, targets, dest_dir, timeout)
+                        downloaded_count = len(downloads)
                         seen_hashes: set[str] = set()
-                        for idx_img, url in enumerate(images):
-                            if current_logo and current_screens >= desired_screens:
-                                break
-                            res_type = "logo" if idx_img == 0 else "screenshot"
-                            if res_type == "logo" and current_logo:
+                        for res_type, _, file_path, file_hash in downloads:
+                            if not file_hash or file_hash in seen_hashes:
                                 continue
-                            if res_type == "screenshot" and current_screens >= desired_screens:
-                                continue
-                            dest_dir = mirror_root / "resources" / str(workshop_id)
-                            file_path, file_hash = download_url_to_file_with_hash(
-                                url,
-                                dest_dir,
-                                f"{idx_img}",
-                                timeout,
-                            )
-                            if not file_path or not file_hash:
-                                continue
-                            if file_hash in seen_hashes:
-                                continue
+                            seen_hashes.add(file_hash)
+                            desired_hashes.add(file_hash)
+
+                            if res_type == "logo":
+                                if file_hash in existing_logo_hashes:
+                                    continue
+                            else:
+                                if file_hash in existing_hashes:
+                                    continue
+
                             if ow_add_resource_file(
                                 api, "mods", ow_mod_id, res_type, file_path
                             ):
-                                seen_hashes.add(file_hash)
+                                if (
+                                    res_type == "logo"
+                                    and file_hash in existing_hashes
+                                    and file_hash not in existing_logo_hashes
+                                ):
+                                    for resource in hash_to_resources.get(file_hash, []):
+                                        res_id = resource.get("id")
+                                        if res_id is None:
+                                            continue
+                                        ow_delete_resource(api, int(res_id))
+                                        deleted_ids.add(int(res_id))
+                                        hashes_by_id.pop(int(res_id), None)
+                                        if isinstance(cached_resources, dict):
+                                            cached_resources.pop(str(res_id), None)
+                                    _save_hash_cache(cache_path, hash_cache)
+                                existing_hashes.add(file_hash)
                                 if res_type == "logo":
-                                    current_logo = True
-                                else:
-                                    current_screens += 1
+                                    existing_logo_hashes.add(file_hash)
+
+                    if prune_resources and images_incomplete:
+                        logging.debug(
+                            "Skip resource prune for %s due to missing image cache",
+                            workshop_id,
+                        )
+                    elif (
+                        prune_resources
+                        and desired_hashes
+                        and downloaded_count == len(targets)
+                    ):
+                        for resource in current_resources:
+                            res_id = resource.get("id")
+                            if res_id is None or int(res_id) in deleted_ids:
+                                continue
+                            file_hash = hashes_by_id.get(int(res_id))
+                            if not file_hash or file_hash in desired_hashes:
+                                continue
+                            ow_delete_resource(api, int(res_id))
+                            if isinstance(cached_resources, dict):
+                                cached_resources.pop(str(res_id), None)
+                        _save_hash_cache(cache_path, hash_cache)
                 else:
                     for res_type, url in desired_resources:
                         if (res_type, url) not in current_urls:
