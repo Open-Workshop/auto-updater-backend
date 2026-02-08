@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import json
 import logging
 import random
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import requests
 
@@ -17,15 +19,69 @@ _DEFAULT_LIMITS: Dict[str, int] = {
     "mod_description": 9999,
     "tag_name": 127,
 }
-_LIMITS: Dict[str, int] = dict(_DEFAULT_LIMITS)
 
 
-def _limit(key: str, fallback: int) -> int:
-    try:
-        value = int(_LIMITS.get(key, fallback))
-    except (TypeError, ValueError):
-        return fallback
-    return value if value > 0 else fallback
+class OWLimits:
+    def __init__(self, defaults: Dict[str, int]) -> None:
+        self._defaults = dict(defaults)
+        self._limits = dict(defaults)
+
+    def limit(self, key: str, fallback: int | None = None) -> int:
+        if fallback is None:
+            fallback = self._defaults.get(key, 0)
+        try:
+            value = int(self._limits.get(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+        return value if value > 0 else fallback
+
+    def update_from_openapi(self, openapi: Dict[str, Any]) -> bool:
+        limits = _extract_limits(openapi)
+        if not limits:
+            return False
+        self._limits = {**self._limits, **limits}
+        return True
+
+    def limit_mod_fields(
+        self,
+        name: str,
+        short_desc: str,
+        description: str,
+    ) -> tuple[str, str, str]:
+        name = truncate(name, self.limit("mod_name", _DEFAULT_LIMITS["mod_name"]))
+        short_desc = truncate(
+            short_desc,
+            self.limit("mod_short_description", _DEFAULT_LIMITS["mod_short_description"]),
+        )
+        description = truncate(
+            description,
+            self.limit("mod_description", _DEFAULT_LIMITS["mod_description"]),
+        )
+        return name, short_desc, description
+
+    def limit_game_fields(self, name: str, short_desc: str, desc: str) -> tuple[str, str, str]:
+        return (
+            truncate(name, self.limit("game_name", _DEFAULT_LIMITS["game_name"])),
+            truncate(short_desc, self.limit("game_short_desc", _DEFAULT_LIMITS["game_short_desc"])),
+            truncate(desc, self.limit("game_desc", _DEFAULT_LIMITS["game_desc"])),
+        )
+
+    def limit_tag_name(self, name: str) -> str:
+        return truncate(name, self.limit("tag_name", _DEFAULT_LIMITS["tag_name"]))
+
+    def cap_limit(self, key: str, value: int) -> None:
+        try:
+            new_limit = int(value)
+        except (TypeError, ValueError):
+            return
+        if new_limit <= 0:
+            return
+        current = self._limits.get(key, self._defaults.get(key))
+        if current is None or new_limit < int(current):
+            self._limits[key] = new_limit
+
+
+_GLOBAL_LIMITS = OWLimits(_DEFAULT_LIMITS)
 
 
 def _extract_limits(openapi: Dict[str, Any]) -> Dict[str, int]:
@@ -64,62 +120,17 @@ def _extract_limits(openapi: Dict[str, Any]) -> Dict[str, int]:
     return found
 
 
-def load_api_limits(api: "ApiClient") -> None:
-    global _LIMITS
-    try:
-        response = api.request("get", "/openapi.json")
-    except Exception as exc:
-        logging.warning("Failed to load OW OpenAPI limits: %s", exc)
-        return
-    if not _is_success(response):
-        logging.warning(
-            "Failed to load OW OpenAPI limits: %s %s",
-            response.status_code,
-            (response.text or "")[:200],
-        )
-        return
-    try:
-        payload = response.json()
-    except Exception as exc:
-        logging.warning("Failed to parse OW OpenAPI limits: %s", exc)
-        return
-    limits = _extract_limits(payload)
-    if not limits:
-        logging.warning("OW OpenAPI limits not found, using defaults")
-        return
-    _LIMITS = {**_LIMITS, **limits}
-    logging.info(
-        "Loaded OW limits: mod_name=%s short_desc=%s desc=%s",
-        _LIMITS.get("mod_name"),
-        _LIMITS.get("mod_short_description"),
-        _LIMITS.get("mod_description"),
-    )
-
-
-def ow_limit_mod_fields(
-    name: str,
-    short_desc: str,
-    description: str,
-) -> tuple[str, str, str]:
-    name = truncate(name, _limit("mod_name", _DEFAULT_LIMITS["mod_name"]))
-    short_desc = truncate(
-        short_desc, _limit("mod_short_description", _DEFAULT_LIMITS["mod_short_description"])
-    )
-    description = truncate(
-        description, _limit("mod_description", _DEFAULT_LIMITS["mod_description"])
-    )
-    return name, short_desc, description
-
-
-class ApiClient:
+class OWClient:
     def __init__(
         self,
         base_url: str,
         login: str,
         password: str,
         timeout: int,
+        *,
         retries: int = 3,
         retry_backoff: float = 1.0,
+        limits: OWLimits | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.login_name = login
@@ -127,6 +138,7 @@ class ApiClient:
         self.timeout = timeout
         self.retries = max(0, int(retries))
         self.retry_backoff = max(0.0, float(retry_backoff))
+        self.limits = limits or _GLOBAL_LIMITS
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "openworkshop-mirror/2.0"})
         self._retry_statuses = {500, 502, 503, 504}
@@ -144,6 +156,63 @@ class ApiClient:
             raise RuntimeError(
                 f"Login failed: {response.status_code} {response.text[:200]}"
             )
+
+    @staticmethod
+    def _is_name_too_long_message(message: str | None) -> bool:
+        if not message:
+            return False
+        lower = message.lower()
+        if "name" in lower and "too long" in lower:
+            return True
+        if "назв" in lower and "длин" in lower:
+            return True
+        return False
+
+    def _fallback_name_limits(self, current_limit: int) -> List[int]:
+        candidates = [
+            int(current_limit * 0.8),
+            int(current_limit * 0.6),
+            64,
+            48,
+            32,
+        ]
+        result: List[int] = []
+        for value in candidates:
+            if value <= 0 or value >= current_limit:
+                continue
+            if value not in result:
+                result.append(value)
+        return result
+
+    def _retry_mod_name(
+        self,
+        request_fn: Callable[[str], requests.Response],
+        name: str,
+        response: requests.Response,
+    ) -> requests.Response:
+        if response.status_code != 413 or not self._is_name_too_long_message(response.text):
+            return response
+        current_limit = self.limits.limit("mod_name", _DEFAULT_LIMITS["mod_name"])
+        for new_limit in self._fallback_name_limits(current_limit):
+            truncated = truncate(name, new_limit)
+            if not truncated or truncated == name:
+                continue
+            logging.warning(
+                "OW mod_name too long, retrying with limit %s (was %s)",
+                new_limit,
+                current_limit,
+            )
+            new_response = request_fn(truncated)
+            if (
+                new_response.status_code == 413
+                and self._is_name_too_long_message(new_response.text)
+            ):
+                response = new_response
+                continue
+            if self.is_success(new_response):
+                self.limits.cap_limit("mod_name", new_limit)
+            return new_response
+        return response
 
     def request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         url = f"{self.base_url}{path}"
@@ -208,6 +277,481 @@ class ApiClient:
             raise last_exc
         return response
 
+    def load_limits(self) -> bool:
+        try:
+            response = self.request("get", "/openapi.json")
+        except Exception as exc:
+            logging.warning("Failed to load OW OpenAPI limits: %s", exc)
+            return False
+        if not self.is_success(response):
+            logging.warning(
+                "Failed to load OW OpenAPI limits: %s %s",
+                response.status_code,
+                (response.text or "")[:200],
+            )
+            return False
+        try:
+            payload = response.json()
+        except Exception as exc:
+            logging.warning("Failed to parse OW OpenAPI limits: %s", exc)
+            return False
+        if not self.limits.update_from_openapi(payload):
+            logging.warning("OW OpenAPI limits not found, using defaults")
+            return False
+        logging.info(
+            "Loaded OW limits: mod_name=%s short_desc=%s desc=%s",
+            self.limits.limit("mod_name"),
+            self.limits.limit("mod_short_description"),
+            self.limits.limit("mod_description"),
+        )
+        return True
+
+    def limit_mod_fields(
+        self, name: str, short_desc: str, description: str
+    ) -> tuple[str, str, str]:
+        return self.limits.limit_mod_fields(name, short_desc, description)
+
+    def list_mods(self, game_id: int, page_size: int) -> List[Dict[str, Any]]:
+        def fetch(page: int) -> Dict[str, Any]:
+            params = {
+                "page_size": page_size,
+                "page": page,
+                "general": "true",
+                "dates": "true",
+                "game": game_id,
+                "primary_sources": json.dumps(["steam"]),
+            }
+            response = self.request("get", "/list/mods/", params=params)
+            if response.status_code >= 500:
+                params.pop("primary_sources", None)
+                response = self.request("get", "/list/mods/", params=params)
+            response.raise_for_status()
+            return response.json()
+
+        return list_all_pages(fetch)
+
+    def find_mod_by_source(self, source: str, source_id: int) -> Optional[int]:
+        params = {
+            "page_size": 10,
+            "page": 0,
+            "general": "true",
+            "dates": "true",
+            "primary_sources": json.dumps([source]),
+            "allowed_sources_ids": json.dumps([source_id]),
+        }
+        response = self.request("get", "/list/mods/", params=params)
+        if not self.is_success(response):
+            return None
+        payload = response.json()
+        results = payload.get("results", []) if isinstance(payload, dict) else []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("source_id")) == str(source_id):
+                mod_id = item.get("id")
+                if mod_id is not None:
+                    try:
+                        return int(mod_id)
+                    except (TypeError, ValueError):
+                        return None
+        return None
+
+    def list_games_by_source(self, app_id: int, page_size: int) -> List[Dict[str, Any]]:
+        def fetch(page: int) -> Dict[str, Any]:
+            response = self.request(
+                "get",
+                "/list/games/",
+                params={
+                    "page_size": page_size,
+                    "page": page,
+                    "primary_sources": json.dumps(["steam"]),
+                    "allowed_sources_ids": json.dumps([app_id]),
+                },
+            )
+            response.raise_for_status()
+            return response.json()
+
+        return list_all_pages(fetch)
+
+    def get_game(self, game_id: int) -> Dict[str, Any]:
+        response = self.request("get", f"/games/{game_id}")
+        if response.status_code == 404:
+            raise RuntimeError("Game not found")
+        response.raise_for_status()
+        return response.json()
+
+    def add_game(self, name: str, short_desc: str, desc: str) -> int:
+        name, short_desc, desc = self.limits.limit_game_fields(name, short_desc, desc)
+        response = self.request(
+            "post",
+            "/add/game",
+            data={
+                "game_name": name,
+                "game_short_desc": short_desc,
+                "game_desc": desc,
+            },
+        )
+        if not self.is_success(response):
+            raise RuntimeError(
+                f"Failed to add game: {response.status_code} {response.text}"
+            )
+        game_id = self.extract_id(response)
+        if game_id is not None:
+            return game_id
+        raise RuntimeError("Failed to parse game id from response")
+
+    def edit_game_source(self, game_id: int, source: str, source_id: int) -> None:
+        response = self.request(
+            "post",
+            "/edit/game",
+            data={
+                "game_id": game_id,
+                "game_source": source,
+                "game_source_id": source_id,
+            },
+        )
+        if not self.is_success(response):
+            logging.warning(
+                "Failed to update game source: %s %s",
+                response.status_code,
+                (response.text or "")[:200],
+            )
+
+    def get_mod_details(self, mod_id: int) -> Dict[str, Any]:
+        response = self.request(
+            "get",
+            f"/mods/{mod_id}",
+            params={
+                "short_description": "true",
+                "description": "true",
+                "general": "true",
+                "game": "true",
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def add_mod(
+        self,
+        name: str,
+        short_desc: str,
+        desc: str,
+        source: str,
+        source_id: int,
+        game_id: int,
+        public_mode: int,
+        without_author: bool,
+        file_path,
+    ) -> int:
+        name, short_desc, desc = self.limits.limit_mod_fields(name, short_desc, desc)
+
+        def send(mod_name: str) -> requests.Response:
+            with file_path.open("rb") as handle:
+                files = {"mod_file": (file_path.name, handle)}
+                data = {
+                    "mod_name": mod_name,
+                    "mod_short_description": short_desc,
+                    "mod_description": desc,
+                    "mod_source": source,
+                    "mod_source_id": source_id,
+                    "mod_game": game_id,
+                    "mod_public": public_mode,
+                    "without_author": "true" if without_author else "false",
+                }
+                return self.request("post", "/add/mod", data=data, files=files)
+
+        response = send(name)
+        if response.status_code == 412:
+            existing_id = self.find_mod_by_source(source, source_id)
+            if existing_id is not None:
+                return existing_id
+            raise RuntimeError(
+                f"Failed to add mod: {response.status_code} {response.text}"
+            )
+        response = self._retry_mod_name(send, name, response)
+        if response.status_code == 412:
+            existing_id = self.find_mod_by_source(source, source_id)
+            if existing_id is not None:
+                return existing_id
+            raise RuntimeError(
+                f"Failed to add mod: {response.status_code} {response.text}"
+            )
+        if not self.is_success(response):
+            raise RuntimeError(
+                f"Failed to add mod: {response.status_code} {response.text}"
+            )
+        mod_id = self.extract_id(response)
+        if mod_id is not None:
+            return mod_id
+        raise RuntimeError("Failed to parse mod id from response")
+
+    def edit_mod(
+        self,
+        mod_id: int,
+        name: str,
+        short_desc: str,
+        desc: str,
+        source: str,
+        source_id: int,
+        game_id: int,
+        public_mode: int,
+        file_path=None,
+        *,
+        set_source: bool = True,
+    ) -> None:
+        name, short_desc, desc = self.limits.limit_mod_fields(name, short_desc, desc)
+
+        def send(mod_name: str) -> requests.Response:
+            data = {
+                "mod_id": mod_id,
+                "mod_name": mod_name,
+                "mod_short_description": short_desc,
+                "mod_description": desc,
+                "mod_game": game_id,
+                "mod_public": public_mode,
+            }
+            if set_source:
+                data["mod_source"] = source
+                data["mod_source_id"] = source_id
+            if file_path:
+                with file_path.open("rb") as handle:
+                    files = {"mod_file": (file_path.name, handle)}
+                    return self.request("post", "/edit/mod", data=data, files=files)
+            return self.request("post", "/edit/mod", data=data)
+
+        response = send(name)
+        response = self._retry_mod_name(send, name, response)
+        if not self.is_success(response):
+            raise RuntimeError(
+                f"Failed to edit mod {mod_id}: {response.status_code} {response.text}"
+            )
+
+    def list_tags(self, game_id: int, page_size: int) -> List[Dict[str, Any]]:
+        def fetch(page: int) -> Dict[str, Any]:
+            response = self.request(
+                "get",
+                "/tags",
+                params={
+                    "game_id": game_id,
+                    "page_size": page_size,
+                    "page": page,
+                },
+            )
+            response.raise_for_status()
+            return response.json()
+
+        return list_all_pages(fetch)
+
+    def add_tag(self, name: str) -> int:
+        response = self.request(
+            "post",
+            "/add/tag",
+            data={"tag_name": self.limits.limit_tag_name(name)},
+        )
+        if not self.is_success(response):
+            raise RuntimeError(
+                f"Failed to add tag: {response.status_code} {response.text}"
+            )
+        tag_id = self.extract_id(response)
+        if tag_id is not None:
+            return tag_id
+        raise RuntimeError("Failed to parse tag id from response")
+
+    def associate_game_tag(self, game_id: int, tag_id: int) -> None:
+        response = self.request(
+            "post",
+            "/association/game/tag",
+            data={"game_id": game_id, "tag_id": tag_id, "mode": "true"},
+        )
+        if not self.is_success(response) and response.status_code != 409:
+            logging.warning(
+                "Failed to associate tag %s with game %s: %s %s",
+                tag_id,
+                game_id,
+                response.status_code,
+                (response.text or "")[:200],
+            )
+
+    def get_mod_tags(self, mod_id: int) -> List[int]:
+        response = self.request("get", f"/mods/{mod_id}/tags")
+        if response.status_code == 404:
+            return []
+        response.raise_for_status()
+        payload = response.json()
+        tag_ids: List[int] = []
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict):
+                    tag_id = item.get("id") or item.get("tag_id")
+                else:
+                    tag_id = item
+                if tag_id is not None:
+                    tag_ids.append(int(tag_id))
+        return tag_ids
+
+    def add_mod_tag(self, mod_id: int, tag_id: int) -> None:
+        response = self.request("post", f"/mods/{mod_id}/tags/{tag_id}")
+        if not self.is_success(response):
+            logging.warning(
+                "Failed to add tag %s to mod %s: %s %s",
+                tag_id,
+                mod_id,
+                response.status_code,
+                (response.text or "")[:200],
+            )
+
+    def delete_mod_tag(self, mod_id: int, tag_id: int) -> None:
+        response = self.request("delete", f"/mods/{mod_id}/tags/{tag_id}")
+        if not self.is_success(response):
+            logging.warning(
+                "Failed to delete tag %s from mod %s: %s %s",
+                tag_id,
+                mod_id,
+                response.status_code,
+                (response.text or "")[:200],
+            )
+
+    def get_mod_dependencies(self, mod_id: int) -> List[int]:
+        response = self.request("get", f"/mods/{mod_id}/dependencies")
+        if response.status_code == 404:
+            return []
+        response.raise_for_status()
+        payload = response.json()
+        results = payload.get("results", []) if isinstance(payload, dict) else []
+        dep_ids: List[int] = []
+        for item in results:
+            if isinstance(item, dict):
+                dep_id = item.get("id") or item.get("mod_id") or item.get("dependencie")
+            else:
+                dep_id = item
+            if dep_id is not None:
+                dep_ids.append(int(dep_id))
+        return dep_ids
+
+    def add_mod_dependency(self, mod_id: int, dep_id: int) -> None:
+        response = self.request("post", f"/mods/{mod_id}/dependencies/{dep_id}")
+        if not self.is_success(response):
+            logging.warning(
+                "Failed to add dependency %s to mod %s: %s %s",
+                dep_id,
+                mod_id,
+                response.status_code,
+                (response.text or "")[:200],
+            )
+
+    def delete_mod_dependency(self, mod_id: int, dep_id: int) -> bool:
+        response = self.request("delete", f"/mods/{mod_id}/dependencies/{dep_id}")
+        if self.is_success(response) or response.status_code in (404, 409, 412):
+            return True
+        logging.warning(
+            "Failed to delete dependency %s from mod %s: %s %s",
+            dep_id,
+            mod_id,
+            response.status_code,
+            (response.text or "")[:200],
+        )
+        return False
+
+    def get_mod_resources(self, mod_id: int) -> List[Dict[str, Any]]:
+        response = self.request("get", f"/mods/{mod_id}/resources")
+        if response.status_code == 404:
+            return []
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload.get("results", [])
+        return []
+
+    def add_resource(
+        self, owner_type: str, owner_id: int, res_type: str, url: str
+    ) -> None:
+        response = self.request(
+            "post",
+            f"/add/resource/{owner_type}",
+            data={
+                "resource_type": res_type,
+                "resource_url": url,
+                "resource_owner_id": owner_id,
+            },
+        )
+        if not self.is_success(response):
+            logging.warning(
+                "Failed to add resource %s to %s %s: %s %s",
+                url,
+                owner_type,
+                owner_id,
+                response.status_code,
+                (response.text or "")[:200],
+            )
+
+    def add_resource_file(
+        self,
+        owner_type: str,
+        owner_id: int,
+        res_type: str,
+        file_path,
+    ) -> bool:
+        with file_path.open("rb") as handle:
+            files = {"resource_file": (file_path.name, handle)}
+            data = {
+                "resource_type": res_type,
+                "resource_owner_id": owner_id,
+            }
+            response = self.request(
+                "post",
+                f"/add/resource/{owner_type}",
+                data=data,
+                files=files,
+            )
+        if not self.is_success(response) and response.status_code != 409:
+            logging.warning(
+                "Failed to add resource file %s to %s %s: %s %s",
+                file_path,
+                owner_type,
+                owner_id,
+                response.status_code,
+                (response.text or "")[:200],
+            )
+            return False
+        return True
+
+    def delete_resource(self, resource_id: int) -> None:
+        response = self.request("delete", f"/resources/{resource_id}")
+        if not self.is_success(response):
+            logging.warning(
+                "Failed to delete resource %s: %s %s",
+                resource_id,
+                response.status_code,
+                (response.text or "")[:200],
+            )
+
+    @staticmethod
+    def extract_id(response: requests.Response) -> Optional[int]:
+        try:
+            payload = response.json()
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            for key in ("id", "tag_id", "mod_id", "game_id", "resource_id"):
+                if key in payload and payload[key] is not None:
+                    try:
+                        return int(payload[key])
+                    except (TypeError, ValueError):
+                        continue
+        if isinstance(payload, int):
+            return int(payload)
+        if isinstance(payload, str):
+            text = payload.strip()
+        else:
+            text = (response.text or "").strip()
+        if text.isdigit():
+            return int(text)
+        return None
+
+    @staticmethod
+    def is_success(response: requests.Response) -> bool:
+        return 200 <= response.status_code < 300
+
     def _sleep_backoff(self, attempt: int, method: str, url: str, exc: Exception) -> None:
         if self.retry_backoff <= 0:
             return
@@ -225,31 +769,20 @@ class ApiClient:
         time.sleep(delay)
 
 
-def _extract_id(response: requests.Response) -> Optional[int]:
-    try:
-        payload = response.json()
-    except Exception:
-        payload = None
-    if isinstance(payload, dict):
-        for key in ("id", "tag_id", "mod_id", "game_id", "resource_id"):
-            if key in payload and payload[key] is not None:
-                try:
-                    return int(payload[key])
-                except (TypeError, ValueError):
-                    continue
-    if isinstance(payload, int):
-        return int(payload)
-    if isinstance(payload, str):
-        text = payload.strip()
-    else:
-        text = (response.text or "").strip()
-    if text.isdigit():
-        return int(text)
-    return None
+class ApiClient(OWClient):
+    pass
 
 
-def _is_success(response: requests.Response) -> bool:
-    return 200 <= response.status_code < 300
+def load_api_limits(api: OWClient) -> None:
+    api.load_limits()
+
+
+def ow_limit_mod_fields(
+    name: str,
+    short_desc: str,
+    description: str,
+) -> tuple[str, str, str]:
+    return _GLOBAL_LIMITS.limit_mod_fields(name, short_desc, description)
 
 
 def list_all_pages(fetch_page: callable) -> List[Dict[str, Any]]:
@@ -268,132 +801,38 @@ def list_all_pages(fetch_page: callable) -> List[Dict[str, Any]]:
     return results
 
 
-def ow_list_mods(api: ApiClient, game_id: int, page_size: int) -> List[Dict[str, Any]]:
-    def fetch(page: int) -> Dict[str, Any]:
-        params = {
-            "page_size": page_size,
-            "page": page,
-            "general": "true",
-            "dates": "true",
-            "game": game_id,
-            "primary_sources": json.dumps(["steam"]),
-        }
-        response = api.request("get", "/list/mods/", params=params)
-        if response.status_code >= 500:
-            params.pop("primary_sources", None)
-            response = api.request("get", "/list/mods/", params=params)
-        response.raise_for_status()
-        return response.json()
-
-    return list_all_pages(fetch)
+def ow_list_mods(api: OWClient, game_id: int, page_size: int) -> List[Dict[str, Any]]:
+    return api.list_mods(game_id, page_size)
 
 
-def ow_find_mod_by_source(api: ApiClient, source: str, source_id: int) -> Optional[int]:
-    params = {
-        "page_size": 10,
-        "page": 0,
-        "general": "true",
-        "dates": "true",
-        "primary_sources": json.dumps([source]),
-        "allowed_sources_ids": json.dumps([source_id]),
-    }
-    response = api.request("get", "/list/mods/", params=params)
-    if not _is_success(response):
-        return None
-    payload = response.json()
-    results = payload.get("results", []) if isinstance(payload, dict) else []
-    for item in results:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("source_id")) == str(source_id):
-            mod_id = item.get("id")
-            if mod_id is not None:
-                try:
-                    return int(mod_id)
-                except (TypeError, ValueError):
-                    return None
-    return None
+def ow_find_mod_by_source(api: OWClient, source: str, source_id: int) -> Optional[int]:
+    return api.find_mod_by_source(source, source_id)
 
 
-def ow_list_games_by_source(api: ApiClient, app_id: int, page_size: int) -> List[Dict[str, Any]]:
-    def fetch(page: int) -> Dict[str, Any]:
-        response = api.request(
-            "get",
-            "/list/games/",
-            params={
-                "page_size": page_size,
-                "page": page,
-                "primary_sources": json.dumps(["steam"]),
-                "allowed_sources_ids": json.dumps([app_id]),
-            },
-        )
-        response.raise_for_status()
-        return response.json()
-
-    return list_all_pages(fetch)
+def ow_list_games_by_source(
+    api: OWClient, app_id: int, page_size: int
+) -> List[Dict[str, Any]]:
+    return api.list_games_by_source(app_id, page_size)
 
 
-def ow_get_game(api: ApiClient, game_id: int) -> Dict[str, Any]:
-    response = api.request("get", f"/games/{game_id}")
-    if response.status_code == 404:
-        raise RuntimeError("Game not found")
-    response.raise_for_status()
-    return response.json()
+def ow_get_game(api: OWClient, game_id: int) -> Dict[str, Any]:
+    return api.get_game(game_id)
 
 
-def ow_add_game(api: ApiClient, name: str, short_desc: str, desc: str) -> int:
-    response = api.request(
-        "post",
-        "/add/game",
-        data={
-            "game_name": truncate(name, _limit("game_name", 128)),
-            "game_short_desc": truncate(short_desc, _limit("game_short_desc", 256)),
-            "game_desc": truncate(desc, _limit("game_desc", 10000)),
-        },
-    )
-    if not _is_success(response):
-        raise RuntimeError(f"Failed to add game: {response.status_code} {response.text}")
-    game_id = _extract_id(response)
-    if game_id is not None:
-        return game_id
-    raise RuntimeError("Failed to parse game id from response")
+def ow_add_game(api: OWClient, name: str, short_desc: str, desc: str) -> int:
+    return api.add_game(name, short_desc, desc)
 
 
-def ow_edit_game_source(api: ApiClient, game_id: int, source: str, source_id: int) -> None:
-    response = api.request(
-        "post",
-        "/edit/game",
-        data={
-            "game_id": game_id,
-            "game_source": source,
-            "game_source_id": source_id,
-        },
-    )
-    if not _is_success(response):
-        logging.warning(
-            "Failed to update game source: %s %s",
-            response.status_code,
-            (response.text or "")[:200],
-        )
+def ow_edit_game_source(api: OWClient, game_id: int, source: str, source_id: int) -> None:
+    api.edit_game_source(game_id, source, source_id)
 
 
-def ow_get_mod_details(api: ApiClient, mod_id: int) -> Dict[str, Any]:
-    response = api.request(
-        "get",
-        f"/mods/{mod_id}",
-        params={
-            "short_description": "true",
-            "description": "true",
-            "general": "true",
-            "game": "true",
-        },
-    )
-    response.raise_for_status()
-    return response.json()
+def ow_get_mod_details(api: OWClient, mod_id: int) -> Dict[str, Any]:
+    return api.get_mod_details(mod_id)
 
 
 def ow_add_mod(
-    api: ApiClient,
+    api: OWClient,
     name: str,
     short_desc: str,
     desc: str,
@@ -404,34 +843,21 @@ def ow_add_mod(
     without_author: bool,
     file_path,
 ) -> int:
-    with file_path.open("rb") as handle:
-        files = {"mod_file": (file_path.name, handle)}
-        data = {
-            "mod_name": truncate(name, _limit("mod_name", 128)),
-            "mod_short_description": truncate(short_desc, _limit("mod_short_description", 256)),
-            "mod_description": truncate(desc, _limit("mod_description", 10000)),
-            "mod_source": source,
-            "mod_source_id": source_id,
-            "mod_game": game_id,
-            "mod_public": public_mode,
-            "without_author": "true" if without_author else "false",
-        }
-        response = api.request("post", "/add/mod", data=data, files=files)
-    if response.status_code == 412:
-        existing_id = ow_find_mod_by_source(api, source, source_id)
-        if existing_id is not None:
-            return existing_id
-        raise RuntimeError(f"Failed to add mod: {response.status_code} {response.text}")
-    if not _is_success(response):
-        raise RuntimeError(f"Failed to add mod: {response.status_code} {response.text}")
-    mod_id = _extract_id(response)
-    if mod_id is not None:
-        return mod_id
-    raise RuntimeError("Failed to parse mod id from response")
+    return api.add_mod(
+        name,
+        short_desc,
+        desc,
+        source,
+        source_id,
+        game_id,
+        public_mode,
+        without_author,
+        file_path,
+    )
 
 
 def ow_edit_mod(
-    api: ApiClient,
+    api: OWClient,
     mod_id: int,
     name: str,
     short_desc: str,
@@ -443,232 +869,75 @@ def ow_edit_mod(
     file_path=None,
     set_source: bool = True,
 ) -> None:
-    data = {
-        "mod_id": mod_id,
-        "mod_name": truncate(name, _limit("mod_name", 128)),
-        "mod_short_description": truncate(short_desc, _limit("mod_short_description", 256)),
-        "mod_description": truncate(desc, _limit("mod_description", 10000)),
-        "mod_game": game_id,
-        "mod_public": public_mode,
-    }
-    if set_source:
-        data["mod_source"] = source
-        data["mod_source_id"] = source_id
-    if file_path:
-        with file_path.open("rb") as handle:
-            files = {"mod_file": (file_path.name, handle)}
-            response = api.request("post", "/edit/mod", data=data, files=files)
-    else:
-        response = api.request("post", "/edit/mod", data=data)
-    if not _is_success(response):
-        raise RuntimeError(
-            f"Failed to edit mod {mod_id}: {response.status_code} {response.text}"
-        )
-
-
-def ow_list_tags(api: ApiClient, game_id: int, page_size: int) -> List[Dict[str, Any]]:
-    def fetch(page: int) -> Dict[str, Any]:
-        response = api.request(
-            "get",
-            "/tags",
-            params={
-                "game_id": game_id,
-                "page_size": page_size,
-                "page": page,
-            },
-        )
-        response.raise_for_status()
-        return response.json()
-
-    return list_all_pages(fetch)
-
-
-def ow_add_tag(api: ApiClient, name: str) -> int:
-    response = api.request(
-        "post",
-        "/add/tag",
-        data={"tag_name": truncate(name, _limit("tag_name", 128))},
-    )
-    if not _is_success(response):
-        raise RuntimeError(f"Failed to add tag: {response.status_code} {response.text}")
-    tag_id = _extract_id(response)
-    if tag_id is not None:
-        return tag_id
-    raise RuntimeError("Failed to parse tag id from response")
-
-
-def ow_associate_game_tag(api: ApiClient, game_id: int, tag_id: int) -> None:
-    response = api.request(
-        "post",
-        "/association/game/tag",
-        data={"game_id": game_id, "tag_id": tag_id, "mode": "true"},
-    )
-    if not _is_success(response) and response.status_code != 409:
-        logging.warning(
-            "Failed to associate tag %s with game %s: %s %s",
-            tag_id,
-            game_id,
-            response.status_code,
-            (response.text or "")[:200],
-        )
-
-
-def ow_get_mod_tags(api: ApiClient, mod_id: int) -> List[int]:
-    response = api.request("get", f"/mods/{mod_id}/tags")
-    if response.status_code == 404:
-        return []
-    response.raise_for_status()
-    payload = response.json()
-    tag_ids: List[int] = []
-    if isinstance(payload, list):
-        for item in payload:
-            if isinstance(item, dict):
-                tag_id = item.get("id") or item.get("tag_id")
-            else:
-                tag_id = item
-            if tag_id is not None:
-                tag_ids.append(int(tag_id))
-    return tag_ids
-
-
-def ow_add_mod_tag(api: ApiClient, mod_id: int, tag_id: int) -> None:
-    response = api.request("post", f"/mods/{mod_id}/tags/{tag_id}")
-    if not _is_success(response):
-        logging.warning(
-            "Failed to add tag %s to mod %s: %s %s",
-            tag_id,
-            mod_id,
-            response.status_code,
-            (response.text or "")[:200],
-        )
-
-
-def ow_delete_mod_tag(api: ApiClient, mod_id: int, tag_id: int) -> None:
-    response = api.request("delete", f"/mods/{mod_id}/tags/{tag_id}")
-    if not _is_success(response):
-        logging.warning(
-            "Failed to delete tag %s from mod %s: %s %s",
-            tag_id,
-            mod_id,
-            response.status_code,
-            (response.text or "")[:200],
-        )
-
-
-def ow_get_mod_dependencies(api: ApiClient, mod_id: int) -> List[int]:
-    response = api.request("get", f"/mods/{mod_id}/dependencies")
-    if response.status_code == 404:
-        return []
-    response.raise_for_status()
-    payload = response.json()
-    results = payload.get("results", []) if isinstance(payload, dict) else []
-    dep_ids: List[int] = []
-    for item in results:
-        if isinstance(item, dict):
-            dep_id = item.get("id") or item.get("mod_id") or item.get("dependencie")
-        else:
-            dep_id = item
-        if dep_id is not None:
-            dep_ids.append(int(dep_id))
-    return dep_ids
-
-
-def ow_add_mod_dependency(api: ApiClient, mod_id: int, dep_id: int) -> None:
-    response = api.request("post", f"/mods/{mod_id}/dependencies/{dep_id}")
-    if not _is_success(response):
-        logging.warning(
-            "Failed to add dependency %s to mod %s: %s %s",
-            dep_id,
-            mod_id,
-            response.status_code,
-            (response.text or "")[:200],
-        )
-
-
-def ow_delete_mod_dependency(api: ApiClient, mod_id: int, dep_id: int) -> bool:
-    response = api.request("delete", f"/mods/{mod_id}/dependencies/{dep_id}")
-    if _is_success(response) or response.status_code in (404, 409, 412):
-        return True
-    logging.warning(
-        "Failed to delete dependency %s from mod %s: %s %s",
-        dep_id,
+    api.edit_mod(
         mod_id,
-        response.status_code,
-        (response.text or "")[:200],
+        name,
+        short_desc,
+        desc,
+        source,
+        source_id,
+        game_id,
+        public_mode,
+        file_path,
+        set_source=set_source,
     )
-    return False
 
 
-def ow_get_mod_resources(api: ApiClient, mod_id: int) -> List[Dict[str, Any]]:
-    response = api.request("get", f"/mods/{mod_id}/resources")
-    if response.status_code == 404:
-        return []
-    response.raise_for_status()
-    payload = response.json()
-    if isinstance(payload, dict):
-        return payload.get("results", [])
-    return []
+def ow_list_tags(api: OWClient, game_id: int, page_size: int) -> List[Dict[str, Any]]:
+    return api.list_tags(game_id, page_size)
 
 
-def ow_add_resource(api: ApiClient, owner_type: str, owner_id: int, res_type: str, url: str) -> None:
-    response = api.request(
-        "post",
-        f"/add/resource/{owner_type}",
-        data={
-            "resource_type": res_type,
-            "resource_url": url,
-            "resource_owner_id": owner_id,
-        },
-    )
-    if not _is_success(response):
-        logging.warning(
-            "Failed to add resource %s to %s %s: %s %s",
-            url,
-            owner_type,
-            owner_id,
-            response.status_code,
-            (response.text or "")[:200],
-        )
+def ow_add_tag(api: OWClient, name: str) -> int:
+    return api.add_tag(name)
+
+
+def ow_associate_game_tag(api: OWClient, game_id: int, tag_id: int) -> None:
+    api.associate_game_tag(game_id, tag_id)
+
+
+def ow_get_mod_tags(api: OWClient, mod_id: int) -> List[int]:
+    return api.get_mod_tags(mod_id)
+
+
+def ow_add_mod_tag(api: OWClient, mod_id: int, tag_id: int) -> None:
+    api.add_mod_tag(mod_id, tag_id)
+
+
+def ow_delete_mod_tag(api: OWClient, mod_id: int, tag_id: int) -> None:
+    api.delete_mod_tag(mod_id, tag_id)
+
+
+def ow_get_mod_dependencies(api: OWClient, mod_id: int) -> List[int]:
+    return api.get_mod_dependencies(mod_id)
+
+
+def ow_add_mod_dependency(api: OWClient, mod_id: int, dep_id: int) -> None:
+    api.add_mod_dependency(mod_id, dep_id)
+
+
+def ow_delete_mod_dependency(api: OWClient, mod_id: int, dep_id: int) -> bool:
+    return api.delete_mod_dependency(mod_id, dep_id)
+
+
+def ow_get_mod_resources(api: OWClient, mod_id: int) -> List[Dict[str, Any]]:
+    return api.get_mod_resources(mod_id)
+
+
+def ow_add_resource(
+    api: OWClient, owner_type: str, owner_id: int, res_type: str, url: str
+) -> None:
+    api.add_resource(owner_type, owner_id, res_type, url)
 
 
 def ow_add_resource_file(
-    api: ApiClient,
+    api: OWClient,
     owner_type: str,
     owner_id: int,
     res_type: str,
     file_path,
 ) -> bool:
-    with file_path.open("rb") as handle:
-        files = {"resource_file": (file_path.name, handle)}
-        data = {
-            "resource_type": res_type,
-            "resource_owner_id": owner_id,
-        }
-        response = api.request(
-            "post",
-            f"/add/resource/{owner_type}",
-            data=data,
-            files=files,
-        )
-    if not _is_success(response) and response.status_code != 409:
-        logging.warning(
-            "Failed to add resource file %s to %s %s: %s %s",
-            file_path,
-            owner_type,
-            owner_id,
-            response.status_code,
-            (response.text or "")[:200],
-        )
-        return False
-    return True
+    return api.add_resource_file(owner_type, owner_id, res_type, file_path)
 
 
-def ow_delete_resource(api: ApiClient, resource_id: int) -> None:
-    response = api.request("delete", f"/resources/{resource_id}")
-    if not _is_success(response):
-        logging.warning(
-            "Failed to delete resource %s: %s %s",
-            resource_id,
-            response.status_code,
-            (response.text or "")[:200],
-        )
+def ow_delete_resource(api: OWClient, resource_id: int) -> None:
+    api.delete_resource(resource_id)

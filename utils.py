@@ -126,7 +126,7 @@ def zip_directory(source_dir: Path, dest_zip: Path) -> Path:
     return dest_zip
 
 
-def _extension_from_headers(headers: Dict[str, str]) -> str:
+def extension_from_headers(headers: Dict[str, str]) -> str:
     content_type = headers.get("content-type", "").split(";")[0].strip().lower()
     if not content_type:
         return ""
@@ -134,6 +134,10 @@ def _extension_from_headers(headers: Dict[str, str]) -> str:
     if ext == ".jpe":
         ext = ".jpg"
     return ext
+
+
+def _extension_from_headers(headers: Dict[str, str]) -> str:
+    return extension_from_headers(headers)
 
 
 def _sleep_download_backoff(attempt: int, exc: Exception) -> None:
@@ -151,67 +155,13 @@ def _sleep_download_backoff(attempt: int, exc: Exception) -> None:
     time.sleep(delay)
 
 
-def download_url_to_file(url: str, dest_dir: Path, basename: str, timeout: int) -> Path | None:
-    ensure_dir(dest_dir)
-    attempts = _DOWNLOAD_HTTP_RETRIES + 1
-    last_exc: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        response = None
-        temp_path: Path | None = None
-        try:
-            response = requests.get(url, stream=True, timeout=timeout)
-            if response.status_code in _DOWNLOAD_RETRY_STATUSES and attempt < attempts:
-                retry_after = response.headers.get("retry-after")
-                if retry_after:
-                    try:
-                        time.sleep(float(retry_after))
-                    except ValueError:
-                        pass
-                _sleep_download_backoff(
-                    attempt,
-                    RuntimeError(f"HTTP {response.status_code}"),
-                )
-                continue
-            if response.status_code != 200:
-                logging.warning(
-                    "Failed to download %s: %s",
-                    url,
-                    response.status_code,
-                )
-                return None
-            ext = _extension_from_headers(response.headers)
-            if not ext:
-                ext = ".bin"
-            path = dest_dir / f"{basename}{ext}"
-            temp_path = path.with_suffix(f"{path.suffix}.part")
-            with temp_path.open("wb") as handle:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        handle.write(chunk)
-            temp_path.replace(path)
-            return path
-        except requests.RequestException as exc:
-            last_exc = exc
-            if attempt >= attempts:
-                logging.warning("Failed to download %s: %s", url, exc)
-                return None
-            _sleep_download_backoff(attempt, exc)
-            continue
-        finally:
-            if response is not None:
-                response.close()
-            if temp_path and temp_path.exists():
-                try:
-                    temp_path.unlink()
-                except FileNotFoundError:
-                    pass
-    if last_exc:
-        logging.warning("Failed to download %s: %s", url, last_exc)
-    return None
-
-
-def download_url_to_file_with_hash(
-    url: str, dest_dir: Path, basename: str, timeout: int
+def _download_url(
+    url: str,
+    dest_dir: Path,
+    basename: str,
+    timeout: int,
+    *,
+    with_hash: bool,
 ) -> tuple[Path | None, str | None]:
     ensure_dir(dest_dir)
     attempts = _DOWNLOAD_HTTP_RETRIES + 1
@@ -240,20 +190,19 @@ def download_url_to_file_with_hash(
                     response.status_code,
                 )
                 return None, None
-            ext = _extension_from_headers(response.headers)
-            if not ext:
-                ext = ".bin"
+            ext = _extension_from_headers(response.headers) or ".bin"
             path = dest_dir / f"{basename}{ext}"
             temp_path = path.with_suffix(f"{path.suffix}.part")
-            hasher = hashlib.sha256()
+            hasher = hashlib.sha256() if with_hash else None
             with temp_path.open("wb") as handle:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     if not chunk:
                         continue
-                    hasher.update(chunk)
+                    if hasher:
+                        hasher.update(chunk)
                     handle.write(chunk)
             temp_path.replace(path)
-            return path, hasher.hexdigest()
+            return path, hasher.hexdigest() if hasher else None
         except requests.RequestException as exc:
             last_exc = exc
             if attempt >= attempts:
@@ -272,3 +221,14 @@ def download_url_to_file_with_hash(
     if last_exc:
         logging.warning("Failed to download %s: %s", url, last_exc)
     return None, None
+
+
+def download_url_to_file(url: str, dest_dir: Path, basename: str, timeout: int) -> Path | None:
+    path, _ = _download_url(url, dest_dir, basename, timeout, with_hash=False)
+    return path
+
+
+def download_url_to_file_with_hash(
+    url: str, dest_dir: Path, basename: str, timeout: int
+) -> tuple[Path | None, str | None]:
+    return _download_url(url, dest_dir, basename, timeout, with_hash=True)

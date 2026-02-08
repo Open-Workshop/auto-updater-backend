@@ -1,241 +1,243 @@
+from __future__ import annotations
+
 import logging
-import random
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
 import requests
 
-_LOG_STEAM_REQUESTS = False
-_STEAM_STATS = {"total": 0, "success": 0, "failed": 0, "by_endpoint": {}}
-_STEAM_HTTP_RETRIES = 2
-_STEAM_HTTP_BACKOFF = 1.0
-_STEAM_REQUEST_DELAY = 0.0
-_STEAM_LAST_REQUEST_TS = 0.0
-_STEAM_RETRY_STATUSES = {429, 500, 502, 503, 504}
-_STEAM_PROXY_POOL: List[str] = []
-_STEAM_PROXY_INDEX = 0
+from http_utils import ProxyPool, RetryPolicy, mask_proxy
+
+
+@dataclass
+class SteamStats:
+    total: int = 0
+    success: int = 0
+    failed: int = 0
+    by_endpoint: Dict[str, int] = field(default_factory=dict)
+
+    def record(self, endpoint: str, ok: bool) -> None:
+        self.total += 1
+        if ok:
+            self.success += 1
+        else:
+            self.failed += 1
+        self.by_endpoint[endpoint] = self.by_endpoint.get(endpoint, 0) + 1
+
+    def reset(self) -> None:
+        self.total = 0
+        self.success = 0
+        self.failed = 0
+        self.by_endpoint = {}
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "total": self.total,
+            "success": self.success,
+            "failed": self.failed,
+            "by_endpoint": dict(self.by_endpoint),
+        }
+
+
+class SteamClient:
+    def __init__(
+        self,
+        *,
+        policy: RetryPolicy | None = None,
+        proxies: List[str] | None = None,
+        log_requests: bool = False,
+    ) -> None:
+        self.policy = policy or RetryPolicy(retries=2, backoff=1.0, request_delay=0.0)
+        self.proxy_pool = ProxyPool(proxies)
+        self.log_requests = bool(log_requests)
+        self.stats = SteamStats()
+        self._last_request_ts = 0.0
+
+    def set_policy(self, retries: int, backoff: float, request_delay: float) -> None:
+        self.policy = RetryPolicy(
+            retries=retries,
+            backoff=backoff,
+            request_delay=request_delay,
+            retry_statuses=set(self.policy.retry_statuses),
+        )
+
+    def set_proxy_pool(self, proxies: List[str]) -> None:
+        self.proxy_pool.set(proxies)
+
+    def set_log_requests(self, enabled: bool) -> None:
+        self.log_requests = bool(enabled)
+
+    def reset_stats(self) -> None:
+        self.stats.reset()
+
+    def snapshot_stats(self) -> Dict[str, Any]:
+        return self.stats.snapshot()
+
+    def request(self, method: str, url: str, timeout: int, **kwargs: Any) -> requests.Response:
+        endpoint = self._endpoint_key(method, url)
+        attempts = self.policy.retries + 1
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            proxy = self.proxy_pool.next()
+            if proxy:
+                kwargs = dict(kwargs)
+                kwargs["proxies"] = {"http": proxy, "https": proxy}
+
+            if self.policy.request_delay > 0:
+                now = time.monotonic()
+                wait_for = self.policy.request_delay - (now - self._last_request_ts)
+                if wait_for > 0:
+                    time.sleep(wait_for)
+
+            start = time.monotonic()
+            try:
+                response = requests.request(method, url, timeout=timeout, **kwargs)
+            except requests.RequestException as exc:
+                last_exc = exc
+                self.stats.record(endpoint, False)
+                if self.log_requests:
+                    elapsed = time.monotonic() - start
+                    logging.warning(
+                        "Steam %s failed after %.2fs via %s: %s (%s)",
+                        endpoint,
+                        elapsed,
+                        mask_proxy(proxy),
+                        exc,
+                        type(exc).__name__,
+                    )
+                if attempt >= attempts:
+                    raise
+                self._sleep_backoff(attempt, exc)
+                continue
+            finally:
+                self._last_request_ts = time.monotonic()
+
+            ok = response.status_code < 400
+            self.stats.record(endpoint, ok)
+            if self.log_requests:
+                elapsed = time.monotonic() - start
+                size = response.headers.get("content-length") or "-"
+                log_fn = logging.info if ok else logging.warning
+                log_fn(
+                    "Steam %s -> %s in %.2fs (size=%s, proxy=%s)",
+                    endpoint,
+                    response.status_code,
+                    elapsed,
+                    size,
+                    mask_proxy(proxy),
+                )
+
+            if response.status_code in self.policy.retry_statuses and attempt < attempts:
+                retry_after = response.headers.get("retry-after")
+                if retry_after:
+                    try:
+                        time.sleep(float(retry_after))
+                    except ValueError:
+                        pass
+                self._sleep_backoff(attempt, RuntimeError(f"HTTP {response.status_code}"))
+                continue
+            return response
+
+        if last_exc:
+            raise last_exc
+        return response
+
+    def get_app_details(self, app_id: int, language: str, timeout: int) -> Dict[str, str]:
+        url = "https://store.steampowered.com/api/appdetails"
+        response = self.request(
+            "get",
+            url,
+            params={"appids": app_id, "l": language},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        entry = payload.get(str(app_id), {})
+        if not entry.get("success"):
+            raise RuntimeError(f"Steam app {app_id} not found")
+        data = entry.get("data", {})
+        name = data.get("name", "")
+        short_desc = data.get("short_description", "")
+        full_desc = data.get("detailed_description", "")
+        full_desc = re.sub(r"<[^>]+>", "", full_desc)
+        return {
+            "name": name,
+            "short": short_desc,
+            "description": full_desc,
+        }
+
+    def fetch_workshop_page_ids_html(
+        self, app_id: int, page: int, language: str, timeout: int
+    ) -> List[str]:
+        url = "https://steamcommunity.com/workshop/browse/"
+        params = {
+            "appid": app_id,
+            "browsesort": "mostrecent",
+            "section": "readytouseitems",
+            "p": page,
+            "l": language,
+        }
+        response = self.request(
+            "get",
+            url,
+            params=params,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=timeout,
+        )
+        if response.status_code != 200:
+            return []
+        return re.findall(r"data-publishedfileid=\"(\d+)\"", response.text)
+
+    @staticmethod
+    def _endpoint_key(method: str, url: str) -> str:
+        parsed = urlparse(url)
+        return f"{method.upper()} {parsed.netloc}{parsed.path}"
+
+    def _sleep_backoff(self, attempt: int, exc: Exception) -> None:
+        delay = self.policy.delay_for_attempt(attempt)
+        if delay <= 0:
+            return
+        logging.warning(
+            "Steam retry %s/%s after error: %s (sleep %.1fs)",
+            attempt,
+            self.policy.retries,
+            exc,
+            delay,
+        )
+        time.sleep(delay)
+
+
+_DEFAULT_CLIENT = SteamClient()
 
 
 def set_steam_request_logging(enabled: bool) -> None:
-    global _LOG_STEAM_REQUESTS
-    _LOG_STEAM_REQUESTS = bool(enabled)
+    _DEFAULT_CLIENT.set_log_requests(enabled)
 
 
 def set_steam_request_policy(retries: int, backoff: float, request_delay: float) -> None:
-    global _STEAM_HTTP_RETRIES, _STEAM_HTTP_BACKOFF, _STEAM_REQUEST_DELAY
-    _STEAM_HTTP_RETRIES = max(0, int(retries))
-    _STEAM_HTTP_BACKOFF = max(0.0, float(backoff))
-    _STEAM_REQUEST_DELAY = max(0.0, float(request_delay))
+    _DEFAULT_CLIENT.set_policy(retries, backoff, request_delay)
 
 
 def set_steam_proxy_pool(proxies: List[str]) -> None:
-    global _STEAM_PROXY_POOL, _STEAM_PROXY_INDEX
-    cleaned: List[str] = []
-    for proxy in proxies or []:
-        value = proxy.strip()
-        if not value:
-            continue
-        if value.lower() in {"none", "off", "direct"}:
-            continue
-        cleaned.append(value)
-    _STEAM_PROXY_POOL = cleaned
-    _STEAM_PROXY_INDEX = 0
+    _DEFAULT_CLIENT.set_proxy_pool(proxies)
 
 
 def steam_stats_reset() -> None:
-    _STEAM_STATS["total"] = 0
-    _STEAM_STATS["success"] = 0
-    _STEAM_STATS["failed"] = 0
-    _STEAM_STATS["by_endpoint"] = {}
+    _DEFAULT_CLIENT.reset_stats()
 
 
 def steam_stats_snapshot() -> Dict[str, Any]:
-    snapshot = {
-        "total": _STEAM_STATS["total"],
-        "success": _STEAM_STATS["success"],
-        "failed": _STEAM_STATS["failed"],
-        "by_endpoint": dict(_STEAM_STATS["by_endpoint"]),
-    }
-    return snapshot
-
-
-def _endpoint_key(method: str, url: str) -> str:
-    parsed = urlparse(url)
-    return f"{method.upper()} {parsed.netloc}{parsed.path}"
-
-
-def _record_stat(endpoint: str, ok: bool) -> None:
-    _STEAM_STATS["total"] += 1
-    if ok:
-        _STEAM_STATS["success"] += 1
-    else:
-        _STEAM_STATS["failed"] += 1
-    _STEAM_STATS["by_endpoint"][endpoint] = _STEAM_STATS["by_endpoint"].get(endpoint, 0) + 1
-
-
-def _next_proxy() -> str | None:
-    global _STEAM_PROXY_INDEX
-    if not _STEAM_PROXY_POOL:
-        return None
-    proxy = _STEAM_PROXY_POOL[_STEAM_PROXY_INDEX % len(_STEAM_PROXY_POOL)]
-    _STEAM_PROXY_INDEX += 1
-    return proxy
-
-
-def _mask_proxy(proxy: str | None) -> str:
-    if not proxy:
-        return "-"
-    try:
-        parsed = urlparse(proxy)
-    except Exception:
-        return proxy
-    if parsed.scheme and parsed.netloc:
-        host = parsed.hostname or ""
-        port = f":{parsed.port}" if parsed.port else ""
-        if parsed.username:
-            return f"{parsed.scheme}://{parsed.username}:***@{host}{port}"
-        return f"{parsed.scheme}://{host}{port}"
-    return proxy
-
-
-def _steam_request(method: str, url: str, timeout: int, **kwargs: Any) -> requests.Response:
-    global _STEAM_LAST_REQUEST_TS
-    endpoint = _endpoint_key(method, url)
-
-    attempts = _STEAM_HTTP_RETRIES + 1
-    last_exc: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        proxy = _next_proxy()
-        if proxy:
-            kwargs = dict(kwargs)
-            kwargs["proxies"] = {"http": proxy, "https": proxy}
-
-        if _STEAM_REQUEST_DELAY > 0:
-            now = time.monotonic()
-            wait_for = _STEAM_REQUEST_DELAY - (now - _STEAM_LAST_REQUEST_TS)
-            if wait_for > 0:
-                time.sleep(wait_for)
-
-        start = time.monotonic()
-        try:
-            response = requests.request(method, url, timeout=timeout, **kwargs)
-        except requests.RequestException as exc:
-            last_exc = exc
-            _record_stat(endpoint, False)
-            if _LOG_STEAM_REQUESTS:
-                elapsed = time.monotonic() - start
-                logging.warning(
-                    "Steam %s failed after %.2fs via %s: %s (%s)",
-                    endpoint,
-                    elapsed,
-                    _mask_proxy(proxy),
-                    exc,
-                    type(exc).__name__,
-                )
-            if attempt >= attempts:
-                raise
-            _sleep_steam_backoff(attempt, exc)
-            continue
-        finally:
-            _STEAM_LAST_REQUEST_TS = time.monotonic()
-
-        ok = response.status_code < 400
-        _record_stat(endpoint, ok)
-        if _LOG_STEAM_REQUESTS:
-            elapsed = time.monotonic() - start
-            size = response.headers.get("content-length") or "-"
-            log_fn = logging.info if ok else logging.warning
-            log_fn(
-                "Steam %s -> %s in %.2fs (size=%s, proxy=%s)",
-                endpoint,
-                response.status_code,
-                elapsed,
-                size,
-                _mask_proxy(proxy),
-            )
-
-        if response.status_code in _STEAM_RETRY_STATUSES and attempt < attempts:
-            retry_after = response.headers.get("retry-after")
-            if retry_after:
-                try:
-                    time.sleep(float(retry_after))
-                except ValueError:
-                    pass
-            _sleep_steam_backoff(
-                attempt, RuntimeError(f"HTTP {response.status_code}")
-            )
-            continue
-        return response
-
-    if last_exc:
-        raise last_exc
-    return response
-
-
-def _sleep_steam_backoff(attempt: int, exc: Exception) -> None:
-    if _STEAM_HTTP_BACKOFF <= 0:
-        return
-    delay = _STEAM_HTTP_BACKOFF * (2 ** (attempt - 1))
-    delay += random.uniform(0.0, _STEAM_HTTP_BACKOFF)
-    logging.warning(
-        "Steam retry %s/%s after error: %s (sleep %.1fs)",
-        attempt,
-        _STEAM_HTTP_RETRIES,
-        exc,
-        delay,
-    )
-    time.sleep(delay)
+    return _DEFAULT_CLIENT.snapshot_stats()
 
 
 def steam_get_app_details(app_id: int, language: str, timeout: int) -> Dict[str, str]:
-    url = "https://store.steampowered.com/api/appdetails"
-    response = _steam_request(
-        "get",
-        url,
-        params={"appids": app_id, "l": language},
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    entry = payload.get(str(app_id), {})
-    if not entry.get("success"):
-        raise RuntimeError(f"Steam app {app_id} not found")
-    data = entry.get("data", {})
-    name = data.get("name", "")
-    short_desc = data.get("short_description", "")
-    full_desc = data.get("detailed_description", "")
-    full_desc = re.sub(r"<[^>]+>", "", full_desc)
-    return {
-        "name": name,
-        "short": short_desc,
-        "description": full_desc,
-    }
+    return _DEFAULT_CLIENT.get_app_details(app_id, language, timeout)
 
 
 def steam_fetch_workshop_page_ids_html(
-    app_id: int,
-    page: int,
-    language: str,
-    timeout: int,
+    app_id: int, page: int, language: str, timeout: int
 ) -> List[str]:
-    url = "https://steamcommunity.com/workshop/browse/"
-    params = {
-        "appid": app_id,
-        "browsesort": "mostrecent",
-        "section": "readytouseitems",
-        "p": page,
-        "l": language,
-    }
-    response = _steam_request(
-        "get",
-        url,
-        params=params,
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=timeout,
-    )
-    if response.status_code != 200:
-        return []
-    return re.findall(r"data-publishedfileid=\"(\d+)\"", response.text)
-
+    return _DEFAULT_CLIENT.fetch_workshop_page_ids_html(app_id, page, language, timeout)

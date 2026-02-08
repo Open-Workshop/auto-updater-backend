@@ -1,10 +1,11 @@
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import logging
-import mimetypes
-import random
 import re
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Mapping, Tuple
@@ -13,84 +14,464 @@ from urllib.parse import parse_qs, urlparse
 import aiohttp
 from selectolax.parser import HTMLParser
 
-from utils import dedupe_images, ensure_dir, normalize_image_url
+from http_utils import ProxyPool, RetryPolicy
+from utils import dedupe_images, ensure_dir, normalize_image_url, extension_from_headers
 
-_STEAMMOD_PROXY_POOL: List[str] = []
-_STEAMMOD_PROXY_INDEX = 0
-_STEAMMOD_DEFAULT_TIMEOUT = 20
-_STEAMMOD_IMAGE_CONCURRENCY = 6
-_STEAMMOD_HTTP_RETRIES = 2
-_STEAMMOD_HTTP_BACKOFF = 1.0
-_STEAMMOD_REQUEST_DELAY = 0.0
-_STEAMMOD_RETRY_STATUSES = {429, 500, 502, 503, 504}
-_STEAMMOD_REQUEST_LOCKS: dict[int, asyncio.Lock] = {}
-_STEAMMOD_LAST_REQUEST_TS: dict[int, float] = {}
+DEFAULT_TIMEOUT = 20
+DEFAULT_IMAGE_CONCURRENCY = 6
+DEFAULT_RETRY_POLICY = RetryPolicy(retries=2, backoff=1.0, request_delay=0.0)
 
 ImageTarget = Tuple[str, str, str]
 ImageDownload = Tuple[str, str, Path, str]
 
 
+class AsyncThrottle:
+    def __init__(self, delay: float) -> None:
+        self.delay = max(0.0, float(delay))
+        self._locks: dict[int, asyncio.Lock] = {}
+        self._last_ts: dict[int, float] = {}
+
+    async def wait(self) -> None:
+        if self.delay <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        key = id(loop)
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[key] = lock
+        async with lock:
+            now = time.monotonic()
+            last_ts = self._last_ts.get(key, 0.0)
+            wait_for = self.delay - (now - last_ts)
+            if wait_for > 0:
+                await asyncio.sleep(wait_for)
+            self._last_ts[key] = time.monotonic()
+
+    def update_delay(self, delay: float) -> None:
+        self.delay = max(0.0, float(delay))
+
+
+@dataclass
+class SteamMod:
+    item_id: str
+    title: str = ""
+    description: str = ""
+    tags: List[str] = field(default_factory=list)
+    dependencies: List[str] = field(default_factory=list)
+    logo: str = ""
+    screenshots: List[str] = field(default_factory=list)
+    size_text: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    created_ts: int = 0
+    updated_ts: int = 0
+    page_ok: bool = False
+
+    def __post_init__(self) -> None:
+        self.item_id = str(self.item_id)
+
+    async def load(
+        self,
+        *,
+        timeout: int | None = None,
+        proxy: str | None = None,
+        session: aiohttp.ClientSession | None = None,
+        language: str | None = None,
+        client: SteamWorkshopClient | None = None,
+    ) -> bool:
+        client = client or _DEFAULT_CLIENT
+        fetched = await client.fetch_mod(
+            self.item_id,
+            timeout=timeout,
+            proxy=proxy,
+            session=session,
+            language=language,
+        )
+        if fetched is None:
+            return False
+        self._apply(fetched)
+        return True
+
+    async def download_images(
+        self,
+        dest_dir: Path,
+        targets: List[ImageTarget],
+        *,
+        timeout: int | None = None,
+        proxy: str | None = None,
+        session: aiohttp.ClientSession | None = None,
+        max_concurrency: int | None = None,
+        client: SteamWorkshopClient | None = None,
+    ) -> List[ImageDownload]:
+        client = client or _DEFAULT_CLIENT
+        return await client.download_images(
+            dest_dir,
+            targets,
+            timeout=timeout,
+            proxy=proxy,
+            session=session,
+            max_concurrency=max_concurrency,
+        )
+
+    @classmethod
+    def from_html(cls, item_id: str, html_text: str) -> "SteamMod":
+        parser = HTMLParser(html_text)
+        title = _clean_text(
+            parser.css_first("div.workshopItemTitle").text()
+            if parser.css_first("div.workshopItemTitle")
+            else ""
+        )
+        description_node = parser.css_first("div.workshopItemDescription")
+        description = _clean_text(description_node.text() if description_node else "")
+
+        logo_node = parser.css_first(
+            "div.col_right.responsive_local_menu div.workshopItemPreviewImageMain a img"
+
+        )
+        logo_url = normalize_image_url(
+            logo_node.attributes.get("src") if logo_node else ""
+        )
+
+        tags: List[str] = []
+        size_text = ""
+        created_at = ""
+        updated_at = ""
+        created_ts = 0
+        updated_ts = 0
+
+        right_blocks = parser.css("div.rightDetailsBlock")
+        if right_blocks:
+            tag_nodes = right_blocks[0].css("a")
+            tag_values = [_clean_text(node.text()) for node in tag_nodes if node.text()]
+            tags = _dedupe_keep_order([t for t in tag_values if t])
+
+        if len(right_blocks) > 1:
+            stat_nodes = right_blocks[1].css(
+                "div.detailsStatsContainerRight div.detailsStatRight"
+            )
+            stats = [_clean_text(node.text()) for node in stat_nodes if node.text()]
+            size_text = stats[0] if len(stats) > 0 else ""
+            created_at = stats[1] if len(stats) > 1 else ""
+            updated_at = stats[2] if len(stats) > 2 else ""
+            created_ts = _parse_steam_date(created_at)
+            updated_ts = _parse_steam_date(updated_at)
+
+        screenshot_nodes = parser.css("div.highlight_strip_screenshot img")
+        screenshot_urls: List[str] = []
+        for node in screenshot_nodes:
+            raw_url = node.attributes.get("src") or node.attributes.get("data-src") or ""
+            url = normalize_image_url(raw_url)
+            if url:
+                screenshot_urls.append(url)
+        screenshot_urls = dedupe_images(screenshot_urls)
+
+        if logo_url:
+            images = dedupe_images([logo_url] + screenshot_urls)
+            logo_url = images[0]
+            screenshots = images[1:]
+        else:
+            screenshots = screenshot_urls
+
+        dependencies = _extract_dependencies(html_text)
+
+        return cls(
+            item_id=str(item_id),
+            title=title,
+            description=description,
+            tags=tags,
+            dependencies=dependencies,
+            logo=logo_url,
+            screenshots=screenshots,
+            size_text=size_text,
+            created_at=created_at,
+            updated_at=updated_at,
+            created_ts=created_ts,
+            updated_ts=updated_ts,
+            page_ok=True,
+        )
+
+    def _apply(self, other: "SteamMod") -> None:
+        self.title = other.title
+        self.description = other.description
+        self.tags = list(other.tags)
+        self.dependencies = list(other.dependencies)
+        self.logo = other.logo
+        self.screenshots = list(other.screenshots)
+        self.size_text = other.size_text
+        self.created_at = other.created_at
+        self.updated_at = other.updated_at
+        self.created_ts = other.created_ts
+        self.updated_ts = other.updated_ts
+        self.page_ok = other.page_ok
+
+
+class SteamWorkshopClient:
+    def __init__(
+        self,
+        *,
+        policy: RetryPolicy | None = None,
+        proxies: List[str] | None = None,
+        timeout: int = DEFAULT_TIMEOUT,
+        image_concurrency: int = DEFAULT_IMAGE_CONCURRENCY,
+    ) -> None:
+        self.policy = policy or RetryPolicy(
+            retries=DEFAULT_RETRY_POLICY.retries,
+            backoff=DEFAULT_RETRY_POLICY.backoff,
+            request_delay=DEFAULT_RETRY_POLICY.request_delay,
+            retry_statuses=set(DEFAULT_RETRY_POLICY.retry_statuses),
+        )
+        self.proxy_pool = ProxyPool(proxies)
+        self.timeout = int(timeout)
+        self.image_concurrency = max(1, int(image_concurrency))
+        self._throttle = AsyncThrottle(self.policy.request_delay)
+
+    def set_policy(self, retries: int, backoff: float, request_delay: float) -> None:
+        self.policy = RetryPolicy(
+            retries=retries,
+            backoff=backoff,
+            request_delay=request_delay,
+            retry_statuses=set(self.policy.retry_statuses),
+        )
+        self._throttle.update_delay(self.policy.request_delay)
+
+    def set_proxy_pool(self, proxies: List[str]) -> None:
+        self.proxy_pool.set(proxies)
+
+    async def fetch_mod(
+        self,
+        item_id: str,
+        *,
+        timeout: int | None = None,
+        proxy: str | None = None,
+        session: aiohttp.ClientSession | None = None,
+        language: str | None = None,
+    ) -> SteamMod | None:
+        url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={item_id}&requireditems=1"
+        if language:
+            url = f"{url}&l={language}"
+        timeout_value = self._coerce_timeout(timeout)
+        close_session = False
+        if session is None:
+            timeout_cfg = aiohttp.ClientTimeout(total=timeout_value)
+            session = aiohttp.ClientSession(timeout=timeout_cfg)
+            close_session = True
+
+        html_text: str | None = None
+        attempts = self.policy.retries + 1
+        last_exc: Exception | None = None
+        try:
+            for attempt in range(1, attempts + 1):
+                chosen_proxy = proxy if proxy is not None else self.proxy_pool.next()
+                await self._throttle.wait()
+                try:
+                    async with session.get(
+                        url,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        proxy=chosen_proxy,
+                        timeout=timeout_value,
+                    ) as response:
+                        if response.status in self.policy.retry_statuses and attempt < attempts:
+                            retry_after = response.headers.get("retry-after")
+                            if retry_after:
+                                try:
+                                    await asyncio.sleep(float(retry_after))
+                                except ValueError:
+                                    pass
+                            await self._sleep_backoff(attempt, RuntimeError(f"HTTP {response.status}"))
+                            continue
+                        if response.status != 200:
+                            logging.warning(
+                                "Steam page fetch failed for %s: HTTP %s",
+                                item_id,
+                                response.status,
+                            )
+                            return None
+                        html_text = await response.text()
+                        break
+                except aiohttp.ClientError as exc:
+                    last_exc = exc
+                    if attempt >= attempts:
+                        logging.warning("Steam page fetch failed for %s: %s", item_id, exc)
+                        return None
+                    await self._sleep_backoff(attempt, exc)
+                    continue
+        finally:
+            if close_session and session is not None:
+                await session.close()
+        if html_text is None:
+            if last_exc:
+                logging.warning("Steam page fetch failed for %s: %s", item_id, last_exc)
+            return None
+        return SteamMod.from_html(str(item_id), html_text)
+
+    async def fetch_mods(
+        self,
+        item_ids: List[str],
+        *,
+        timeout: int | None = None,
+        language: str | None = None,
+    ) -> dict[str, SteamMod]:
+        if not item_ids:
+            return {}
+        timeout_value = self._coerce_timeout(timeout)
+        timeout_cfg = aiohttp.ClientTimeout(total=timeout_value)
+        results: dict[str, SteamMod] = {}
+        async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
+            for item_id in item_ids:
+                mod = await self.fetch_mod(
+                    item_id,
+                    timeout=timeout_value,
+                    session=session,
+                    language=language,
+                )
+                if mod is None:
+                    logging.warning("Steam page parse failed for %s", item_id)
+                    continue
+                results[str(item_id)] = mod
+        return results
+
+    async def download_images(
+        self,
+        dest_dir: Path,
+        targets: List[ImageTarget],
+        *,
+        timeout: int | None = None,
+        proxy: str | None = None,
+        session: aiohttp.ClientSession | None = None,
+        max_concurrency: int | None = None,
+    ) -> List[ImageDownload]:
+        if not targets:
+            return []
+        ensure_dir(dest_dir)
+        timeout_value = self._coerce_timeout(timeout)
+        concurrency = (
+            self.image_concurrency if max_concurrency is None else int(max_concurrency)
+        )
+        concurrency = max(1, concurrency)
+
+        close_session = False
+        if session is None:
+            timeout_cfg = aiohttp.ClientTimeout(total=timeout_value)
+            session = aiohttp.ClientSession(timeout=timeout_cfg)
+            close_session = True
+
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def fetch_one(target: ImageTarget) -> ImageDownload | None:
+            res_type, url, basename = target
+            if not url:
+                return None
+            temp_path: Path | None = None
+            async with semaphore:
+                try:
+                    attempts = self.policy.retries + 1
+                    last_exc: Exception | None = None
+                    for attempt in range(1, attempts + 1):
+                        chosen_proxy = proxy if proxy is not None else self.proxy_pool.next()
+                        await self._throttle.wait()
+                        try:
+                            async with session.get(
+                                url,
+                                headers={"User-Agent": "Mozilla/5.0"},
+                                proxy=chosen_proxy,
+                                timeout=timeout_value,
+                            ) as response:
+                                if (
+                                    response.status in self.policy.retry_statuses
+                                    and attempt < attempts
+                                ):
+                                    retry_after = response.headers.get("retry-after")
+                                    if retry_after:
+                                        try:
+                                            await asyncio.sleep(float(retry_after))
+                                        except ValueError:
+                                            pass
+                                    await self._sleep_backoff(
+                                        attempt, RuntimeError(f"HTTP {response.status}")
+                                    )
+                                    continue
+                                if response.status != 200:
+                                    logging.warning(
+                                        "Steam image fetch failed for %s: HTTP %s",
+                                        url,
+                                        response.status,
+                                    )
+                                    return None
+                                ext = extension_from_headers(response.headers) or ".bin"
+                                path = dest_dir / f"{basename}{ext}"
+                                temp_path = path.with_suffix(f"{path.suffix}.part")
+                                digest = hashlib.sha256()
+                                with temp_path.open("wb") as handle:
+                                    async for chunk in response.content.iter_chunked(
+                                        1024 * 1024
+                                    ):
+                                        if not chunk:
+                                            continue
+                                        handle.write(chunk)
+                                        digest.update(chunk)
+                                temp_path.replace(path)
+                                temp_path = None
+                                return (res_type, url, path, digest.hexdigest())
+                        except aiohttp.ClientError as exc:
+                            last_exc = exc
+                            if attempt >= attempts:
+                                logging.warning(
+                                    "Steam image fetch failed for %s: %s", url, exc
+                                )
+                                return None
+                            await self._sleep_backoff(attempt, exc)
+                            continue
+                    if last_exc:
+                        logging.warning("Steam image fetch failed for %s: %s", url, last_exc)
+                    return None
+                finally:
+                    if temp_path and temp_path.exists():
+                        try:
+                            temp_path.unlink()
+                        except FileNotFoundError:
+                            pass
+
+        try:
+            tasks = [asyncio.create_task(fetch_one(target)) for target in targets]
+            raw_results = await asyncio.gather(*tasks)
+            results: List[ImageDownload] = []
+            for entry in raw_results:
+                if entry is not None:
+                    results.append(entry)
+            return results
+        finally:
+            if close_session and session is not None:
+                await session.close()
+
+    def _coerce_timeout(self, timeout: int | None) -> int:
+        if timeout is None:
+            return int(self.timeout)
+        return int(timeout)
+
+    async def _sleep_backoff(self, attempt: int, exc: Exception) -> None:
+        delay = self.policy.delay_for_attempt(attempt)
+        if delay <= 0:
+            return
+        logging.warning(
+            "Steam retry %s/%s after error: %s (sleep %.1fs)",
+            attempt,
+            self.policy.retries,
+            exc,
+            delay,
+        )
+        await asyncio.sleep(delay)
+
+
+_DEFAULT_CLIENT = SteamWorkshopClient()
+
+
 def set_steam_mod_proxy_pool(proxies: List[str]) -> None:
-    global _STEAMMOD_PROXY_POOL, _STEAMMOD_PROXY_INDEX
-    cleaned: List[str] = []
-    for proxy in proxies or []:
-        value = proxy.strip()
-        if not value:
-            continue
-        if value.lower() in {"none", "off", "direct"}:
-            continue
-        cleaned.append(value)
-    _STEAMMOD_PROXY_POOL = cleaned
-    _STEAMMOD_PROXY_INDEX = 0
+    _DEFAULT_CLIENT.set_proxy_pool(proxies)
 
 
 def set_steam_mod_request_policy(retries: int, backoff: float, request_delay: float) -> None:
-    global _STEAMMOD_HTTP_RETRIES, _STEAMMOD_HTTP_BACKOFF, _STEAMMOD_REQUEST_DELAY
-    _STEAMMOD_HTTP_RETRIES = max(0, int(retries))
-    _STEAMMOD_HTTP_BACKOFF = max(0.0, float(backoff))
-    _STEAMMOD_REQUEST_DELAY = max(0.0, float(request_delay))
-
-
-def _next_proxy() -> str | None:
-    global _STEAMMOD_PROXY_INDEX
-    if not _STEAMMOD_PROXY_POOL:
-        return None
-    proxy = _STEAMMOD_PROXY_POOL[_STEAMMOD_PROXY_INDEX % len(_STEAMMOD_PROXY_POOL)]
-    _STEAMMOD_PROXY_INDEX += 1
-    return proxy
-
-
-async def _respect_request_delay() -> None:
-    if _STEAMMOD_REQUEST_DELAY <= 0:
-        return
-    loop = asyncio.get_running_loop()
-    key = id(loop)
-    lock = _STEAMMOD_REQUEST_LOCKS.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _STEAMMOD_REQUEST_LOCKS[key] = lock
-    async with lock:
-        now = time.monotonic()
-        last_ts = _STEAMMOD_LAST_REQUEST_TS.get(key, 0.0)
-        wait_for = _STEAMMOD_REQUEST_DELAY - (now - last_ts)
-        if wait_for > 0:
-            await asyncio.sleep(wait_for)
-        _STEAMMOD_LAST_REQUEST_TS[key] = time.monotonic()
-
-
-async def _sleep_backoff(attempt: int, exc: Exception) -> None:
-    if _STEAMMOD_HTTP_BACKOFF <= 0:
-        return
-    delay = _STEAMMOD_HTTP_BACKOFF * (2 ** (attempt - 1))
-    delay += random.uniform(0.0, _STEAMMOD_HTTP_BACKOFF)
-    logging.warning(
-        "Steam retry %s/%s after error: %s (sleep %.1fs)",
-        attempt,
-        _STEAMMOD_HTTP_RETRIES,
-        exc,
-        delay,
-    )
-    await asyncio.sleep(delay)
+    _DEFAULT_CLIENT.set_policy(retries, backoff, request_delay)
 
 
 def _clean_text(value: str | None) -> str:
@@ -170,267 +551,3 @@ def _extract_dependencies(html_text: str) -> List[str]:
             seen.add(item_id)
             ids.append(item_id)
     return ids
-
-
-def _extension_from_headers(headers: Mapping[str, str]) -> str:
-    content_type = ""
-    try:
-        content_type = (headers.get("content-type") or "").split(";")[0].strip().lower()
-    except Exception:
-        content_type = ""
-    if not content_type:
-        return ""
-    ext = mimetypes.guess_extension(content_type) or ""
-    if ext == ".jpe":
-        ext = ".jpg"
-    return ext
-
-
-class SteamMod:
-    def __init__(self, item_id: str) -> None:
-        self.item_id = str(item_id)
-        self.title = ""
-        self.description = ""
-        self.tags: List[str] = []
-        self.dependencies: List[str] = []
-        self.logo = ""
-        self.screenshots: List[str] = []
-        self.size_text = ""
-        self.created_at = ""
-        self.updated_at = ""
-        self.created_ts = 0
-        self.updated_ts = 0
-        self.page_ok = False
-
-    async def load(
-        self,
-        *,
-        timeout: int | None = None,
-        proxy: str | None = None,
-        session: aiohttp.ClientSession | None = None,
-        language: str | None = None,
-    ) -> bool:
-        url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={self.item_id}&requireditems=1"
-        if language:
-            url = f"{url}&l={language}"
-        timeout_value = _STEAMMOD_DEFAULT_TIMEOUT if timeout is None else int(timeout)
-        close_session = False
-
-        if session is None:
-            timeout_cfg = aiohttp.ClientTimeout(total=timeout_value)
-            session = aiohttp.ClientSession(timeout=timeout_cfg)
-            close_session = True
-
-        html_text: str | None = None
-        attempts = _STEAMMOD_HTTP_RETRIES + 1
-        last_exc: Exception | None = None
-        try:
-            for attempt in range(1, attempts + 1):
-                chosen_proxy = proxy if proxy is not None else _next_proxy()
-                await _respect_request_delay()
-                try:
-                    async with session.get(
-                        url,
-                        headers={"User-Agent": "Mozilla/5.0"},
-                        proxy=chosen_proxy,
-                        timeout=timeout_value,
-                    ) as response:
-                        if response.status in _STEAMMOD_RETRY_STATUSES and attempt < attempts:
-                            retry_after = response.headers.get("retry-after")
-                            if retry_after:
-                                try:
-                                    await asyncio.sleep(float(retry_after))
-                                except ValueError:
-                                    pass
-                            await _sleep_backoff(
-                                attempt, RuntimeError(f"HTTP {response.status}")
-                            )
-                            continue
-                        if response.status != 200:
-                            logging.warning(
-                                "Steam page fetch failed for %s: HTTP %s",
-                                self.item_id,
-                                response.status,
-                            )
-                            return False
-                        html_text = await response.text()
-                        break
-                except aiohttp.ClientError as exc:
-                    last_exc = exc
-                    if attempt >= attempts:
-                        logging.warning("Steam page fetch failed for %s: %s", self.item_id, exc)
-                        return False
-                    await _sleep_backoff(attempt, exc)
-                    continue
-        finally:
-            if close_session and session is not None:
-                await session.close()
-        if html_text is None:
-            if last_exc:
-                logging.warning("Steam page fetch failed for %s: %s", self.item_id, last_exc)
-            return False
-
-        parser = HTMLParser(html_text)
-        self.title = _clean_text(
-            parser.css_first("div.workshopItemTitle").text()
-            if parser.css_first("div.workshopItemTitle")
-            else ""
-        )
-        description_node = parser.css_first("div.workshopItemDescription")
-        self.description = _clean_text(description_node.text() if description_node else "")
-
-        logo_node = parser.css_first(
-            "div.col_right.responsive_local_menu div.workshopItemPreviewImageMain a img"
-        )
-        logo_url = normalize_image_url(
-            logo_node.attributes.get("src") if logo_node else ""
-        )
-        self.logo = logo_url
-
-        right_blocks = parser.css("div.rightDetailsBlock")
-        if right_blocks:
-            tag_nodes = right_blocks[0].css("a")
-            tag_values = [_clean_text(node.text()) for node in tag_nodes if node.text()]
-            self.tags = _dedupe_keep_order([t for t in tag_values if t])
-
-        if len(right_blocks) > 1:
-            stat_nodes = right_blocks[1].css(
-                "div.detailsStatsContainerRight div.detailsStatRight"
-            )
-            stats = [_clean_text(node.text()) for node in stat_nodes if node.text()]
-            self.size_text = stats[0] if len(stats) > 0 else ""
-            self.created_at = stats[1] if len(stats) > 1 else ""
-            self.updated_at = stats[2] if len(stats) > 2 else ""
-            self.created_ts = _parse_steam_date(self.created_at)
-            self.updated_ts = _parse_steam_date(self.updated_at)
-
-        screenshot_nodes = parser.css("div.highlight_strip_screenshot img")
-        screenshot_urls: List[str] = []
-        for node in screenshot_nodes:
-            raw_url = node.attributes.get("src") or node.attributes.get("data-src") or ""
-            url = normalize_image_url(raw_url)
-            if url:
-                screenshot_urls.append(url)
-        screenshot_urls = dedupe_images(screenshot_urls)
-
-        if self.logo:
-            images = dedupe_images([self.logo] + screenshot_urls)
-            self.logo = images[0]
-            self.screenshots = images[1:]
-        else:
-            self.screenshots = screenshot_urls
-
-        self.dependencies = _extract_dependencies(html_text)
-        self.page_ok = True
-        return True
-
-    async def download_images(
-        self,
-        dest_dir: Path,
-        targets: List[ImageTarget],
-        *,
-        timeout: int | None = None,
-        proxy: str | None = None,
-        session: aiohttp.ClientSession | None = None,
-        max_concurrency: int | None = None,
-    ) -> List[ImageDownload]:
-        if not targets:
-            return []
-        ensure_dir(dest_dir)
-        timeout_value = _STEAMMOD_DEFAULT_TIMEOUT if timeout is None else int(timeout)
-        concurrency = _STEAMMOD_IMAGE_CONCURRENCY if max_concurrency is None else int(max_concurrency)
-        concurrency = max(1, concurrency)
-
-        close_session = False
-        if session is None:
-            timeout_cfg = aiohttp.ClientTimeout(total=timeout_value)
-            session = aiohttp.ClientSession(timeout=timeout_cfg)
-            close_session = True
-
-        semaphore = asyncio.Semaphore(concurrency)
-
-        async def fetch_one(target: ImageTarget) -> ImageDownload | None:
-            res_type, url, basename = target
-            if not url:
-                return None
-            temp_path: Path | None = None
-            async with semaphore:
-                try:
-                    attempts = _STEAMMOD_HTTP_RETRIES + 1
-                    last_exc: Exception | None = None
-                    for attempt in range(1, attempts + 1):
-                        chosen_proxy = proxy if proxy is not None else _next_proxy()
-                        await _respect_request_delay()
-                        try:
-                            async with session.get(
-                                url,
-                                headers={"User-Agent": "Mozilla/5.0"},
-                                proxy=chosen_proxy,
-                                timeout=timeout_value,
-                            ) as response:
-                                if (
-                                    response.status in _STEAMMOD_RETRY_STATUSES
-                                    and attempt < attempts
-                                ):
-                                    retry_after = response.headers.get("retry-after")
-                                    if retry_after:
-                                        try:
-                                            await asyncio.sleep(float(retry_after))
-                                        except ValueError:
-                                            pass
-                                    await _sleep_backoff(
-                                        attempt, RuntimeError(f"HTTP {response.status}")
-                                    )
-                                    continue
-                                if response.status != 200:
-                                    logging.warning(
-                                        "Steam image fetch failed for %s: HTTP %s",
-                                        url,
-                                        response.status,
-                                    )
-                                    return None
-                                ext = _extension_from_headers(response.headers) or ".bin"
-                                path = dest_dir / f"{basename}{ext}"
-                                temp_path = path.with_suffix(f"{path.suffix}.part")
-                                digest = hashlib.sha256()
-                                with temp_path.open("wb") as handle:
-                                    async for chunk in response.content.iter_chunked(
-                                        1024 * 1024
-                                    ):
-                                        if not chunk:
-                                            continue
-                                        handle.write(chunk)
-                                        digest.update(chunk)
-                                temp_path.replace(path)
-                                temp_path = None
-                                return (res_type, url, path, digest.hexdigest())
-                        except aiohttp.ClientError as exc:
-                            last_exc = exc
-                            if attempt >= attempts:
-                                logging.warning(
-                                    "Steam image fetch failed for %s: %s", url, exc
-                                )
-                                return None
-                            await _sleep_backoff(attempt, exc)
-                            continue
-                    if last_exc:
-                        logging.warning("Steam image fetch failed for %s: %s", url, last_exc)
-                    return None
-                finally:
-                    if temp_path and temp_path.exists():
-                        try:
-                            temp_path.unlink()
-                        except FileNotFoundError:
-                            pass
-
-        try:
-            tasks = [asyncio.create_task(fetch_one(target)) for target in targets]
-            raw_results = await asyncio.gather(*tasks)
-            results: List[ImageDownload] = []
-            for entry in raw_results:
-                if entry is not None:
-                    results.append(entry)
-            return results
-        finally:
-            if close_session and session is not None:
-                await session.close()
