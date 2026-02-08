@@ -91,6 +91,7 @@ def main() -> int:
                 cfg.page_size,
                 cfg.timeout,
                 cfg.steam_max_pages,
+                cfg.steam_start_page,
                 cfg.steam_max_items,
                 cfg.steam_delay,
                 cfg.max_screenshots,

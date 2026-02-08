@@ -330,6 +330,27 @@ class OWClient:
 
         return list_all_pages(fetch)
 
+    def get_mod_by_source(self, source: str, source_id: int) -> Optional[Dict[str, Any]]:
+        params = {
+            "page_size": 10,
+            "page": 0,
+            "general": "true",
+            "dates": "true",
+            "primary_sources": json.dumps([source]),
+            "allowed_sources_ids": json.dumps([source_id]),
+        }
+        response = self.request("get", "/list/mods/", params=params)
+        if not self.is_success(response):
+            return None
+        payload = response.json()
+        results = payload.get("results", []) if isinstance(payload, dict) else []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("source_id")) == str(source_id):
+                return item
+        return None
+
     def find_mod_by_source(self, source: str, source_id: int) -> Optional[int]:
         params = {
             "page_size": 10,
@@ -807,6 +828,12 @@ def ow_list_mods(api: OWClient, game_id: int, page_size: int) -> List[Dict[str, 
 
 def ow_find_mod_by_source(api: OWClient, source: str, source_id: int) -> Optional[int]:
     return api.find_mod_by_source(source, source_id)
+
+
+def ow_get_mod_by_source(
+    api: OWClient, source: str, source_id: int
+) -> Optional[Dict[str, Any]]:
+    return api.get_mod_by_source(source, source_id)
 
 
 def ow_list_games_by_source(

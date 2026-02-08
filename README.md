@@ -35,6 +35,7 @@
 
 Steam / Workshop:
 - `OW_STEAM_MAX_PAGES` — максимум страниц Workshop при HTML‑обходе, по умолчанию `50` (0 = без лимита)
+- `OW_STEAM_START_PAGE` — стартовая страница Workshop, по умолчанию `1`
 - `OW_STEAM_MAX_ITEMS` — максимум модов в одном проходе, по умолчанию `0` (без лимита)
 - `OW_STEAM_DELAY` — задержка между страницами Workshop, по умолчанию `1.0`
 - `OW_MAX_SCREENSHOTS` — максимум скриншотов, по умолчанию `8`

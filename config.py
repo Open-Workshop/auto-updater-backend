@@ -5,10 +5,11 @@ import re
 DEFAULT_API_BASE = "https://api.openworkshop.miskler.ru"
 DEFAULT_PAGE_SIZE = 50
 DEFAULT_POLL_INTERVAL = 10
-DEFAULT_TIMEOUT = 20
+DEFAULT_TIMEOUT = 60
 DEFAULT_HTTP_RETRIES = 3
 DEFAULT_HTTP_RETRY_BACKOFF = 5.0
 DEFAULT_STEAM_MAX_PAGES = 50
+DEFAULT_STEAM_START_PAGE = 30
 DEFAULT_STEAM_PAGE_SIZE = 30
 DEFAULT_STEAM_DELAY = 4
 DEFAULT_MAX_SCREENSHOTS = 20
@@ -64,6 +65,7 @@ class Config:
     steam_request_delay: float
     steam_proxy_pool: list[str]
     steam_max_pages: int
+    steam_start_page: int
     steam_max_items: int
     steam_delay: float
     max_screenshots: int
@@ -120,6 +122,9 @@ def load_config() -> Config:
     )
 
     steam_max_pages = parse_int(os.environ.get("OW_STEAM_MAX_PAGES"), DEFAULT_STEAM_MAX_PAGES)
+    steam_start_page = parse_int(
+        os.environ.get("OW_STEAM_START_PAGE"), DEFAULT_STEAM_START_PAGE
+    )
     steam_max_items = parse_int(os.environ.get("OW_STEAM_MAX_ITEMS"), 0)
     steam_delay = float(os.environ.get("OW_STEAM_DELAY", DEFAULT_STEAM_DELAY))
     max_screenshots = parse_int(os.environ.get("OW_MAX_SCREENSHOTS"), DEFAULT_MAX_SCREENSHOTS)
@@ -160,6 +165,7 @@ def load_config() -> Config:
         steam_request_delay=steam_request_delay,
         steam_proxy_pool=steam_proxy_pool,
         steam_max_pages=steam_max_pages,
+        steam_start_page=steam_start_page,
         steam_max_items=steam_max_items,
         steam_delay=steam_delay,
         max_screenshots=max_screenshots,

@@ -42,6 +42,7 @@ class SyncOptions:
     page_size: int
     timeout: int
     max_pages: int
+    start_page: int
     max_items: int
     page_delay: float
     max_screenshots: int
@@ -71,6 +72,7 @@ class ModPayload:
     deps_ok: bool
     images: List[str]
     images_incomplete: bool
+    ow_mod: Optional[Dict[str, Any]]
     ow_mod_id: Optional[int]
     is_new: bool
 
@@ -172,6 +174,28 @@ class WorkQueue:
         return bool(self.meta_queue or self.download_queue)
 
 
+class ModIndex:
+    def __init__(self, api: ApiClient) -> None:
+        self.api = api
+        self._cache: Dict[str, Optional[Dict[str, Any]]] = {}
+
+    def get(self, source_id: str) -> Optional[Dict[str, Any]]:
+        key = str(source_id)
+        if key in self._cache:
+            return self._cache[key]
+        try:
+            source_int = int(source_id)
+        except (TypeError, ValueError):
+            self._cache[key] = None
+            return None
+        mod = self.api.get_mod_by_source("steam", source_int)
+        self._cache[key] = mod
+        return mod
+
+    def set(self, source_id: str, mod: Dict[str, Any]) -> None:
+        self._cache[str(source_id)] = mod
+
+
 class TagManager:
     def __init__(
         self,
@@ -246,19 +270,19 @@ class DependencyManager:
     def __init__(
         self,
         api: ApiClient,
-        ow_by_source: Dict[str, Dict[str, Any]],
         *,
         enabled: bool,
         prune: bool,
         scrape_required_items: bool,
         enqueue_metadata: Callable[[str], None],
+        lookup_mod: Callable[[str], Optional[Dict[str, Any]]],
     ) -> None:
         self.api = api
-        self.ow_by_source = ow_by_source
         self.enabled = enabled
         self.prune = prune
         self.scrape_required_items = scrape_required_items
         self.enqueue_metadata = enqueue_metadata
+        self.lookup_mod = lookup_mod
         self.pending_dependency_links: Dict[int, Dict[str, Any]] = {}
 
     def queue_missing_sources(self, dep_source_ids: List[str]) -> None:
@@ -279,7 +303,7 @@ class DependencyManager:
         missing_sources: List[str] = []
         for dep_source_id in dep_source_ids:
             dep_source_id = str(dep_source_id)
-            dep_mod = self.ow_by_source.get(dep_source_id)
+            dep_mod = self.lookup_mod(dep_source_id)
             if dep_mod:
                 desired_dep_ids.append(int(dep_mod.get("id")))
             else:
@@ -317,7 +341,7 @@ class DependencyManager:
             desired_dep_ids: List[int] = []
             missing_sources: List[str] = []
             for dep_source_id in dep_source_ids:
-                dep_mod = self.ow_by_source.get(dep_source_id)
+                dep_mod = self.lookup_mod(dep_source_id)
                 if dep_mod:
                     desired_dep_ids.append(int(dep_mod.get("id")))
                 else:
@@ -773,9 +797,9 @@ class ModSyncer:
         self.options = options
 
         self.queue = WorkQueue()
-        self.page = 1
+        self.page = max(1, int(options.start_page))
         self.listed_count = 0
-        self.ow_by_source: Dict[str, Dict[str, Any]] = {}
+        self.mod_index = ModIndex(api)
         self.steam_mod_cache: Dict[str, SteamMod] = {}
         self.tag_manager = TagManager(
             api,
@@ -786,11 +810,11 @@ class ModSyncer:
         )
         self.dependency_manager = DependencyManager(
             api,
-            self.ow_by_source,
             enabled=options.sync_dependencies,
             prune=options.prune_dependencies,
             scrape_required_items=options.scrape_required_items,
             enqueue_metadata=self.queue.enqueue_metadata,
+            lookup_mod=self.mod_index.get,
         )
         self.resource_syncer = ResourceSyncer(
             api,
@@ -804,7 +828,6 @@ class ModSyncer:
 
     def run(self) -> None:
         steam_stats_reset()
-        self._load_existing_mods()
         self.tag_manager.preload()
 
         if self.options.force_required_item_id:
@@ -812,7 +835,8 @@ class ModSyncer:
             logging.info("Steam workshop items: 1 (forced)")
         else:
             logging.info(
-                "Steam workshop listing: max_items=%s max_pages=%s",
+                "Steam workshop listing: start_page=%s max_items=%s max_pages=%s",
+                self.page,
                 self.options.max_items or "unlimited",
                 self.options.max_pages or "unlimited",
             )
@@ -847,13 +871,6 @@ class ModSyncer:
                 stats.get("failed"),
                 stats.get("by_endpoint"),
             )
-
-    def _load_existing_mods(self) -> None:
-        ow_mods = self.api.list_mods(self.game_id, self.options.page_size)
-        for mod in ow_mods:
-            source_id = mod.get("source_id")
-            if source_id is not None:
-                self.ow_by_source[str(source_id)] = mod
 
     def _fetch_next_page(self) -> bool:
         if self.options.max_pages > 0 and self.page > self.options.max_pages:
@@ -897,7 +914,7 @@ class ModSyncer:
             payload = self._build_payload(mod, workshop_id)
             if payload is None:
                 continue
-            if self._needs_file_update(mod, payload.ow_mod_id):
+            if self._needs_file_update(mod, payload.ow_mod):
                 logging.info(
                     "Queue download for %s (new=%s)",
                     workshop_id,
@@ -959,13 +976,16 @@ class ModSyncer:
                 self.options.without_author,
                 archive_path,
             )
-            self.ow_by_source[str(item_id)] = {
+            self.mod_index.set(
+                str(item_id),
+                {
                 "id": mod_id,
                 "source_id": int(item_id),
                 "date_update_file": datetime.now(timezone.utc).isoformat(
                     timespec="seconds"
                 ),
-            }
+                },
+            )
             ow_mod_id = mod_id
         else:
             logging.info("Updating OW mod %s file", ow_mod_id)
@@ -1014,7 +1034,7 @@ class ModSyncer:
             title, short_desc, description
         )
 
-        ow_mod = self.ow_by_source.get(str(workshop_id))
+        ow_mod = self.mod_index.get(str(workshop_id))
         ow_mod_id = int(ow_mod.get("id")) if ow_mod else None
         is_existing_mod = ow_mod_id is not None
 
@@ -1054,6 +1074,7 @@ class ModSyncer:
             deps_ok=page_ok,
             images=images,
             images_incomplete=images_incomplete,
+            ow_mod=ow_mod,
             ow_mod_id=ow_mod_id,
             is_new=ow_mod_id is None,
         )
@@ -1066,11 +1087,12 @@ class ModSyncer:
             images.extend(mod.screenshots)
         return [url for url in images if url]
 
-    def _needs_file_update(self, mod: SteamMod, ow_mod_id: Optional[int]) -> bool:
-        if ow_mod_id is None:
-            return True
-        ow_mod = self.ow_by_source.get(str(mod.item_id))
-        if not ow_mod:
+    def _needs_file_update(
+        self,
+        mod: SteamMod,
+        ow_mod: Optional[Dict[str, Any]],
+    ) -> bool:
+        if ow_mod is None:
             return True
         steam_latest_ts = max(mod.updated_ts, mod.created_ts)
         ow_updated_file_ts = _parse_ow_datetime(
@@ -1163,6 +1185,7 @@ def sync_mods(
     page_size: int,
     timeout: int,
     max_pages: int,
+    start_page: int,
     max_items: int,
     page_delay: float,
     max_screenshots: int,
@@ -1185,6 +1208,7 @@ def sync_mods(
         page_size=page_size,
         timeout=timeout,
         max_pages=max_pages,
+        start_page=start_page,
         max_items=max_items,
         page_delay=page_delay,
         max_screenshots=max_screenshots,

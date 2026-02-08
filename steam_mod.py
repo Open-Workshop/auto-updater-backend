@@ -127,8 +127,9 @@ class SteamMod:
 
         logo_node = parser.css_first(
             "div.col_right.responsive_local_menu div.workshopItemPreviewImageMain a img"
-
         )
+        if logo_node is None:
+            logo_node = parser.css_first("img#previewImage")
         logo_url = normalize_image_url(
             logo_node.attributes.get("src") if logo_node else ""
         )
