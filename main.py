@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 from config import load_config
-from ow_api import ApiClient, ow_get_game
+from ow_api import ApiClient, load_api_limits, ow_get_game
 from syncer import ensure_game, sync_mods
 from steam_api import (
     set_steam_request_logging,
@@ -47,6 +47,7 @@ def main() -> int:
     except Exception as exc:
         logging.error("Failed to authenticate: %s", exc)
         return 2
+    load_api_limits(api)
 
     steam_app_id = cfg.steam_app_id
     if steam_app_id <= 0:

@@ -38,9 +38,14 @@ def strip_bbcode(text: str) -> str:
 
 
 def truncate(text: str, limit: int) -> str:
-    if len(text) <= limit:
+    if limit <= 0:
+        return ""
+    if not text:
+        return text or ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
         return text
-    return text[:limit]
+    return encoded[:limit].decode("utf-8", errors="ignore")
 
 
 def normalize_image_url(url: str) -> str:

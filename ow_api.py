@@ -8,6 +8,93 @@ import requests
 
 from utils import truncate
 
+_DEFAULT_LIMITS: Dict[str, int] = {
+    "game_name": 128,
+    "game_short_desc": 256,
+    "game_desc": 10000,
+    "mod_name": 128,
+    "mod_short_description": 256,
+    "mod_description": 10000,
+    "tag_name": 128,
+}
+_LIMITS: Dict[str, int] = dict(_DEFAULT_LIMITS)
+
+
+def _limit(key: str, fallback: int) -> int:
+    try:
+        value = int(_LIMITS.get(key, fallback))
+    except (TypeError, ValueError):
+        return fallback
+    return value if value > 0 else fallback
+
+
+def _extract_limits(openapi: Dict[str, Any]) -> Dict[str, int]:
+    wanted = {
+        "game_name",
+        "game_short_desc",
+        "game_desc",
+        "mod_name",
+        "mod_short_description",
+        "mod_description",
+        "tag_name",
+    }
+    found: Dict[str, int] = {}
+    schemas = openapi.get("components", {}).get("schemas", {})
+    if not isinstance(schemas, dict):
+        return found
+    for schema in schemas.values():
+        if not isinstance(schema, dict):
+            continue
+        props = schema.get("properties", {})
+        if not isinstance(props, dict):
+            continue
+        for key, prop in props.items():
+            if key not in wanted or not isinstance(prop, dict):
+                continue
+            limit = prop.get("maxLength")
+            try:
+                limit_value = int(limit)
+            except (TypeError, ValueError):
+                continue
+            if limit_value <= 0:
+                continue
+            current = found.get(key)
+            if current is None or limit_value < current:
+                found[key] = limit_value
+    return found
+
+
+def load_api_limits(api: "ApiClient") -> None:
+    global _LIMITS
+    try:
+        response = api.request("get", "/openapi.json")
+    except Exception as exc:
+        logging.warning("Failed to load OW OpenAPI limits: %s", exc)
+        return
+    if not _is_success(response):
+        logging.warning(
+            "Failed to load OW OpenAPI limits: %s %s",
+            response.status_code,
+            (response.text or "")[:200],
+        )
+        return
+    try:
+        payload = response.json()
+    except Exception as exc:
+        logging.warning("Failed to parse OW OpenAPI limits: %s", exc)
+        return
+    limits = _extract_limits(payload)
+    if not limits:
+        logging.warning("OW OpenAPI limits not found, using defaults")
+        return
+    _LIMITS = {**_LIMITS, **limits}
+    logging.info(
+        "Loaded OW limits: mod_name=%s short_desc=%s desc=%s",
+        _LIMITS.get("mod_name"),
+        _LIMITS.get("mod_short_description"),
+        _LIMITS.get("mod_description"),
+    )
+
 
 class ApiClient:
     def __init__(
@@ -244,9 +331,9 @@ def ow_add_game(api: ApiClient, name: str, short_desc: str, desc: str) -> int:
         "post",
         "/add/game",
         data={
-            "game_name": truncate(name, 128),
-            "game_short_desc": truncate(short_desc, 256),
-            "game_desc": truncate(desc, 10000),
+            "game_name": truncate(name, _limit("game_name", 128)),
+            "game_short_desc": truncate(short_desc, _limit("game_short_desc", 256)),
+            "game_desc": truncate(desc, _limit("game_desc", 10000)),
         },
     )
     if not _is_success(response):
@@ -305,9 +392,9 @@ def ow_add_mod(
     with file_path.open("rb") as handle:
         files = {"mod_file": (file_path.name, handle)}
         data = {
-            "mod_name": truncate(name, 128),
-            "mod_short_description": truncate(short_desc, 256),
-            "mod_description": truncate(desc, 10000),
+            "mod_name": truncate(name, _limit("mod_name", 128)),
+            "mod_short_description": truncate(short_desc, _limit("mod_short_description", 256)),
+            "mod_description": truncate(desc, _limit("mod_description", 10000)),
             "mod_source": source,
             "mod_source_id": source_id,
             "mod_game": game_id,
@@ -343,9 +430,9 @@ def ow_edit_mod(
 ) -> None:
     data = {
         "mod_id": mod_id,
-        "mod_name": truncate(name, 128),
-        "mod_short_description": truncate(short_desc, 256),
-        "mod_description": truncate(desc, 10000),
+        "mod_name": truncate(name, _limit("mod_name", 128)),
+        "mod_short_description": truncate(short_desc, _limit("mod_short_description", 256)),
+        "mod_description": truncate(desc, _limit("mod_description", 10000)),
         "mod_game": game_id,
         "mod_public": public_mode,
     }
@@ -382,7 +469,11 @@ def ow_list_tags(api: ApiClient, game_id: int, page_size: int) -> List[Dict[str,
 
 
 def ow_add_tag(api: ApiClient, name: str) -> int:
-    response = api.request("post", "/add/tag", data={"tag_name": truncate(name, 128)})
+    response = api.request(
+        "post",
+        "/add/tag",
+        data={"tag_name": truncate(name, _limit("tag_name", 128))},
+    )
     if not _is_success(response):
         raise RuntimeError(f"Failed to add tag: {response.status_code} {response.text}")
     tag_id = _extract_id(response)
