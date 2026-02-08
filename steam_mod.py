@@ -2,7 +2,9 @@ import asyncio
 import hashlib
 import logging
 import mimetypes
+import random
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Mapping, Tuple
@@ -17,6 +19,12 @@ _STEAMMOD_PROXY_POOL: List[str] = []
 _STEAMMOD_PROXY_INDEX = 0
 _STEAMMOD_DEFAULT_TIMEOUT = 20
 _STEAMMOD_IMAGE_CONCURRENCY = 6
+_STEAMMOD_HTTP_RETRIES = 2
+_STEAMMOD_HTTP_BACKOFF = 1.0
+_STEAMMOD_REQUEST_DELAY = 0.0
+_STEAMMOD_RETRY_STATUSES = {429, 500, 502, 503, 504}
+_STEAMMOD_REQUEST_LOCKS: dict[int, asyncio.Lock] = {}
+_STEAMMOD_LAST_REQUEST_TS: dict[int, float] = {}
 
 ImageTarget = Tuple[str, str, str]
 ImageDownload = Tuple[str, str, Path, str]
@@ -36,6 +44,13 @@ def set_steam_mod_proxy_pool(proxies: List[str]) -> None:
     _STEAMMOD_PROXY_INDEX = 0
 
 
+def set_steam_mod_request_policy(retries: int, backoff: float, request_delay: float) -> None:
+    global _STEAMMOD_HTTP_RETRIES, _STEAMMOD_HTTP_BACKOFF, _STEAMMOD_REQUEST_DELAY
+    _STEAMMOD_HTTP_RETRIES = max(0, int(retries))
+    _STEAMMOD_HTTP_BACKOFF = max(0.0, float(backoff))
+    _STEAMMOD_REQUEST_DELAY = max(0.0, float(request_delay))
+
+
 def _next_proxy() -> str | None:
     global _STEAMMOD_PROXY_INDEX
     if not _STEAMMOD_PROXY_POOL:
@@ -43,6 +58,39 @@ def _next_proxy() -> str | None:
     proxy = _STEAMMOD_PROXY_POOL[_STEAMMOD_PROXY_INDEX % len(_STEAMMOD_PROXY_POOL)]
     _STEAMMOD_PROXY_INDEX += 1
     return proxy
+
+
+async def _respect_request_delay() -> None:
+    if _STEAMMOD_REQUEST_DELAY <= 0:
+        return
+    loop = asyncio.get_running_loop()
+    key = id(loop)
+    lock = _STEAMMOD_REQUEST_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _STEAMMOD_REQUEST_LOCKS[key] = lock
+    async with lock:
+        now = time.monotonic()
+        last_ts = _STEAMMOD_LAST_REQUEST_TS.get(key, 0.0)
+        wait_for = _STEAMMOD_REQUEST_DELAY - (now - last_ts)
+        if wait_for > 0:
+            await asyncio.sleep(wait_for)
+        _STEAMMOD_LAST_REQUEST_TS[key] = time.monotonic()
+
+
+async def _sleep_backoff(attempt: int, exc: Exception) -> None:
+    if _STEAMMOD_HTTP_BACKOFF <= 0:
+        return
+    delay = _STEAMMOD_HTTP_BACKOFF * (2 ** (attempt - 1))
+    delay += random.uniform(0.0, _STEAMMOD_HTTP_BACKOFF)
+    logging.warning(
+        "Steam retry %s/%s after error: %s (sleep %.1fs)",
+        attempt,
+        _STEAMMOD_HTTP_RETRIES,
+        exc,
+        delay,
+    )
+    await asyncio.sleep(delay)
 
 
 def _clean_text(value: str | None) -> str:
@@ -166,7 +214,6 @@ class SteamMod:
         if language:
             url = f"{url}&l={language}"
         timeout_value = _STEAMMOD_DEFAULT_TIMEOUT if timeout is None else int(timeout)
-        chosen_proxy = proxy if proxy is not None else _next_proxy()
         close_session = False
 
         if session is None:
@@ -174,26 +221,54 @@ class SteamMod:
             session = aiohttp.ClientSession(timeout=timeout_cfg)
             close_session = True
 
+        html_text: str | None = None
+        attempts = _STEAMMOD_HTTP_RETRIES + 1
+        last_exc: Exception | None = None
         try:
-            async with session.get(
-                url,
-                headers={"User-Agent": "Mozilla/5.0"},
-                proxy=chosen_proxy,
-            ) as response:
-                if response.status != 200:
-                    logging.warning(
-                        "Steam page fetch failed for %s: HTTP %s",
-                        self.item_id,
-                        response.status,
-                    )
-                    return False
-                html_text = await response.text()
-        except aiohttp.ClientError as exc:
-            logging.warning("Steam page fetch failed for %s: %s", self.item_id, exc)
-            return False
+            for attempt in range(1, attempts + 1):
+                chosen_proxy = proxy if proxy is not None else _next_proxy()
+                await _respect_request_delay()
+                try:
+                    async with session.get(
+                        url,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        proxy=chosen_proxy,
+                        timeout=timeout_value,
+                    ) as response:
+                        if response.status in _STEAMMOD_RETRY_STATUSES and attempt < attempts:
+                            retry_after = response.headers.get("retry-after")
+                            if retry_after:
+                                try:
+                                    await asyncio.sleep(float(retry_after))
+                                except ValueError:
+                                    pass
+                            await _sleep_backoff(
+                                attempt, RuntimeError(f"HTTP {response.status}")
+                            )
+                            continue
+                        if response.status != 200:
+                            logging.warning(
+                                "Steam page fetch failed for %s: HTTP %s",
+                                self.item_id,
+                                response.status,
+                            )
+                            return False
+                        html_text = await response.text()
+                        break
+                except aiohttp.ClientError as exc:
+                    last_exc = exc
+                    if attempt >= attempts:
+                        logging.warning("Steam page fetch failed for %s: %s", self.item_id, exc)
+                        return False
+                    await _sleep_backoff(attempt, exc)
+                    continue
         finally:
             if close_session and session is not None:
                 await session.close()
+        if html_text is None:
+            if last_exc:
+                logging.warning("Steam page fetch failed for %s: %s", self.item_id, last_exc)
+            return False
 
         parser = HTMLParser(html_text)
         self.title = _clean_text(
@@ -278,36 +353,68 @@ class SteamMod:
             res_type, url, basename = target
             if not url:
                 return None
-            chosen_proxy = proxy if proxy is not None else _next_proxy()
             temp_path: Path | None = None
             async with semaphore:
                 try:
-                    async with session.get(
-                        url,
-                        headers={"User-Agent": "Mozilla/5.0"},
-                        proxy=chosen_proxy,
-                    ) as response:
-                        if response.status != 200:
-                            logging.warning(
-                                "Steam image fetch failed for %s: HTTP %s",
+                    attempts = _STEAMMOD_HTTP_RETRIES + 1
+                    last_exc: Exception | None = None
+                    for attempt in range(1, attempts + 1):
+                        chosen_proxy = proxy if proxy is not None else _next_proxy()
+                        await _respect_request_delay()
+                        try:
+                            async with session.get(
                                 url,
-                                response.status,
-                            )
-                            return None
-                        ext = _extension_from_headers(response.headers) or ".bin"
-                        path = dest_dir / f"{basename}{ext}"
-                        temp_path = path.with_suffix(f"{path.suffix}.part")
-                        digest = hashlib.sha256()
-                        with temp_path.open("wb") as handle:
-                            async for chunk in response.content.iter_chunked(1024 * 1024):
-                                if not chunk:
+                                headers={"User-Agent": "Mozilla/5.0"},
+                                proxy=chosen_proxy,
+                                timeout=timeout_value,
+                            ) as response:
+                                if (
+                                    response.status in _STEAMMOD_RETRY_STATUSES
+                                    and attempt < attempts
+                                ):
+                                    retry_after = response.headers.get("retry-after")
+                                    if retry_after:
+                                        try:
+                                            await asyncio.sleep(float(retry_after))
+                                        except ValueError:
+                                            pass
+                                    await _sleep_backoff(
+                                        attempt, RuntimeError(f"HTTP {response.status}")
+                                    )
                                     continue
-                                handle.write(chunk)
-                                digest.update(chunk)
-                        temp_path.replace(path)
-                        return (res_type, url, path, digest.hexdigest())
-                except aiohttp.ClientError as exc:
-                    logging.warning("Steam image fetch failed for %s: %s", url, exc)
+                                if response.status != 200:
+                                    logging.warning(
+                                        "Steam image fetch failed for %s: HTTP %s",
+                                        url,
+                                        response.status,
+                                    )
+                                    return None
+                                ext = _extension_from_headers(response.headers) or ".bin"
+                                path = dest_dir / f"{basename}{ext}"
+                                temp_path = path.with_suffix(f"{path.suffix}.part")
+                                digest = hashlib.sha256()
+                                with temp_path.open("wb") as handle:
+                                    async for chunk in response.content.iter_chunked(
+                                        1024 * 1024
+                                    ):
+                                        if not chunk:
+                                            continue
+                                        handle.write(chunk)
+                                        digest.update(chunk)
+                                temp_path.replace(path)
+                                temp_path = None
+                                return (res_type, url, path, digest.hexdigest())
+                        except aiohttp.ClientError as exc:
+                            last_exc = exc
+                            if attempt >= attempts:
+                                logging.warning(
+                                    "Steam image fetch failed for %s: %s", url, exc
+                                )
+                                return None
+                            await _sleep_backoff(attempt, exc)
+                            continue
+                    if last_exc:
+                        logging.warning("Steam image fetch failed for %s: %s", url, last_exc)
                     return None
                 finally:
                     if temp_path and temp_path.exists():
