@@ -32,6 +32,7 @@
 - `OW_STEAM_HTTP_BACKOFF` — базовая задержка backoff для Steam и загрузки изображений, по умолчанию `1.0`
 - `OW_STEAM_REQUEST_DELAY` — минимальная задержка между запросами к Steam (сек), по умолчанию `0.0`
 - `OW_STEAM_PROXY_POOL` — список прокси для Steam (через запятую или пробел), например `http://user:pass@host:port,socks5://host:1080`
+- `OW_STEAM_PROXY_SCOPE` — область применения прокси: `all` (все запросы к Steam), `mod_pages` (только страницы модов), `none` (выключить прокси), по умолчанию `all`
 
 Steam / Workshop:
 - `OW_STEAM_MAX_PAGES` — максимум страниц Workshop при HTML‑обходе, по умолчанию `50` (0 = без лимита)

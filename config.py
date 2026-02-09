@@ -11,13 +11,14 @@ DEFAULT_HTTP_RETRY_BACKOFF = 5.0
 DEFAULT_STEAM_START_PAGE = 30
 DEFAULT_STEAM_MAX_PAGES = 1000
 DEFAULT_STEAM_PAGE_SIZE = 30
-DEFAULT_STEAM_DELAY = 4
+DEFAULT_STEAM_DELAY = 1
 DEFAULT_MAX_SCREENSHOTS = 20
 DEFAULT_STEAMCMD_PATH = "/opt/steamcmd/steamcmd.sh"
 DEFAULT_STEAM_HTTP_RETRIES = 2
 DEFAULT_STEAM_HTTP_BACKOFF = 2.0
-DEFAULT_STEAM_REQUEST_DELAY = 4
+DEFAULT_STEAM_REQUEST_DELAY = 1
 DEFAULT_STEAM_PROXY_POOL = ""
+DEFAULT_STEAM_PROXY_SCOPE = "mod_pages" # all / mod_pages / none
 DEFAULT_LOG_LEVEL = "DEBUG"
 
 
@@ -43,6 +44,19 @@ def parse_list(value: str | None) -> list[str]:
     return [part for part in (p.strip() for p in parts) if part]
 
 
+def parse_proxy_scope(value: str | None, default: str) -> str:
+    if not value:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"all", "steam", "full"}:
+        return "all"
+    if normalized in {"mod_pages", "modpages", "pages", "mods", "mod"}:
+        return "mod_pages"
+    if normalized in {"none", "off", "disabled", "0", "false"}:
+        return "none"
+    return default
+
+
 @dataclass
 class Config:
     api_base: str
@@ -64,6 +78,7 @@ class Config:
     steam_http_backoff: float
     steam_request_delay: float
     steam_proxy_pool: list[str]
+    steam_proxy_scope: str
     steam_max_pages: int
     steam_start_page: int
     steam_max_items: int
@@ -120,6 +135,9 @@ def load_config() -> Config:
     steam_proxy_pool = parse_list(
         os.environ.get("OW_STEAM_PROXY_POOL", DEFAULT_STEAM_PROXY_POOL)
     )
+    steam_proxy_scope = parse_proxy_scope(
+        os.environ.get("OW_STEAM_PROXY_SCOPE"), DEFAULT_STEAM_PROXY_SCOPE
+    )
 
     steam_max_pages = parse_int(os.environ.get("OW_STEAM_MAX_PAGES"), DEFAULT_STEAM_MAX_PAGES)
     steam_start_page = parse_int(
@@ -164,6 +182,7 @@ def load_config() -> Config:
         steam_http_backoff=steam_http_backoff,
         steam_request_delay=steam_request_delay,
         steam_proxy_pool=steam_proxy_pool,
+        steam_proxy_scope=steam_proxy_scope,
         steam_max_pages=steam_max_pages,
         steam_start_page=steam_start_page,
         steam_max_items=steam_max_items,

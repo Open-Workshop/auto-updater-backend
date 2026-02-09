@@ -1024,6 +1024,9 @@ class ModSyncer:
 
     def _build_payload(self, mod: SteamMod, workshop_id: str) -> Optional[ModPayload]:
         title = mod.title
+        if not title:
+            title = f"Steam Mod {workshop_id}"
+            logging.warning("Steam %s missing title, using fallback", workshop_id)
         raw_description = mod.description
         tags = mod.tags
         logging.debug("Steam %s tags: %s", workshop_id, tags)

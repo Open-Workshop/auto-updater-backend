@@ -15,7 +15,7 @@ import aiohttp
 from selectolax.parser import HTMLParser
 
 from bbcode import html_to_bbcode
-from http_utils import ProxyPool, RetryPolicy
+from http_utils import ProxyPool, RetryPolicy, mask_proxy, is_dns_error
 from utils import dedupe_images, ensure_dir, normalize_image_url, extension_from_headers
 
 DEFAULT_TIMEOUT = 20
@@ -222,6 +222,7 @@ class SteamWorkshopClient:
         proxies: List[str] | None = None,
         timeout: int = DEFAULT_TIMEOUT,
         image_concurrency: int = DEFAULT_IMAGE_CONCURRENCY,
+        proxy_images: bool = True,
     ) -> None:
         self.policy = policy or RetryPolicy(
             retries=DEFAULT_RETRY_POLICY.retries,
@@ -232,6 +233,7 @@ class SteamWorkshopClient:
         self.proxy_pool = ProxyPool(proxies)
         self.timeout = int(timeout)
         self.image_concurrency = max(1, int(image_concurrency))
+        self.proxy_images = bool(proxy_images)
         self._throttle = AsyncThrottle(self.policy.request_delay)
 
     def set_policy(self, retries: int, backoff: float, request_delay: float) -> None:
@@ -245,6 +247,9 @@ class SteamWorkshopClient:
 
     def set_proxy_pool(self, proxies: List[str]) -> None:
         self.proxy_pool.set(proxies)
+
+    def set_proxy_images(self, enabled: bool) -> None:
+        self.proxy_images = bool(enabled)
 
     async def fetch_mod(
         self,
@@ -268,9 +273,11 @@ class SteamWorkshopClient:
         html_text: str | None = None
         attempts = self.policy.retries + 1
         last_exc: Exception | None = None
+        last_proxy: str | None = None
         try:
             for attempt in range(1, attempts + 1):
                 chosen_proxy = proxy if proxy is not None else self.proxy_pool.next()
+                last_proxy = chosen_proxy
                 await self._throttle.wait()
                 try:
                     async with session.get(
@@ -286,7 +293,12 @@ class SteamWorkshopClient:
                                     await asyncio.sleep(float(retry_after))
                                 except ValueError:
                                     pass
-                            await self._sleep_backoff(attempt, RuntimeError(f"HTTP {response.status}"))
+                            await self._sleep_backoff(
+                                attempt,
+                                RuntimeError(f"HTTP {response.status}"),
+                                url=url,
+                                proxy=chosen_proxy,
+                            )
                             continue
                         if response.status != 200:
                             logging.warning(
@@ -299,17 +311,51 @@ class SteamWorkshopClient:
                         break
                 except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                     last_exc = exc
+                    if chosen_proxy and is_dns_error(exc) and attempt < attempts:
+                        logging.warning(
+                            "Steam proxy DNS error for url=%s via %s: %s",
+                            url,
+                            mask_proxy(chosen_proxy),
+                            exc,
+                        )
                     if attempt >= attempts:
-                        logging.warning("Steam page fetch failed for %s: %s", item_id, exc)
+                        if chosen_proxy and is_dns_error(exc):
+                            logging.warning(
+                                "Steam page fetch failed for %s url=%s via %s: %s",
+                                item_id,
+                                url,
+                                mask_proxy(chosen_proxy),
+                                exc,
+                            )
+                        else:
+                            logging.warning(
+                                "Steam page fetch failed for %s: %s", item_id, exc
+                            )
                         return None
-                    await self._sleep_backoff(attempt, exc)
+                    await self._sleep_backoff(
+                        attempt,
+                        exc,
+                        url=url,
+                        proxy=chosen_proxy,
+                    )
                     continue
         finally:
             if close_session and session is not None:
                 await session.close()
         if html_text is None:
             if last_exc:
-                logging.warning("Steam page fetch failed for %s: %s", item_id, last_exc)
+                if last_proxy and is_dns_error(last_exc):
+                    logging.warning(
+                        "Steam page fetch failed for %s url=%s via %s: %s",
+                        item_id,
+                        url,
+                        mask_proxy(last_proxy),
+                        last_exc,
+                    )
+                else:
+                    logging.warning(
+                        "Steam page fetch failed for %s: %s", item_id, last_exc
+                    )
             return None
         return SteamMod.from_html(str(item_id), html_text)
 
@@ -375,8 +421,15 @@ class SteamWorkshopClient:
                 try:
                     attempts = self.policy.retries + 1
                     last_exc: Exception | None = None
+                    last_proxy: str | None = None
                     for attempt in range(1, attempts + 1):
-                        chosen_proxy = proxy if proxy is not None else self.proxy_pool.next()
+                        if proxy is not None:
+                            chosen_proxy = proxy
+                        elif self.proxy_images:
+                            chosen_proxy = self.proxy_pool.next()
+                        else:
+                            chosen_proxy = None
+                        last_proxy = chosen_proxy
                         await self._throttle.wait()
                         try:
                             async with session.get(
@@ -396,7 +449,10 @@ class SteamWorkshopClient:
                                         except ValueError:
                                             pass
                                     await self._sleep_backoff(
-                                        attempt, RuntimeError(f"HTTP {response.status}")
+                                        attempt,
+                                        RuntimeError(f"HTTP {response.status}"),
+                                        url=url,
+                                        proxy=chosen_proxy,
                                     )
                                     continue
                                 if response.status != 200:
@@ -423,15 +479,45 @@ class SteamWorkshopClient:
                                 return (res_type, url, path, digest.hexdigest())
                         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                             last_exc = exc
-                            if attempt >= attempts:
+                            if chosen_proxy and is_dns_error(exc) and attempt < attempts:
                                 logging.warning(
-                                    "Steam image fetch failed for %s: %s", url, exc
+                                    "Steam proxy DNS error for %s via %s: %s",
+                                    url,
+                                    mask_proxy(chosen_proxy),
+                                    exc,
                                 )
+                            if attempt >= attempts:
+                                if chosen_proxy and is_dns_error(exc):
+                                    logging.warning(
+                                        "Steam image fetch failed for %s via %s: %s",
+                                        url,
+                                        mask_proxy(chosen_proxy),
+                                        exc,
+                                    )
+                                else:
+                                    logging.warning(
+                                        "Steam image fetch failed for %s: %s", url, exc
+                                    )
                                 return None
-                            await self._sleep_backoff(attempt, exc)
+                            await self._sleep_backoff(
+                                attempt,
+                                exc,
+                                url=url,
+                                proxy=chosen_proxy,
+                            )
                             continue
                     if last_exc:
-                        logging.warning("Steam image fetch failed for %s: %s", url, last_exc)
+                        if last_proxy and is_dns_error(last_exc):
+                            logging.warning(
+                                "Steam image fetch failed for %s via %s: %s",
+                                url,
+                                mask_proxy(last_proxy),
+                                last_exc,
+                            )
+                        else:
+                            logging.warning(
+                                "Steam image fetch failed for %s: %s", url, last_exc
+                            )
                     return None
                 finally:
                     if temp_path and temp_path.exists():
@@ -457,17 +543,35 @@ class SteamWorkshopClient:
             return int(self.timeout)
         return int(timeout)
 
-    async def _sleep_backoff(self, attempt: int, exc: Exception) -> None:
+    async def _sleep_backoff(
+        self,
+        attempt: int,
+        exc: Exception,
+        *,
+        url: str | None = None,
+        proxy: str | None = None,
+    ) -> None:
         delay = self.policy.delay_for_attempt(attempt)
         if delay <= 0:
             return
-        logging.warning(
-            "Steam retry %s/%s after error: %s (sleep %.1fs)",
-            attempt,
-            self.policy.retries,
-            exc,
-            delay,
-        )
+        if url or proxy:
+            logging.warning(
+                "Steam retry %s/%s after error: %s (sleep %.1fs) url=%s proxy=%s",
+                attempt,
+                self.policy.retries,
+                exc,
+                delay,
+                url or "-",
+                mask_proxy(proxy),
+            )
+        else:
+            logging.warning(
+                "Steam retry %s/%s after error: %s (sleep %.1fs)",
+                attempt,
+                self.policy.retries,
+                exc,
+                delay,
+            )
         await asyncio.sleep(delay)
 
 
@@ -476,6 +580,10 @@ _DEFAULT_CLIENT = SteamWorkshopClient()
 
 def set_steam_mod_proxy_pool(proxies: List[str]) -> None:
     _DEFAULT_CLIENT.set_proxy_pool(proxies)
+
+
+def set_steam_mod_proxy_images(enabled: bool) -> None:
+    _DEFAULT_CLIENT.set_proxy_images(enabled)
 
 
 def set_steam_mod_request_policy(retries: int, backoff: float, request_delay: float) -> None:

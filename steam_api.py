@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from http_utils import ProxyPool, RetryPolicy, mask_proxy
+from http_utils import ProxyPool, RetryPolicy, mask_proxy, is_dns_error
 
 
 @dataclass
@@ -98,19 +98,37 @@ class SteamClient:
             except requests.RequestException as exc:
                 last_exc = exc
                 self.stats.record(endpoint, False)
-                if self.log_requests:
-                    elapsed = time.monotonic() - start
+                if proxy and is_dns_error(exc) and not self.log_requests:
                     logging.warning(
-                        "Steam %s failed after %.2fs via %s: %s (%s)",
-                        endpoint,
-                        elapsed,
+                        "Steam proxy DNS error for url=%s via %s: %s",
+                        url,
                         mask_proxy(proxy),
                         exc,
-                        type(exc).__name__,
                     )
+                if self.log_requests:
+                    elapsed = time.monotonic() - start
+                    if proxy and is_dns_error(exc):
+                        logging.warning(
+                            "Steam %s failed after %.2fs via %s: %s (%s) url=%s",
+                            endpoint,
+                            elapsed,
+                            mask_proxy(proxy),
+                            exc,
+                            type(exc).__name__,
+                            url,
+                        )
+                    else:
+                        logging.warning(
+                            "Steam %s failed after %.2fs via %s: %s (%s)",
+                            endpoint,
+                            elapsed,
+                            mask_proxy(proxy),
+                            exc,
+                            type(exc).__name__,
+                        )
                 if attempt >= attempts:
                     raise
-                self._sleep_backoff(attempt, exc)
+                self._sleep_backoff(attempt, exc, url=url, proxy=proxy)
                 continue
             finally:
                 self._last_request_ts = time.monotonic()
@@ -137,7 +155,12 @@ class SteamClient:
                         time.sleep(float(retry_after))
                     except ValueError:
                         pass
-                self._sleep_backoff(attempt, RuntimeError(f"HTTP {response.status_code}"))
+                self._sleep_backoff(
+                    attempt,
+                    RuntimeError(f"HTTP {response.status_code}"),
+                    url=url,
+                    proxy=proxy,
+                )
                 continue
             return response
 
@@ -196,17 +219,35 @@ class SteamClient:
         parsed = urlparse(url)
         return f"{method.upper()} {parsed.netloc}{parsed.path}"
 
-    def _sleep_backoff(self, attempt: int, exc: Exception) -> None:
+    def _sleep_backoff(
+        self,
+        attempt: int,
+        exc: Exception,
+        *,
+        url: str | None = None,
+        proxy: str | None = None,
+    ) -> None:
         delay = self.policy.delay_for_attempt(attempt)
         if delay <= 0:
             return
-        logging.warning(
-            "Steam retry %s/%s after error: %s (sleep %.1fs)",
-            attempt,
-            self.policy.retries,
-            exc,
-            delay,
-        )
+        if url or proxy:
+            logging.warning(
+                "Steam retry %s/%s after error: %s (sleep %.1fs) url=%s proxy=%s",
+                attempt,
+                self.policy.retries,
+                exc,
+                delay,
+                url or "-",
+                mask_proxy(proxy),
+            )
+        else:
+            logging.warning(
+                "Steam retry %s/%s after error: %s (sleep %.1fs)",
+                attempt,
+                self.policy.retries,
+                exc,
+                delay,
+            )
         time.sleep(delay)
 
 

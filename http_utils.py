@@ -6,6 +6,15 @@ from urllib.parse import urlparse
 import random
 
 DEFAULT_RETRY_STATUSES = {429, 500, 502, 503, 504}
+_DNS_ERROR_TOKENS = (
+    "name or service not known",
+    "nodename nor servname provided",
+    "temporary failure in name resolution",
+    "failed to resolve",
+    "cannot resolve",
+    "getaddrinfo failed",
+    "no address associated with hostname",
+)
 
 
 def clean_proxy_list(values: Iterable[str] | None) -> list[str]:
@@ -76,3 +85,8 @@ def mask_proxy(proxy: str | None) -> str:
             return f"{parsed.scheme}://{parsed.username}:***@{host}{port}"
         return f"{parsed.scheme}://{host}{port}"
     return proxy
+
+
+def is_dns_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(token in message for token in _DNS_ERROR_TOKENS)

@@ -11,7 +11,11 @@ from steam_api import (
     set_steam_request_policy,
     set_steam_proxy_pool,
 )
-from steam_mod import set_steam_mod_proxy_pool, set_steam_mod_request_policy
+from steam_mod import (
+    set_steam_mod_proxy_images,
+    set_steam_mod_proxy_pool,
+    set_steam_mod_request_policy,
+)
 from utils import ensure_dir, set_download_request_policy
 
 
@@ -28,8 +32,18 @@ def main() -> int:
         cfg.steam_http_retries, cfg.steam_http_backoff, cfg.steam_request_delay
     )
     set_download_request_policy(cfg.steam_http_retries, cfg.steam_http_backoff)
-    set_steam_proxy_pool(cfg.steam_proxy_pool)
-    set_steam_mod_proxy_pool(cfg.steam_proxy_pool)
+    if cfg.steam_proxy_scope == "mod_pages":
+        set_steam_proxy_pool([])
+        set_steam_mod_proxy_pool(cfg.steam_proxy_pool)
+        set_steam_mod_proxy_images(False)
+    elif cfg.steam_proxy_scope == "none":
+        set_steam_proxy_pool([])
+        set_steam_mod_proxy_pool([])
+        set_steam_mod_proxy_images(False)
+    else:
+        set_steam_proxy_pool(cfg.steam_proxy_pool)
+        set_steam_mod_proxy_pool(cfg.steam_proxy_pool)
+        set_steam_mod_proxy_images(True)
     set_steam_mod_request_policy(
         cfg.steam_http_retries, cfg.steam_http_backoff, cfg.steam_request_delay
     )
