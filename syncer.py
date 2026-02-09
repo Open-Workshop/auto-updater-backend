@@ -82,6 +82,14 @@ PHASH_MAX_DISTANCE = 6
 RECENT_OW_EDIT_SECONDS = 3 * 24 * 60 * 60
 
 
+def _recent_edit_window_label(seconds: int = RECENT_OW_EDIT_SECONDS) -> str:
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
 @dataclass(frozen=True)
 class ImageHashes:
     sha256: str | None
@@ -985,6 +993,7 @@ class ModSyncer:
             return
         logging.info("Process metadata batch: size=%s", len(batch_ids))
         now_ts = int(time.time())
+        window_label = _recent_edit_window_label()
         ow_mod_map = self.mod_index.get_many(batch_ids)
         fetch_ids: List[str] = []
         skipped_recent = 0
@@ -993,8 +1002,9 @@ class ModSyncer:
             if ow_mod and _ow_recent_edit(ow_mod, now_ts):
                 skipped_recent += 1
                 logging.info(
-                    "Skipping Steam fetch for %s (recent OW edit within 24h)",
+                    "Skipping Steam fetch for %s (recent OW edit within %s)",
                     ow_mod.get("id") or workshop_id,
+                    window_label,
                 )
                 continue
             fetch_ids.append(str(workshop_id))
@@ -1022,8 +1032,9 @@ class ModSyncer:
                 continue
             if payload.ow_mod_id is not None and _ow_recent_edit(payload.ow_mod):
                 logging.info(
-                    "Skipping OW mod %s (recent edit within 24h)",
+                    "Skipping OW mod %s (recent edit within %s)",
                     payload.ow_mod_id,
+                    _recent_edit_window_label(),
                 )
                 continue
             if self._needs_file_update(mod, payload.ow_mod):
@@ -1066,8 +1077,9 @@ class ModSyncer:
     def _process_download_item(self, item_id: str, payload: ModPayload) -> None:
         if not payload.is_new and _ow_recent_edit(payload.ow_mod):
             logging.info(
-                "Skipping OW mod %s download (recent edit within 24h)",
+                "Skipping OW mod %s download (recent edit within %s)",
                 payload.ow_mod_id,
+                _recent_edit_window_label(),
             )
             return
         logging.info(
