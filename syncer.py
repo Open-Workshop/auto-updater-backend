@@ -79,7 +79,7 @@ class ModPayload:
 
 
 PHASH_MAX_DISTANCE = 6
-RECENT_OW_EDIT_SECONDS = 24 * 60 * 60
+RECENT_OW_EDIT_SECONDS = 3 * 24 * 60 * 60
 
 
 @dataclass(frozen=True)
