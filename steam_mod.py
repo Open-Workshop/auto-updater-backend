@@ -423,7 +423,9 @@ class SteamWorkshopClient:
                     last_exc: Exception | None = None
                     last_proxy: str | None = None
                     for attempt in range(1, attempts + 1):
-                        if proxy is not None:
+                        if _is_openworkshop_url(url):
+                            chosen_proxy = None
+                        elif proxy is not None:
                             chosen_proxy = proxy
                         elif self.proxy_images:
                             chosen_proxy = self.proxy_pool.next()
@@ -600,6 +602,17 @@ def _clean_description(value: str | None) -> str:
     if not value:
         return ""
     return html_to_bbcode(value)
+
+
+def _is_openworkshop_url(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower()
+    return "openworkshop" in host
 
 
 def _dedupe_keep_order(values: List[str]) -> List[str]:

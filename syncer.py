@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
+from urllib.parse import urlparse
 
 import aiohttp
 import requests
@@ -649,8 +650,57 @@ class ResourceSyncer:
             url_to_ids.pop(url, None)
 
     def _head_status(self, url: str) -> int | None:
+        if not url:
+            return None
+        parsed = urlparse(url)
+        use_get = False
+        if "openworkshop" in (parsed.netloc or ""):
+            parts = [p for p in parsed.path.split("/") if p]
+            if len(parts) >= 3 and parts[0] == "download" and parts[1] == "resource":
+                owner_type = parts[2]
+                if owner_type not in {"mods", "games"}:
+                    logging.warning(
+                        "Skip resource probe for %s (unknown owner_type=%s)",
+                        url,
+                        owner_type,
+                    )
+                    return None
+                use_get = True
+        if use_get:
+            try:
+                response = requests.get(
+                    url,
+                    timeout=self.timeout,
+                    allow_redirects=True,
+                    stream=True,
+                    headers={"Range": "bytes=0-0"},
+                )
+            except requests.RequestException as exc:
+                logging.debug("Failed to probe resource %s: %s", url, exc)
+                return None
+            try:
+                return int(response.status_code)
+            finally:
+                response.close()
         try:
             response = requests.head(url, timeout=self.timeout, allow_redirects=True)
+        except requests.RequestException as exc:
+            logging.debug("Failed to probe resource %s: %s", url, exc)
+            return None
+        try:
+            status = int(response.status_code)
+        finally:
+            response.close()
+        if status != 405:
+            return status
+        try:
+            response = requests.get(
+                url,
+                timeout=self.timeout,
+                allow_redirects=True,
+                stream=True,
+                headers={"Range": "bytes=0-0"},
+            )
         except requests.RequestException as exc:
             logging.debug("Failed to probe resource %s: %s", url, exc)
             return None
