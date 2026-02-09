@@ -79,6 +79,7 @@ class ModPayload:
 
 
 PHASH_MAX_DISTANCE = 6
+RECENT_OW_EDIT_SECONDS = 24 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -195,6 +196,33 @@ class ModIndex:
 
     def set(self, source_id: str, mod: Dict[str, Any]) -> None:
         self._cache[str(source_id)] = mod
+
+    def get_many(self, source_ids: Iterable[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        requested = [str(item) for item in source_ids]
+        missing: List[int] = []
+        for item in requested:
+            if item in self._cache:
+                continue
+            try:
+                source_int = int(item)
+            except (TypeError, ValueError):
+                self._cache[item] = None
+                continue
+            missing.append(source_int)
+        if missing:
+            results = self.api.get_mods_by_source_ids(
+                "steam", missing, page_size=len(missing)
+            )
+            found: Dict[str, Dict[str, Any]] = {}
+            for mod in results:
+                source_id = mod.get("source_id")
+                if source_id is None:
+                    continue
+                found[str(source_id)] = mod
+            for item in requested:
+                if item not in self._cache:
+                    self._cache[item] = found.get(item)
+        return {item: self._cache.get(item) for item in requested}
 
 
 class TagManager:
@@ -956,16 +984,47 @@ class ModSyncer:
         if not batch_ids:
             return
         logging.info("Process metadata batch: size=%s", len(batch_ids))
-        mod_map = self.mod_loader.load_batch(batch_ids)
+        now_ts = int(time.time())
+        ow_mod_map = self.mod_index.get_many(batch_ids)
+        fetch_ids: List[str] = []
+        skipped_recent = 0
+        for workshop_id in batch_ids:
+            ow_mod = ow_mod_map.get(str(workshop_id))
+            if ow_mod and _ow_recent_edit(ow_mod, now_ts):
+                skipped_recent += 1
+                logging.info(
+                    "Skipping Steam fetch for %s (recent OW edit within 24h)",
+                    ow_mod.get("id") or workshop_id,
+                )
+                continue
+            fetch_ids.append(str(workshop_id))
+        if not fetch_ids:
+            logging.info(
+                "Skipped %s mods from Steam fetch due to recent edits",
+                skipped_recent,
+            )
+            return
+        if skipped_recent:
+            logging.info(
+                "Skipped %s mods from Steam fetch due to recent edits",
+                skipped_recent,
+            )
+        mod_map = self.mod_loader.load_batch(fetch_ids)
         self.steam_mod_cache.update(mod_map)
 
-        for workshop_id in batch_ids:
+        for workshop_id in fetch_ids:
             mod = self.steam_mod_cache.get(str(workshop_id))
             if not mod:
                 logging.warning("Steam page missing for %s", workshop_id)
                 continue
             payload = self._build_payload(mod, workshop_id)
             if payload is None:
+                continue
+            if payload.ow_mod_id is not None and _ow_recent_edit(payload.ow_mod):
+                logging.info(
+                    "Skipping OW mod %s (recent edit within 24h)",
+                    payload.ow_mod_id,
+                )
                 continue
             if self._needs_file_update(mod, payload.ow_mod):
                 logging.info(
@@ -1005,6 +1064,12 @@ class ModSyncer:
             )
 
     def _process_download_item(self, item_id: str, payload: ModPayload) -> None:
+        if not payload.is_new and _ow_recent_edit(payload.ow_mod):
+            logging.info(
+                "Skipping OW mod %s download (recent edit within 24h)",
+                payload.ow_mod_id,
+            )
+            return
         logging.info(
             "Downloading Steam mod %s (new=%s)",
             item_id,
@@ -1230,6 +1295,34 @@ def _parse_ow_datetime(value: str | None) -> int:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return int(dt.timestamp())
+
+
+def _ow_last_edit_ts(ow_mod: Optional[Dict[str, Any]]) -> int:
+    if not ow_mod:
+        return 0
+    candidates = (
+        "date_edit",
+        "date_update_file",
+        "date_creation",
+    )
+    latest = 0
+    for key in candidates:
+        value = ow_mod.get(key)
+        if not isinstance(value, str):
+            continue
+        ts = _parse_ow_datetime(value)
+        if ts > latest:
+            latest = ts
+    return latest
+
+
+def _ow_recent_edit(ow_mod: Optional[Dict[str, Any]], now_ts: int | None = None) -> bool:
+    last_ts = _ow_last_edit_ts(ow_mod)
+    if last_ts <= 0:
+        return False
+    if now_ts is None:
+        now_ts = int(time.time())
+    return (now_ts - last_ts) < RECENT_OW_EDIT_SECONDS
 
 
 def sync_mods(

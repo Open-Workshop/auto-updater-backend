@@ -351,6 +351,30 @@ class OWClient:
                 return item
         return None
 
+    def get_mods_by_source_ids(
+        self, source: str, source_ids: List[int], page_size: int = 50
+    ) -> List[Dict[str, Any]]:
+        if not source_ids:
+            return []
+        size = max(page_size, len(source_ids))
+        params = {
+            "page_size": size,
+            "page": 0,
+            "general": "true",
+            "dates": "true",
+            "primary_sources": json.dumps([source]),
+            "allowed_sources_ids": json.dumps(source_ids),
+        }
+        response = self.request("get", "/list/mods/", params=params)
+        if response.status_code >= 500:
+            params.pop("primary_sources", None)
+            response = self.request("get", "/list/mods/", params=params)
+        if not self.is_success(response):
+            return []
+        payload = response.json()
+        results = payload.get("results", []) if isinstance(payload, dict) else []
+        return [item for item in results if isinstance(item, dict)]
+
     def find_mod_by_source(self, source: str, source_id: int) -> Optional[int]:
         params = {
             "page_size": 10,
