@@ -5,6 +5,7 @@ import logging
 import random
 import time
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urljoin
 
 import requests
 
@@ -476,6 +477,51 @@ class OWClient:
         response.raise_for_status()
         return response.json()
 
+    @staticmethod
+    def _redirect_location(response: requests.Response) -> Optional[str]:
+        location = response.headers.get("Location") or response.headers.get("location")
+        if not location:
+            return None
+        return urljoin(response.url, location)
+
+    def _upload_file_to_storage(
+        self,
+        redirect_response: requests.Response,
+        file_path,
+    ) -> requests.Response:
+        upload_url = self._redirect_location(redirect_response)
+        if not upload_url:
+            raise RuntimeError("Storage redirect does not contain Location header")
+        with file_path.open("rb") as handle:
+            return self.session.request(
+                "post",
+                upload_url,
+                data=handle,
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "X-File-Name": file_path.name,
+                },
+                timeout=self.timeout,
+                allow_redirects=False,
+            )
+
+    def _find_mod_by_source_with_wait(
+        self,
+        source: str,
+        source_id: int,
+        *,
+        attempts: int = 6,
+        delay: float = 1.0,
+    ) -> Optional[int]:
+        attempts = max(1, int(attempts))
+        for idx in range(attempts):
+            mod_id = self.find_mod_by_source(source, source_id)
+            if mod_id is not None:
+                return mod_id
+            if idx + 1 < attempts:
+                time.sleep(max(0.0, float(delay)))
+        return None
+
     def add_mod(
         self,
         name: str,
@@ -491,19 +537,22 @@ class OWClient:
         name, short_desc, desc = self.limits.limit_mod_fields(name, short_desc, desc)
 
         def send(mod_name: str) -> requests.Response:
-            with file_path.open("rb") as handle:
-                files = {"mod_file": (file_path.name, handle)}
-                data = {
-                    "mod_name": mod_name,
-                    "mod_short_description": short_desc,
-                    "mod_description": desc,
-                    "mod_source": source,
-                    "mod_source_id": source_id,
-                    "mod_game": game_id,
-                    "mod_public": public_mode,
-                    "without_author": "true" if without_author else "false",
-                }
-                return self.request("post", "/add/mod", data=data, files=files)
+            data = {
+                "mod_name": mod_name,
+                "mod_short_description": short_desc,
+                "mod_description": desc,
+                "mod_source": source,
+                "mod_source_id": source_id,
+                "mod_game": game_id,
+                "mod_public": public_mode,
+                "without_author": "true" if without_author else "false",
+            }
+            return self.request(
+                "post",
+                "/mods/from-file",
+                data=data,
+                allow_redirects=False,
+            )
 
         response = send(name)
         if response.status_code == 412:
@@ -521,11 +570,21 @@ class OWClient:
             raise RuntimeError(
                 f"Failed to add mod: {response.status_code} {response.text}"
             )
-        if not self.is_success(response):
+        if response.status_code == 307:
+            upload_response = self._upload_file_to_storage(response, file_path)
+            if not self.is_success(upload_response):
+                raise RuntimeError(
+                    "Failed to upload mod file: "
+                    f"{upload_response.status_code} {upload_response.text}"
+                )
+        elif not self.is_success(response):
             raise RuntimeError(
                 f"Failed to add mod: {response.status_code} {response.text}"
             )
         mod_id = self.extract_id(response)
+        if mod_id is not None:
+            return mod_id
+        mod_id = self._find_mod_by_source_with_wait(source, source_id)
         if mod_id is not None:
             return mod_id
         raise RuntimeError("Failed to parse mod id from response")
@@ -558,10 +617,6 @@ class OWClient:
             if set_source:
                 data["mod_source"] = source
                 data["mod_source_id"] = source_id
-            if file_path:
-                with file_path.open("rb") as handle:
-                    files = {"mod_file": (file_path.name, handle)}
-                    return self.request("post", "/edit/mod", data=data, files=files)
             return self.request("post", "/edit/mod", data=data)
 
         response = send(name)
@@ -570,6 +625,25 @@ class OWClient:
             raise RuntimeError(
                 f"Failed to edit mod {mod_id}: {response.status_code} {response.text}"
             )
+        if file_path:
+            file_response = self.request(
+                "post",
+                f"/mods/{mod_id}/file",
+                data={},
+                allow_redirects=False,
+            )
+            if file_response.status_code == 307:
+                upload_response = self._upload_file_to_storage(file_response, file_path)
+                if not self.is_success(upload_response):
+                    raise RuntimeError(
+                        f"Failed to update mod file {mod_id}: "
+                        f"{upload_response.status_code} {upload_response.text}"
+                    )
+            elif not self.is_success(file_response):
+                raise RuntimeError(
+                    f"Failed to start mod file update {mod_id}: "
+                    f"{file_response.status_code} {file_response.text}"
+                )
 
     def list_tags(self, game_id: int, page_size: int) -> List[Dict[str, Any]]:
         def fetch(page: int) -> Dict[str, Any]:
