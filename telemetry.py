@@ -2,6 +2,7 @@ import logging
 import os
 from contextlib import contextmanager
 from typing import Any, Iterator
+from urllib.parse import urlparse
 
 _OTEL_READY = False
 _OTEL_ENABLED = False
@@ -89,7 +90,7 @@ def _instrument_http_clients() -> None:
     try:
         from opentelemetry.instrumentation.requests import RequestsInstrumentor
 
-        RequestsInstrumentor().instrument()
+        RequestsInstrumentor().instrument(request_hook=_requests_request_hook)
     except Exception as exc:
         logging.warning("Requests instrumentation is unavailable: %s", exc)
 
@@ -98,7 +99,7 @@ def _instrument_http_clients() -> None:
             AioHttpClientInstrumentor,
         )
 
-        AioHttpClientInstrumentor().instrument()
+        AioHttpClientInstrumentor().instrument(request_hook=_aiohttp_request_hook)
     except Exception as exc:
         logging.warning("aiohttp instrumentation is unavailable: %s", exc)
 
@@ -110,3 +111,64 @@ def _load_trace_module():
         return trace
     except Exception:
         return None
+
+
+def _requests_request_hook(span: Any, request_obj: Any) -> None:
+    method = getattr(request_obj, "method", "")
+    url = getattr(request_obj, "url", "")
+    _apply_client_span_metadata(span, method, url)
+
+
+def _aiohttp_request_hook(span: Any, params: Any) -> None:
+    method = getattr(params, "method", "")
+    url = str(getattr(params, "url", "") or "")
+    _apply_client_span_metadata(span, method, url)
+
+
+def _apply_client_span_metadata(span: Any, method: str, url: str) -> None:
+    if span is None:
+        return
+    is_recording = getattr(span, "is_recording", None)
+    if callable(is_recording) and not is_recording():
+        return
+
+    parsed = urlparse(url or "")
+    route = _normalize_route(parsed.path)
+    host = parsed.netloc or parsed.hostname or ""
+
+    if host:
+        span_name = f"{(method or 'HTTP').upper()} {host}{route}"
+    else:
+        span_name = f"{(method or 'HTTP').upper()} {route}"
+
+    try:
+        span.update_name(span_name)
+    except Exception:
+        pass
+
+    _set_span_attribute(span, "http.route", route)
+
+
+def _set_span_attribute(span: Any, key: str, value: Any) -> None:
+    try:
+        span.set_attribute(key, value)
+    except Exception:
+        pass
+
+
+def _normalize_route(path: str) -> str:
+    if not path:
+        return "/"
+
+    normalized_parts: list[str] = []
+    for part in path.split("/"):
+        if not part:
+            continue
+        if part.isdigit():
+            normalized_parts.append("{id}")
+            continue
+        normalized_parts.append(part)
+
+    if not normalized_parts:
+        return "/"
+    return "/" + "/".join(normalized_parts)
