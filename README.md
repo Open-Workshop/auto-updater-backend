@@ -34,6 +34,13 @@
 - `OW_STEAM_PROXY_POOL` — список прокси для Steam (через запятую или пробел), например `http://user:pass@host:port,socks5://host:1080`
 - `OW_STEAM_PROXY_SCOPE` — область применения прокси: `all` (все запросы к Steam), `mod_pages` (только страницы модов), `none` (выключить прокси), по умолчанию `all`
 
+OpenTelemetry / Uptrace:
+- `UPTRACE_DSN` — DSN Uptrace. Если не задан, telemetry отключена.
+- `OTEL_SERVICE_NAME` — имя сервиса в трассировке, по умолчанию `auto-updater-backend`
+- `OTEL_SERVICE_VERSION` — версия сервиса (опционально)
+- `OTEL_DEPLOYMENT_ENVIRONMENT` — окружение (`prod`, `staging` и т.п., опционально)
+- `UPTRACE_DISABLED` — принудительно отключить экспорт (`True`)
+
 Steam / Workshop:
 - `OW_STEAM_MAX_PAGES` — максимум страниц Workshop при HTML‑обходе, по умолчанию `50` (0 = без лимита)
 - `OW_STEAM_START_PAGE` — стартовая страница Workshop, по умолчанию `1`

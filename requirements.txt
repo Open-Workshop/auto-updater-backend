@@ -4,3 +4,6 @@ selectolax
 Pillow
 ImageHash
 olefile
+uptrace
+opentelemetry-instrumentation-requests
+opentelemetry-instrumentation-aiohttp-client

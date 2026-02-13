@@ -27,6 +27,7 @@ from steam_api import (
     steam_stats_snapshot,
 )
 from steam_mod import SteamMod
+from telemetry import start_span
 from steamcmd import download_steam_mod
 from utils import (
     dedupe_images,
@@ -254,36 +255,51 @@ class TagManager:
     def preload(self) -> None:
         if not self.enabled:
             return
-        for tag in self.api.list_tags(self.game_id, self.page_size):
-            name = tag.get("name") or tag.get("tag_name")
-            tag_id = tag.get("id") or tag.get("tag_id")
-            if name and tag_id:
-                self._name_to_id[str(name).lower()] = int(tag_id)
-                self._id_to_name[int(tag_id)] = str(name)
+        with start_span(
+            "tags.preload",
+            {
+                "ow.game_id": self.game_id,
+                "tags.page_size": self.page_size,
+            },
+        ):
+            for tag in self.api.list_tags(self.game_id, self.page_size):
+                name = tag.get("name") or tag.get("tag_name")
+                tag_id = tag.get("id") or tag.get("tag_id")
+                if name and tag_id:
+                    self._name_to_id[str(name).lower()] = int(tag_id)
+                    self._id_to_name[int(tag_id)] = str(name)
 
     def sync_mod_tags(self, ow_mod_id: int, tag_names: List[str]) -> None:
         if not self.enabled:
             return
-        desired_tag_ids = self._resolve_tag_ids(tag_names)
-        current_tag_ids = self.api.get_mod_tags(ow_mod_id)
-        missing_tags = [tid for tid in desired_tag_ids if tid not in current_tag_ids]
-        extra_tags = [tid for tid in current_tag_ids if tid not in desired_tag_ids]
-        if missing_tags or extra_tags:
-            logging.debug(
-                "OW mod %s tags: current=%s desired=%s add=%s prune=%s",
-                ow_mod_id,
-                len(current_tag_ids),
-                len(desired_tag_ids),
-                [self._id_to_name.get(tid, tid) for tid in missing_tags],
-                [self._id_to_name.get(tid, tid) for tid in extra_tags],
-            )
-        for tag_id in desired_tag_ids:
-            if tag_id not in current_tag_ids:
-                self.api.add_mod_tag(ow_mod_id, tag_id)
-        if self.prune:
-            for tag_id in current_tag_ids:
-                if tag_id not in desired_tag_ids:
-                    self.api.delete_mod_tag(ow_mod_id, tag_id)
+        with start_span(
+            "tags.sync",
+            {
+                "ow.mod_id": ow_mod_id,
+                "tags.desired": len(tag_names),
+                "tags.prune": self.prune,
+            },
+        ):
+            desired_tag_ids = self._resolve_tag_ids(tag_names)
+            current_tag_ids = self.api.get_mod_tags(ow_mod_id)
+            missing_tags = [tid for tid in desired_tag_ids if tid not in current_tag_ids]
+            extra_tags = [tid for tid in current_tag_ids if tid not in desired_tag_ids]
+            if missing_tags or extra_tags:
+                logging.debug(
+                    "OW mod %s tags: current=%s desired=%s add=%s prune=%s",
+                    ow_mod_id,
+                    len(current_tag_ids),
+                    len(desired_tag_ids),
+                    [self._id_to_name.get(tid, tid) for tid in missing_tags],
+                    [self._id_to_name.get(tid, tid) for tid in extra_tags],
+                )
+            for tag_id in desired_tag_ids:
+                if tag_id not in current_tag_ids:
+                    self.api.add_mod_tag(ow_mod_id, tag_id)
+            if self.prune:
+                for tag_id in current_tag_ids:
+                    if tag_id not in desired_tag_ids:
+                        self.api.delete_mod_tag(ow_mod_id, tag_id)
 
     def _resolve_tag_ids(self, tag_names: List[str]) -> List[int]:
         desired_tag_ids: List[int] = []
@@ -336,63 +352,76 @@ class DependencyManager:
     ) -> None:
         if not self.enabled or not self.scrape_required_items:
             return
-        desired_dep_ids: List[int] = []
-        missing_sources: List[str] = []
-        for dep_source_id in dep_source_ids:
-            dep_source_id = str(dep_source_id)
-            dep_mod = self.lookup_mod(dep_source_id)
-            if dep_mod:
-                desired_dep_ids.append(int(dep_mod.get("id")))
-            else:
-                missing_sources.append(dep_source_id)
-                self.enqueue_metadata(dep_source_id)
-
-        current_dep_ids = self.api.get_mod_dependencies(ow_mod_id)
-        for dep_id in desired_dep_ids:
-            if dep_id not in current_dep_ids:
-                self.api.add_mod_dependency(ow_mod_id, dep_id)
-
-        allow_prune = self.prune and deps_ok and not missing_sources
-        if allow_prune:
-            for dep_id in current_dep_ids:
-                if dep_id not in desired_dep_ids:
-                    self.api.delete_mod_dependency(ow_mod_id, dep_id)
-        elif self.prune and not deps_ok:
-            logging.debug(
-                "Skip dependency prune for %s due to Steam scrape failure",
-                ow_mod_id,
-            )
-
-        if missing_sources:
-            self.pending_dependency_links[ow_mod_id] = {
-                "deps": dep_source_ids,
-                "deps_ok": deps_ok,
-            }
-
-    def retry_pending(self) -> None:
-        if not self.pending_dependency_links:
-            return
-        for ow_mod_id, info in list(self.pending_dependency_links.items()):
-            dep_source_ids = [str(dep) for dep in info.get("deps", [])]
-            deps_ok = bool(info.get("deps_ok", True))
+        with start_span(
+            "dependencies.sync",
+            {
+                "ow.mod_id": ow_mod_id,
+                "deps.desired_sources": len(dep_source_ids),
+                "deps.prune": self.prune,
+                "deps.ok": deps_ok,
+            },
+        ):
             desired_dep_ids: List[int] = []
             missing_sources: List[str] = []
             for dep_source_id in dep_source_ids:
+                dep_source_id = str(dep_source_id)
                 dep_mod = self.lookup_mod(dep_source_id)
                 if dep_mod:
                     desired_dep_ids.append(int(dep_mod.get("id")))
                 else:
                     missing_sources.append(dep_source_id)
+                    self.enqueue_metadata(dep_source_id)
+
             current_dep_ids = self.api.get_mod_dependencies(ow_mod_id)
             for dep_id in desired_dep_ids:
                 if dep_id not in current_dep_ids:
                     self.api.add_mod_dependency(ow_mod_id, dep_id)
-            if self.prune and deps_ok and not missing_sources:
+
+            allow_prune = self.prune and deps_ok and not missing_sources
+            if allow_prune:
                 for dep_id in current_dep_ids:
                     if dep_id not in desired_dep_ids:
                         self.api.delete_mod_dependency(ow_mod_id, dep_id)
-            if not missing_sources:
-                self.pending_dependency_links.pop(ow_mod_id, None)
+            elif self.prune and not deps_ok:
+                logging.debug(
+                    "Skip dependency prune for %s due to Steam scrape failure",
+                    ow_mod_id,
+                )
+
+            if missing_sources:
+                self.pending_dependency_links[ow_mod_id] = {
+                    "deps": dep_source_ids,
+                    "deps_ok": deps_ok,
+                }
+
+    def retry_pending(self) -> None:
+        if not self.pending_dependency_links:
+            return
+        with start_span(
+            "dependencies.retry_pending",
+            {"deps.pending_mods": len(self.pending_dependency_links)},
+        ):
+            for ow_mod_id, info in list(self.pending_dependency_links.items()):
+                dep_source_ids = [str(dep) for dep in info.get("deps", [])]
+                deps_ok = bool(info.get("deps_ok", True))
+                desired_dep_ids: List[int] = []
+                missing_sources: List[str] = []
+                for dep_source_id in dep_source_ids:
+                    dep_mod = self.lookup_mod(dep_source_id)
+                    if dep_mod:
+                        desired_dep_ids.append(int(dep_mod.get("id")))
+                    else:
+                        missing_sources.append(dep_source_id)
+                current_dep_ids = self.api.get_mod_dependencies(ow_mod_id)
+                for dep_id in desired_dep_ids:
+                    if dep_id not in current_dep_ids:
+                        self.api.add_mod_dependency(ow_mod_id, dep_id)
+                if self.prune and deps_ok and not missing_sources:
+                    for dep_id in current_dep_ids:
+                        if dep_id not in desired_dep_ids:
+                            self.api.delete_mod_dependency(ow_mod_id, dep_id)
+                if not missing_sources:
+                    self.pending_dependency_links.pop(ow_mod_id, None)
 
 
 class ResourceSyncer:
@@ -422,22 +451,31 @@ class ResourceSyncer:
     ) -> None:
         if not self.enabled or not images:
             return
-        current_resources = self.api.get_mod_resources(ow_mod_id)
-        if self.upload_files:
-            self._sync_resource_files(
-                ow_mod_id,
-                mod,
-                images,
-                images_incomplete,
-                current_resources,
-            )
-        else:
-            self._sync_resource_urls(
-                ow_mod_id,
-                images,
-                images_incomplete,
-                current_resources,
-            )
+        with start_span(
+            "images.sync_resources",
+            {
+                "ow.mod_id": ow_mod_id,
+                "images.count": len(images),
+                "images.incomplete": images_incomplete,
+                "images.upload_files": self.upload_files,
+            },
+        ):
+            current_resources = self.api.get_mod_resources(ow_mod_id)
+            if self.upload_files:
+                self._sync_resource_files(
+                    ow_mod_id,
+                    mod,
+                    images,
+                    images_incomplete,
+                    current_resources,
+                )
+            else:
+                self._sync_resource_urls(
+                    ow_mod_id,
+                    images,
+                    images_incomplete,
+                    current_resources,
+                )
 
     def _sync_resource_urls(
         self,
@@ -446,25 +484,34 @@ class ResourceSyncer:
         images_incomplete: bool,
         current_resources: List[Dict[str, Any]],
     ) -> None:
-        current_urls = {
-            (r.get("type"), r.get("url")): r.get("id") for r in current_resources
-        }
-        desired_resources = self._build_desired_resources(images)
-        for res_type, url in desired_resources:
-            if (res_type, url) not in current_urls:
-                self.api.add_resource("mods", ow_mod_id, res_type, url)
+        with start_span(
+            "images.compare_urls",
+            {
+                "ow.mod_id": ow_mod_id,
+                "images.count": len(images),
+                "images.current_resources": len(current_resources),
+                "images.prune": self.prune,
+            },
+        ):
+            current_urls = {
+                (r.get("type"), r.get("url")): r.get("id") for r in current_resources
+            }
+            desired_resources = self._build_desired_resources(images)
+            for res_type, url in desired_resources:
+                if (res_type, url) not in current_urls:
+                    self.api.add_resource("mods", ow_mod_id, res_type, url)
 
-        if self.prune and images_incomplete:
-            logging.debug(
-                "Skip resource prune for %s due to missing image cache",
-                ow_mod_id,
-            )
-        elif self.prune:
-            desired_set = set(desired_resources)
-            for (res_type, url), res_id in current_urls.items():
-                if (res_type, url) not in desired_set:
-                    if res_id is not None:
-                        self.api.delete_resource(int(res_id))
+            if self.prune and images_incomplete:
+                logging.debug(
+                    "Skip resource prune for %s due to missing image cache",
+                    ow_mod_id,
+                )
+            elif self.prune:
+                desired_set = set(desired_resources)
+                for (res_type, url), res_id in current_urls.items():
+                    if (res_type, url) not in desired_set:
+                        if res_id is not None:
+                            self.api.delete_resource(int(res_id))
 
     def _sync_resource_files(
         self,
@@ -475,13 +522,27 @@ class ResourceSyncer:
         current_resources: List[Dict[str, Any]],
     ) -> None:
         dest_dir = self.mirror_root / "resources" / str(mod.item_id)
-        hashes_by_id, hash_cache = self._build_resource_hashes(
-            mod, current_resources, dest_dir
-        )
+        with start_span(
+            "images.hashes.load_current",
+            {
+                "ow.mod_id": ow_mod_id,
+                "images.current_resources": len(current_resources),
+            },
+        ):
+            hashes_by_id, hash_cache = self._build_resource_hashes(
+                mod, current_resources, dest_dir
+            )
         cache_path = dest_dir / "resource_hashes.json"
         cached_resources = hash_cache.get("resources", {})
 
-        deleted_ids = self._prune_duplicate_resources(current_resources, hashes_by_id)
+        with start_span(
+            "images.compare_duplicates",
+            {
+                "ow.mod_id": ow_mod_id,
+                "images.current_resources": len(current_resources),
+            },
+        ):
+            deleted_ids = self._prune_duplicate_resources(current_resources, hashes_by_id)
         if deleted_ids:
             for res_id in deleted_ids:
                 hashes_by_id.pop(res_id, None)
@@ -515,50 +576,65 @@ class ResourceSyncer:
         desired_hashes: List[ImageHashes] = []
         downloaded_count = 0
         if targets:
-            downloads = self._download_steam_images(mod, targets, dest_dir)
+            with start_span(
+                "images.download_targets",
+                {
+                    "ow.mod_id": ow_mod_id,
+                    "images.targets": len(targets),
+                },
+            ):
+                downloads = self._download_steam_images(mod, targets, dest_dir)
             downloaded_count = len(downloads)
-            seen_sha256: set[str] = set()
-            for res_type, _, file_path, file_hash in downloads:
-                hashes = _build_hashes(file_hash, file_path)
-                if hashes.sha256 and hashes.sha256 in seen_sha256:
-                    continue
-                if hashes.sha256:
-                    seen_sha256.add(hashes.sha256)
-                desired_hashes.append(hashes)
-
-                if res_type == "logo":
-                    if _hash_matches_any(hashes, existing_logo_hashes):
+            with start_span(
+                "images.process_and_compare",
+                {
+                    "ow.mod_id": ow_mod_id,
+                    "images.downloaded": downloaded_count,
+                    "images.existing_hashes": len(existing_hashes),
+                },
+            ):
+                seen_sha256: set[str] = set()
+                for res_type, _, file_path, file_hash in downloads:
+                    hashes = _build_hashes(file_hash, file_path)
+                    if hashes.sha256 and hashes.sha256 in seen_sha256:
                         continue
-                else:
-                    if _hash_matches_any(hashes, existing_hashes):
-                        continue
-
-                if self.api.add_resource_file(
-                    "mods", ow_mod_id, res_type, file_path
-                ):
-                    if (
-                        res_type == "logo"
-                        and hashes.sha256
-                        and hashes.sha256 in existing_sha256
-                        and hashes.sha256 not in existing_logo_sha256
-                    ):
-                        for resource in sha256_to_resources.get(hashes.sha256, []):
-                            res_id = resource.get("id")
-                            if res_id is None:
-                                continue
-                            self.api.delete_resource(int(res_id))
-                            deleted_ids.add(int(res_id))
-                            hashes_by_id.pop(int(res_id), None)
-                            if isinstance(cached_resources, dict):
-                                cached_resources.pop(str(res_id), None)
-                        self._save_hash_cache(cache_path, hash_cache)
-                    existing_hashes.append(hashes)
-                    if res_type == "logo":
-                        existing_logo_hashes.append(hashes)
                     if hashes.sha256:
-                        existing_sha256.add(hashes.sha256)
+                        seen_sha256.add(hashes.sha256)
+                    desired_hashes.append(hashes)
+
+                    if res_type == "logo":
+                        if _hash_matches_any(hashes, existing_logo_hashes):
+                            continue
+                    else:
+                        if _hash_matches_any(hashes, existing_hashes):
+                            continue
+
+                    if self.api.add_resource_file(
+                        "mods", ow_mod_id, res_type, file_path
+                    ):
+                        if (
+                            res_type == "logo"
+                            and hashes.sha256
+                            and hashes.sha256 in existing_sha256
+                            and hashes.sha256 not in existing_logo_sha256
+                        ):
+                            for resource in sha256_to_resources.get(hashes.sha256, []):
+                                res_id = resource.get("id")
+                                if res_id is None:
+                                    continue
+                                self.api.delete_resource(int(res_id))
+                                deleted_ids.add(int(res_id))
+                                hashes_by_id.pop(int(res_id), None)
+                                if isinstance(cached_resources, dict):
+                                    cached_resources.pop(str(res_id), None)
+                            self._save_hash_cache(cache_path, hash_cache)
+                        existing_hashes.append(hashes)
                         if res_type == "logo":
-                            existing_logo_sha256.add(hashes.sha256)
+                            existing_logo_hashes.append(hashes)
+                        if hashes.sha256:
+                            existing_sha256.add(hashes.sha256)
+                            if res_type == "logo":
+                                existing_logo_sha256.add(hashes.sha256)
 
         if self.prune and images_incomplete:
             logging.debug(
@@ -566,17 +642,25 @@ class ResourceSyncer:
                 mod.item_id,
             )
         elif self.prune and desired_hashes and downloaded_count == len(targets):
-            for resource in current_resources:
-                res_id = resource.get("id")
-                if res_id is None or int(res_id) in deleted_ids:
-                    continue
-                hashes = hashes_by_id.get(int(res_id))
-                if not hashes or _hash_matches_any(hashes, desired_hashes):
-                    continue
-                self.api.delete_resource(int(res_id))
-                if isinstance(cached_resources, dict):
-                    cached_resources.pop(str(res_id), None)
-            self._save_hash_cache(cache_path, hash_cache)
+            with start_span(
+                "images.compare_and_prune",
+                {
+                    "ow.mod_id": ow_mod_id,
+                    "images.current_resources": len(current_resources),
+                    "images.desired_hashes": len(desired_hashes),
+                },
+            ):
+                for resource in current_resources:
+                    res_id = resource.get("id")
+                    if res_id is None or int(res_id) in deleted_ids:
+                        continue
+                    hashes = hashes_by_id.get(int(res_id))
+                    if not hashes or _hash_matches_any(hashes, desired_hashes):
+                        continue
+                    self.api.delete_resource(int(res_id))
+                    if isinstance(cached_resources, dict):
+                        cached_resources.pop(str(res_id), None)
+                self._save_hash_cache(cache_path, hash_cache)
 
     def _download_steam_images(
         self,
@@ -639,30 +723,42 @@ class ResourceSyncer:
             url_to_ids.setdefault(url, []).append(int(res_id))
 
         if url_to_ids:
-            self._prune_missing_resource_urls(url_to_ids, cached_resources)
+            with start_span(
+                "images.check_existing_urls",
+                {"images.urls_to_probe": len(url_to_ids)},
+            ):
+                self._prune_missing_resource_urls(url_to_ids, cached_resources)
 
         if url_to_ids:
             targets: List[tuple[str, str, str]] = []
             for idx, url in enumerate(url_to_ids.keys()):
                 targets.append(("existing", url, f"existing_{idx}"))
-            downloads = self._download_steam_images(mod, targets, dest_dir)
-            for _, url, file_path, file_hash in downloads:
-                if not file_hash and not _PHASH_AVAILABLE:
-                    continue
-                hashes = _build_hashes(file_hash, file_path)
-                for res_id in url_to_ids.get(url, []):
-                    hashes_by_id[res_id] = hashes
-                    cached_resources[str(res_id)] = {
-                        "url": url,
-                        "sha256": hashes.sha256,
-                        "phash": hashes.phash,
-                    }
-                try:
-                    file_path.unlink()
-                except FileNotFoundError:
-                    pass
-                except Exception:
-                    logging.debug("Failed to remove hash temp %s", file_path)
+            with start_span(
+                "images.download_existing_for_hashes",
+                {"images.targets": len(targets)},
+            ):
+                downloads = self._download_steam_images(mod, targets, dest_dir)
+            with start_span(
+                "images.process_existing_hashes",
+                {"images.downloaded": len(downloads)},
+            ):
+                for _, url, file_path, file_hash in downloads:
+                    if not file_hash and not _PHASH_AVAILABLE:
+                        continue
+                    hashes = _build_hashes(file_hash, file_path)
+                    for res_id in url_to_ids.get(url, []):
+                        hashes_by_id[res_id] = hashes
+                        cached_resources[str(res_id)] = {
+                            "url": url,
+                            "sha256": hashes.sha256,
+                            "phash": hashes.phash,
+                        }
+                    try:
+                        file_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except Exception:
+                        logging.debug("Failed to remove hash temp %s", file_path)
 
         self._save_hash_cache(cache_path, cache)
         return hashes_by_id, cache
@@ -836,7 +932,14 @@ class SteamModLoader:
         if not item_ids:
             return {}
         logging.info("Steam batch load: items=%s", len(item_ids))
-        return asyncio.run(self._load_sequential(item_ids))
+        with start_span(
+            "steam.load_batch",
+            {
+                "steam.items": len(item_ids),
+                "steam.language": self.language,
+            },
+        ):
+            return asyncio.run(self._load_sequential(item_ids))
 
     async def _load_sequential(self, item_ids: List[str]) -> Dict[str, SteamMod]:
         timeout_cfg = aiohttp.ClientTimeout(total=self.timeout)
@@ -914,165 +1017,206 @@ class ModSyncer:
         self.mod_loader = SteamModLoader(options.timeout, options.language)
 
     def run(self) -> None:
-        steam_stats_reset()
-        self.tag_manager.preload()
+        with start_span(
+            "sync.run",
+            {
+                "steam.app_id": self.steam_app_id,
+                "ow.game_id": self.game_id,
+                "sync.max_items": self.options.max_items,
+                "sync.max_pages": self.options.max_pages,
+                "sync.forced_item": bool(self.options.force_required_item_id),
+            },
+        ):
+            steam_stats_reset()
+            self.tag_manager.preload()
 
-        if self.options.force_required_item_id:
-            self.queue.enqueue_metadata(str(self.options.force_required_item_id))
-            logging.info("Steam workshop items: 1 (forced)")
-        else:
-            logging.info(
-                "Steam workshop listing: start_page=%s max_items=%s max_pages=%s",
-                self.start_page,
-                self.options.max_items or "unlimited",
-                self.options.max_pages or "unlimited",
-            )
+            if self.options.force_required_item_id:
+                self.queue.enqueue_metadata(str(self.options.force_required_item_id))
+                logging.info("Steam workshop items: 1 (forced)")
+            else:
+                logging.info(
+                    "Steam workshop listing: start_page=%s max_items=%s max_pages=%s",
+                    self.start_page,
+                    self.options.max_items or "unlimited",
+                    self.options.max_pages or "unlimited",
+                )
 
-        while True:
-            if not self.queue.has_work():
-                if self.options.force_required_item_id:
-                    break
-                if self.options.max_items > 0 and self.listed_count >= self.options.max_items:
-                    break
-                if not self._fetch_next_page():
-                    break
-                if not self.queue.meta_queue:
+            while True:
+                if not self.queue.has_work():
+                    if self.options.force_required_item_id:
+                        break
+                    if (
+                        self.options.max_items > 0
+                        and self.listed_count >= self.options.max_items
+                    ):
+                        break
+                    if not self._fetch_next_page():
+                        break
+                    if not self.queue.meta_queue:
+                        continue
+
+                if self.queue.meta_queue:
+                    self._process_metadata_batch()
                     continue
 
-            if self.queue.meta_queue:
-                self._process_metadata_batch()
-                continue
+                download_item = self.queue.pop_download()
+                if download_item:
+                    item_id, payload = download_item
+                    self._process_download_item(item_id, payload)
+                    continue
 
-            download_item = self.queue.pop_download()
-            if download_item:
-                item_id, payload = download_item
-                self._process_download_item(item_id, payload)
-                continue
-
-        stats = steam_stats_snapshot()
-        if stats.get("total"):
-            logging.info(
-                "Steam requests: total=%s ok=%s failed=%s endpoints=%s",
-                stats.get("total"),
-                stats.get("success"),
-                stats.get("failed"),
-                stats.get("by_endpoint"),
-            )
+            stats = steam_stats_snapshot()
+            if stats.get("total"):
+                logging.info(
+                    "Steam requests: total=%s ok=%s failed=%s endpoints=%s",
+                    stats.get("total"),
+                    stats.get("success"),
+                    stats.get("failed"),
+                    stats.get("by_endpoint"),
+                )
 
     def _fetch_next_page(self) -> bool:
-        if self.options.max_pages > 0:
-            last_page = self.start_page + self.options.max_pages - 1
-            if self.page > last_page:
+        with start_span(
+            "steam.list_page",
+            {
+                "steam.app_id": self.steam_app_id,
+                "steam.page": self.page,
+                "sync.max_pages": self.options.max_pages,
+                "sync.max_items": self.options.max_items,
+            },
+        ):
+            if self.options.max_pages > 0:
+                last_page = self.start_page + self.options.max_pages - 1
+                if self.page > last_page:
+                    return False
+            logging.info(
+                "Steam workshop page fetch: page=%s max_pages=%s",
+                self.page,
+                self.options.max_pages or "unlimited",
+            )
+            page_ids = steam_fetch_workshop_page_ids_html(
+                self.steam_app_id,
+                self.page,
+                self.options.language,
+                self.options.timeout,
+            )
+            if not page_ids:
                 return False
-        logging.info(
-            "Steam workshop page fetch: page=%s max_pages=%s",
-            self.page,
-            self.options.max_pages or "unlimited",
-        )
-        page_ids = steam_fetch_workshop_page_ids_html(
-            self.steam_app_id,
-            self.page,
-            self.options.language,
-            self.options.timeout,
-        )
-        if not page_ids:
-            return False
-        for item_id in page_ids:
-            if self.options.max_items > 0 and self.listed_count >= self.options.max_items:
-                break
-            self.queue.enqueue_metadata(str(item_id))
-            self.listed_count += 1
-        self.page += 1
-        if self.options.page_delay > 0:
-            time.sleep(self.options.page_delay)
-        return True
+            for item_id in page_ids:
+                if (
+                    self.options.max_items > 0
+                    and self.listed_count >= self.options.max_items
+                ):
+                    break
+                self.queue.enqueue_metadata(str(item_id))
+                self.listed_count += 1
+            self.page += 1
+            if self.options.page_delay > 0:
+                time.sleep(self.options.page_delay)
+            return True
 
     def _process_metadata_batch(self) -> None:
         batch_ids = self.queue.pop_meta_batch(30)
         if not batch_ids:
             return
-        logging.info("Process metadata batch: size=%s", len(batch_ids))
-        now_ts = int(time.time())
-        window_label = _recent_edit_window_label()
-        ow_mod_map = self.mod_index.get_many(batch_ids)
-        fetch_ids: List[str] = []
-        skipped_recent = 0
-        for workshop_id in batch_ids:
-            ow_mod = ow_mod_map.get(str(workshop_id))
-            if ow_mod and _ow_recent_edit(ow_mod, now_ts):
-                skipped_recent += 1
+        with start_span(
+            "metadata.batch",
+            {"metadata.batch_size": len(batch_ids)},
+        ):
+            logging.info("Process metadata batch: size=%s", len(batch_ids))
+            now_ts = int(time.time())
+            window_label = _recent_edit_window_label()
+            ow_mod_map = self.mod_index.get_many(batch_ids)
+            fetch_ids: List[str] = []
+            skipped_recent = 0
+            for workshop_id in batch_ids:
+                ow_mod = ow_mod_map.get(str(workshop_id))
+                if ow_mod and _ow_recent_edit(ow_mod, now_ts):
+                    skipped_recent += 1
+                    logging.info(
+                        "Skipping Steam fetch for %s (recent OW edit within %s)",
+                        ow_mod.get("id") or workshop_id,
+                        window_label,
+                    )
+                    continue
+                fetch_ids.append(str(workshop_id))
+            if not fetch_ids:
                 logging.info(
-                    "Skipping Steam fetch for %s (recent OW edit within %s)",
-                    ow_mod.get("id") or workshop_id,
-                    window_label,
+                    "Skipped %s mods from Steam fetch due to recent edits",
+                    skipped_recent,
                 )
-                continue
-            fetch_ids.append(str(workshop_id))
-        if not fetch_ids:
-            logging.info(
-                "Skipped %s mods from Steam fetch due to recent edits",
-                skipped_recent,
-            )
-            return
-        if skipped_recent:
-            logging.info(
-                "Skipped %s mods from Steam fetch due to recent edits",
-                skipped_recent,
-            )
-        mod_map = self.mod_loader.load_batch(fetch_ids)
-        self.steam_mod_cache.update(mod_map)
-
-        for workshop_id in fetch_ids:
-            mod = self.steam_mod_cache.get(str(workshop_id))
-            if not mod:
-                logging.warning("Steam page missing for %s", workshop_id)
-                continue
-            payload = self._build_payload(mod, workshop_id)
-            if payload is None:
-                continue
-            if payload.ow_mod_id is not None and _ow_recent_edit(payload.ow_mod):
+                return
+            if skipped_recent:
                 logging.info(
-                    "Skipping OW mod %s (recent edit within %s)",
+                    "Skipped %s mods from Steam fetch due to recent edits",
+                    skipped_recent,
+                )
+            mod_map = self.mod_loader.load_batch(fetch_ids)
+            self.steam_mod_cache.update(mod_map)
+
+            for workshop_id in fetch_ids:
+                mod = self.steam_mod_cache.get(str(workshop_id))
+                if not mod:
+                    logging.warning("Steam page missing for %s", workshop_id)
+                    continue
+                with start_span(
+                    "mod.payload_build",
+                    {"steam.item_id": str(workshop_id)},
+                ):
+                    payload = self._build_payload(mod, workshop_id)
+                if payload is None:
+                    continue
+                if payload.ow_mod_id is not None and _ow_recent_edit(payload.ow_mod):
+                    logging.info(
+                        "Skipping OW mod %s (recent edit within %s)",
+                        payload.ow_mod_id,
+                        _recent_edit_window_label(),
+                    )
+                    continue
+                if self._needs_file_update(mod, payload.ow_mod):
+                    logging.info(
+                        "Queue download for %s (new=%s)",
+                        workshop_id,
+                        payload.ow_mod_id is None,
+                    )
+                    self.queue.enqueue_download(str(workshop_id), payload)
+                    continue
+
+                if payload.ow_mod_id is None:
+                    continue
+
+                logging.info("Updating OW mod %s metadata", payload.ow_mod_id)
+                with start_span(
+                    "ow.mod_upsert",
+                    {
+                        "ow.mod_id": payload.ow_mod_id,
+                        "steam.item_id": str(workshop_id),
+                        "ow.mode": "metadata_update",
+                    },
+                ):
+                    self.api.edit_mod(
+                        payload.ow_mod_id,
+                        payload.title,
+                        payload.short_desc,
+                        payload.description,
+                        "steam",
+                        int(workshop_id),
+                        self.game_id,
+                        self.options.public_mode,
+                        set_source=False,
+                    )
+                self.tag_manager.sync_mod_tags(payload.ow_mod_id, payload.tags)
+                self.dependency_manager.sync_dependencies(
                     payload.ow_mod_id,
-                    _recent_edit_window_label(),
+                    payload.deps,
+                    payload.deps_ok,
                 )
-                continue
-            if self._needs_file_update(mod, payload.ow_mod):
-                logging.info(
-                    "Queue download for %s (new=%s)",
-                    workshop_id,
-                    payload.ow_mod_id is None,
+                self.resource_syncer.sync_resources(
+                    payload.ow_mod_id,
+                    mod,
+                    payload.images,
+                    payload.images_incomplete,
                 )
-                self.queue.enqueue_download(str(workshop_id), payload)
-                continue
-
-            if payload.ow_mod_id is None:
-                continue
-
-            logging.info("Updating OW mod %s metadata", payload.ow_mod_id)
-            self.api.edit_mod(
-                payload.ow_mod_id,
-                payload.title,
-                payload.short_desc,
-                payload.description,
-                "steam",
-                int(workshop_id),
-                self.game_id,
-                self.options.public_mode,
-                set_source=False,
-            )
-            self.tag_manager.sync_mod_tags(payload.ow_mod_id, payload.tags)
-            self.dependency_manager.sync_dependencies(
-                payload.ow_mod_id,
-                payload.deps,
-                payload.deps_ok,
-            )
-            self.resource_syncer.sync_resources(
-                payload.ow_mod_id,
-                mod,
-                payload.images,
-                payload.images_incomplete,
-            )
 
     def _process_download_item(self, item_id: str, payload: ModPayload) -> None:
         if not payload.is_new and _ow_recent_edit(payload.ow_mod):
@@ -1095,17 +1239,25 @@ class ModSyncer:
         ow_mod_id = payload.ow_mod_id
         if payload.is_new:
             logging.info("Creating OW mod for %s", item_id)
-            mod_id = self.api.add_mod(
-                payload.title,
-                payload.short_desc,
-                payload.description,
-                "steam",
-                int(item_id),
-                self.game_id,
-                self.options.public_mode,
-                self.options.without_author,
-                archive_path,
-            )
+            with start_span(
+                "ow.mod_upsert",
+                {
+                    "steam.item_id": str(item_id),
+                    "ow.mode": "create_with_file",
+                    "ow.game_id": self.game_id,
+                },
+            ):
+                mod_id = self.api.add_mod(
+                    payload.title,
+                    payload.short_desc,
+                    payload.description,
+                    "steam",
+                    int(item_id),
+                    self.game_id,
+                    self.options.public_mode,
+                    self.options.without_author,
+                    archive_path,
+                )
             self.mod_index.set(
                 str(item_id),
                 {
@@ -1119,18 +1271,26 @@ class ModSyncer:
             ow_mod_id = mod_id
         else:
             logging.info("Updating OW mod %s file", ow_mod_id)
-            self.api.edit_mod(
-                int(ow_mod_id),
-                payload.title,
-                payload.short_desc,
-                payload.description,
-                "steam",
-                int(item_id),
-                self.game_id,
-                self.options.public_mode,
-                archive_path,
-                set_source=False,
-            )
+            with start_span(
+                "ow.mod_upsert",
+                {
+                    "ow.mod_id": int(ow_mod_id) if ow_mod_id else None,
+                    "steam.item_id": str(item_id),
+                    "ow.mode": "file_update",
+                },
+            ):
+                self.api.edit_mod(
+                    int(ow_mod_id),
+                    payload.title,
+                    payload.short_desc,
+                    payload.description,
+                    "steam",
+                    int(item_id),
+                    self.game_id,
+                    self.options.public_mode,
+                    archive_path,
+                    set_source=False,
+                )
 
         if ow_mod_id is None:
             return
@@ -1179,16 +1339,24 @@ class ModSyncer:
         page_ok = mod.page_ok
         self.dependency_manager.queue_missing_sources(page_deps)
 
-        images = self._collect_images(mod, allow_image_scrape)
-        if not allow_image_scrape and mod.logo:
-            images = [mod.logo]
-        images = dedupe_images(images)
-        if self.options.max_screenshots > 0 and images:
-            logo = images[0]
-            screenshots = images[1:]
-            if len(screenshots) > self.options.max_screenshots:
-                screenshots = screenshots[: self.options.max_screenshots]
-            images = [logo] + screenshots
+        with start_span(
+            "images.prepare_payload",
+            {
+                "steam.item_id": str(workshop_id),
+                "images.scrape_enabled": allow_image_scrape,
+                "images.max_screenshots": self.options.max_screenshots,
+            },
+        ):
+            images = self._collect_images(mod, allow_image_scrape)
+            if not allow_image_scrape and mod.logo:
+                images = [mod.logo]
+            images = dedupe_images(images)
+            if self.options.max_screenshots > 0 and images:
+                logo = images[0]
+                screenshots = images[1:]
+                if len(screenshots) > self.options.max_screenshots:
+                    screenshots = screenshots[: self.options.max_screenshots]
+                images = [logo] + screenshots
         logging.debug(
             "Steam %s images: %s (logo=%s extra=%s)",
             workshop_id,
@@ -1225,26 +1393,36 @@ class ModSyncer:
         mod: SteamMod,
         ow_mod: Optional[Dict[str, Any]],
     ) -> bool:
-        if ow_mod is None:
-            return True
-        steam_latest_ts = max(mod.updated_ts, mod.created_ts)
-        ow_updated_file_ts = _parse_ow_datetime(
-            (ow_mod.get("date_update_file") or ow_mod.get("date_creation"))
-            if ow_mod
-            else None
-        )
-        ow_created_ts = _parse_ow_datetime(ow_mod.get("date_creation") if ow_mod else None)
-        ow_latest_ts = max(ow_updated_file_ts, ow_created_ts)
-        return steam_latest_ts > ow_latest_ts
+        with start_span("mod.file_update_decision"):
+            if ow_mod is None:
+                return True
+            steam_latest_ts = max(mod.updated_ts, mod.created_ts)
+            ow_updated_file_ts = _parse_ow_datetime(
+                (ow_mod.get("date_update_file") or ow_mod.get("date_creation"))
+                if ow_mod
+                else None
+            )
+            ow_created_ts = _parse_ow_datetime(
+                ow_mod.get("date_creation") if ow_mod else None
+            )
+            ow_latest_ts = max(ow_updated_file_ts, ow_created_ts)
+            return steam_latest_ts > ow_latest_ts
 
     def _download_mod_archive(self, item_id: str) -> Optional[Path]:
-        if not download_steam_mod(
-            self.steamcmd_path,
-            self.steam_root,
-            self.steam_app_id,
-            int(item_id),
+        with start_span(
+            "mod.download_archive",
+            {
+                "steam.item_id": str(item_id),
+                "steam.app_id": self.steam_app_id,
+            },
         ):
-            return None
+            if not download_steam_mod(
+                self.steamcmd_path,
+                self.steam_root,
+                self.steam_app_id,
+                int(item_id),
+            ):
+                return None
         workshop_path = (
             self.steam_root
             / "steamapps"
@@ -1255,10 +1433,14 @@ class ModSyncer:
         )
         if not has_files(workshop_path):
             return None
-        return zip_directory(
-            workshop_path,
-            self.mirror_root / "steam_archives" / f"{item_id}.zip",
-        )
+        with start_span(
+            "mod.zip_archive",
+            {"steam.item_id": str(item_id)},
+        ):
+            return zip_directory(
+                workshop_path,
+                self.mirror_root / "steam_archives" / f"{item_id}.zip",
+            )
 
 
 def ensure_game(
@@ -1268,33 +1450,41 @@ def ensure_game(
     language: str,
     timeout: int,
 ) -> int:
-    if game_id:
-        try:
-            game = api.get_game(game_id)
-        except Exception as exc:
-            logging.warning("Game %s not found: %s", game_id, exc)
-        else:
-            source_id = game.get("source_id")
-            if source_id and int(source_id) != steam_app_id:
-                logging.warning(
-                    "OW game source_id %s does not match steam app id %s",
-                    source_id,
-                    steam_app_id,
-                )
-            return game_id
+    with start_span(
+        "ensure_game.resolve_or_create",
+        {
+            "ow.game_id": game_id or 0,
+            "steam.app_id": steam_app_id,
+            "steam.language": language,
+        },
+    ):
+        if game_id:
+            try:
+                game = api.get_game(game_id)
+            except Exception as exc:
+                logging.warning("Game %s not found: %s", game_id, exc)
+            else:
+                source_id = game.get("source_id")
+                if source_id and int(source_id) != steam_app_id:
+                    logging.warning(
+                        "OW game source_id %s does not match steam app id %s",
+                        source_id,
+                        steam_app_id,
+                    )
+                return game_id
 
-    games = api.list_games_by_source(steam_app_id, 50)
-    if games:
-        return int(games[0]["id"])
+        games = api.list_games_by_source(steam_app_id, 50)
+        if games:
+            return int(games[0]["id"])
 
-    app_details = steam_get_app_details(steam_app_id, language, timeout)
-    game_id = api.add_game(
-        app_details["name"],
-        app_details["short"],
-        app_details["description"],
-    )
-    api.edit_game_source(game_id, "steam", steam_app_id)
-    return game_id
+        app_details = steam_get_app_details(steam_app_id, language, timeout)
+        game_id = api.add_game(
+            app_details["name"],
+            app_details["short"],
+            app_details["description"],
+        )
+        api.edit_game_source(game_id, "steam", steam_app_id)
+        return game_id
 
 
 def _parse_ow_datetime(value: str | None) -> int:
