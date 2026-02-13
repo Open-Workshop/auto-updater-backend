@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -205,6 +206,9 @@ class ModIndex:
 
     def set(self, source_id: str, mod: Dict[str, Any]) -> None:
         self._cache[str(source_id)] = mod
+
+    def clear(self) -> None:
+        self._cache.clear()
 
     def get_many(self, source_ids: Iterable[str]) -> Dict[str, Optional[Dict[str, Any]]]:
         requested = [str(item) for item in source_ids]
@@ -1027,6 +1031,7 @@ class ModSyncer:
                 "sync.forced_item": bool(self.options.force_required_item_id),
             },
         ):
+            self._clear_local_caches("startup")
             steam_stats_reset()
             self.tag_manager.preload()
 
@@ -1089,6 +1094,8 @@ class ModSyncer:
                 last_page = self.start_page + self.options.max_pages - 1
                 if self.page > last_page:
                     return False
+            if self.page > self.start_page:
+                self._clear_local_caches(f"before_page_{self.page}")
             logging.info(
                 "Steam workshop page fetch: page=%s max_pages=%s",
                 self.page,
@@ -1236,78 +1243,131 @@ class ModSyncer:
             logging.warning("Steam download failed for %s", item_id)
             return
 
-        ow_mod_id = payload.ow_mod_id
-        if payload.is_new:
-            logging.info("Creating OW mod for %s", item_id)
-            with start_span(
-                "ow.mod_upsert",
-                {
-                    "steam.item_id": str(item_id),
-                    "ow.mode": "create_with_file",
-                    "ow.game_id": self.game_id,
-                },
-            ):
-                mod_id = self.api.add_mod(
-                    payload.title,
-                    payload.short_desc,
-                    payload.description,
-                    "steam",
-                    int(item_id),
-                    self.game_id,
-                    self.options.public_mode,
-                    self.options.without_author,
-                    archive_path,
+        try:
+            ow_mod_id = payload.ow_mod_id
+            if payload.is_new:
+                logging.info("Creating OW mod for %s", item_id)
+                with start_span(
+                    "ow.mod_upsert",
+                    {
+                        "steam.item_id": str(item_id),
+                        "ow.mode": "create_with_file",
+                        "ow.game_id": self.game_id,
+                    },
+                ):
+                    mod_id = self.api.add_mod(
+                        payload.title,
+                        payload.short_desc,
+                        payload.description,
+                        "steam",
+                        int(item_id),
+                        self.game_id,
+                        self.options.public_mode,
+                        self.options.without_author,
+                        archive_path,
+                    )
+                self.mod_index.set(
+                    str(item_id),
+                    {
+                        "id": mod_id,
+                        "source_id": int(item_id),
+                        "date_update_file": datetime.now(timezone.utc).isoformat(
+                            timespec="seconds"
+                        ),
+                    },
                 )
-            self.mod_index.set(
-                str(item_id),
-                {
-                "id": mod_id,
-                "source_id": int(item_id),
-                "date_update_file": datetime.now(timezone.utc).isoformat(
-                    timespec="seconds"
-                ),
-                },
+                ow_mod_id = mod_id
+            else:
+                logging.info("Updating OW mod %s file", ow_mod_id)
+                with start_span(
+                    "ow.mod_upsert",
+                    {
+                        "ow.mod_id": int(ow_mod_id) if ow_mod_id else None,
+                        "steam.item_id": str(item_id),
+                        "ow.mode": "file_update",
+                    },
+                ):
+                    self.api.edit_mod(
+                        int(ow_mod_id),
+                        payload.title,
+                        payload.short_desc,
+                        payload.description,
+                        "steam",
+                        int(item_id),
+                        self.game_id,
+                        self.options.public_mode,
+                        archive_path,
+                        set_source=False,
+                    )
+
+            if ow_mod_id is None:
+                return
+
+            self.tag_manager.sync_mod_tags(int(ow_mod_id), payload.tags)
+            self.dependency_manager.sync_dependencies(
+                int(ow_mod_id),
+                payload.deps,
+                payload.deps_ok,
             )
-            ow_mod_id = mod_id
-        else:
-            logging.info("Updating OW mod %s file", ow_mod_id)
-            with start_span(
-                "ow.mod_upsert",
-                {
-                    "ow.mod_id": int(ow_mod_id) if ow_mod_id else None,
-                    "steam.item_id": str(item_id),
-                    "ow.mode": "file_update",
-                },
-            ):
-                self.api.edit_mod(
-                    int(ow_mod_id),
-                    payload.title,
-                    payload.short_desc,
-                    payload.description,
-                    "steam",
-                    int(item_id),
-                    self.game_id,
-                    self.options.public_mode,
-                    archive_path,
-                    set_source=False,
-                )
+            self.resource_syncer.sync_resources(
+                int(ow_mod_id),
+                payload.mod,
+                payload.images,
+                payload.images_incomplete,
+            )
+            self.dependency_manager.retry_pending()
+        finally:
+            self._safe_unlink(archive_path)
 
-        if ow_mod_id is None:
+    def _clear_local_caches(self, reason: str) -> None:
+        self.mod_index.clear()
+        self.steam_mod_cache.clear()
+        cache_dirs = (
+            self.mirror_root / "steam_archives",
+            self.mirror_root / "resources",
+            self.steam_root / "steamapps" / "workshop" / "content",
+        )
+        for cache_dir in cache_dirs:
+            self._clear_directory_contents(cache_dir, reason)
+
+    def _clear_directory_contents(self, path: Path, reason: str) -> None:
+        if not path.exists():
             return
+        if not path.is_dir():
+            logging.warning(
+                "Skip cache cleanup for %s (%s): path is not a directory",
+                path,
+                reason,
+            )
+            return
+        removed = 0
+        for child in path.iterdir():
+            try:
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+                removed += 1
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                logging.warning(
+                    "Failed to delete cache entry %s (%s): %s",
+                    child,
+                    reason,
+                    exc,
+                )
+        if removed:
+            logging.info("Cache cleanup %s (%s): removed=%s", path, reason, removed)
 
-        self.tag_manager.sync_mod_tags(int(ow_mod_id), payload.tags)
-        self.dependency_manager.sync_dependencies(
-            int(ow_mod_id),
-            payload.deps,
-            payload.deps_ok,
-        )
-        self.resource_syncer.sync_resources(
-            int(ow_mod_id),
-            payload.mod,
-            payload.images,
-            payload.images_incomplete,
-        )
-        self.dependency_manager.retry_pending()
+    @staticmethod
+    def _safe_unlink(path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            logging.warning("Failed to remove archive %s: %s", path, exc)
 
     def _build_payload(self, mod: SteamMod, workshop_id: str) -> Optional[ModPayload]:
         title = mod.title
