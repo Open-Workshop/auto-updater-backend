@@ -65,6 +65,32 @@ Steam / Workshop:
 - `OW_MIRROR_DIR/steam_archives/<workshop_id>.zip` — архивы для публикации в OW
 - `OW_MIRROR_DIR/resources/<workshop_id>/...` — кеш загруженных изображений
 
+## Установка steamcmd (Ubuntu)
+Если запускаете бота не в Docker, `steamcmd` нужно установить отдельно и указать `STEAMCMD_PATH`.
+
+Установка в домашнюю директорию пользователя:
+```bash
+sudo dpkg --add-architecture i386
+sudo apt update
+sudo apt install -y curl ca-certificates lib32gcc-s1 lib32stdc++6 lib32z1
+
+mkdir -p ~/.local/steamcmd
+curl -sSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz \
+  | tar -xz -C ~/.local/steamcmd
+
+~/.local/steamcmd/steamcmd.sh +quit
+```
+
+После установки выставьте путь:
+```bash
+export STEAMCMD_PATH="$HOME/.local/steamcmd/steamcmd.sh"
+```
+
+Для `systemd`/`.env`:
+```bash
+STEAMCMD_PATH=/home/<user>/.local/steamcmd/steamcmd.sh
+```
+
 ## Docker
 Сборка:
 ```bash
