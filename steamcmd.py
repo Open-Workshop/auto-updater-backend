@@ -49,6 +49,93 @@ def _is_retryable_reason(reason: str | None, returncode: int) -> bool:
     return returncode != 0
 
 
+def _read_tail_lines(path: Path, max_bytes: int = 512 * 1024) -> list[str]:
+    if not path.exists() or not path.is_file():
+        return []
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - max_bytes))
+            data = fh.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return []
+    return [line.strip() for line in data.splitlines() if line.strip()]
+
+
+def _collect_steam_diagnostics(workshop_id: int) -> str | None:
+    wid = str(workshop_id)
+    log_dir = Path.home() / "Steam" / "logs"
+    workshop_lines = _read_tail_lines(log_dir / "workshop_log.txt")
+    content_lines = _read_tail_lines(log_dir / "content_log.txt")
+    details: list[str] = []
+
+    if workshop_lines:
+        req_indexes = [
+            idx
+            for idx, line in enumerate(workshop_lines)
+            if f"Download item {wid} requested by app" in line
+        ]
+        if req_indexes:
+            start = req_indexes[-1]
+            window = workshop_lines[start : start + 120]
+        else:
+            window = workshop_lines[-160:]
+        result_line = next(
+            (
+                line
+                for line in window
+                if f"Download item {wid} result :" in line
+            ),
+            None,
+        )
+        if result_line:
+            details.append(result_line)
+        canceled_line = next(
+            (
+                line
+                for line in window
+                if "Update canceled:" in line
+            ),
+            None,
+        )
+        if canceled_line:
+            details.append(canceled_line)
+
+    if content_lines:
+        missing_file_re = re.compile(
+            rf'Validation: missing file "{re.escape(wid)}\\([^"]+)"'
+        )
+        missing_count = 0
+        missing_examples: list[str] = []
+        for line in content_lines:
+            match = missing_file_re.search(line)
+            if not match:
+                continue
+            missing_count += 1
+            if len(missing_examples) < 3:
+                missing_examples.append(match.group(1).replace("\\", "/"))
+        if missing_count:
+            examples = ", ".join(missing_examples)
+            details.append(
+                f"Validation missing files: {missing_count} (examples: {examples})"
+            )
+            quick_scan = next(
+                (
+                    line
+                    for line in reversed(content_lines)
+                    if "Validation: quick scan" in line
+                ),
+                None,
+            )
+            if quick_scan:
+                details.append(quick_scan)
+
+    if not details:
+        return None
+    return " | ".join(details)
+
+
 def download_steam_mod(
     steamcmd_path: Path,
     steam_root: Path,
@@ -86,12 +173,15 @@ def download_steam_mod(
     output_tail = _strip_ansi(output[-4000:])
     parsed_error = _extract_steamcmd_error(output)
     if result.returncode != 0:
+        diagnostics = _collect_steam_diagnostics(workshop_id)
         reason = parsed_error or f"steamcmd exit code {result.returncode}"
         logging.error(
             "SteamCMD failed for workshop %s: %s",
             workshop_id,
             reason,
         )
+        if diagnostics:
+            logging.error("SteamCMD diagnostics for workshop %s: %s", workshop_id, diagnostics)
         if output_tail:
             logging.error("SteamCMD output tail for %s:\n%s", workshop_id, output_tail)
         return SteamDownloadResult(
@@ -100,6 +190,9 @@ def download_steam_mod(
             retryable=_is_retryable_reason(reason, result.returncode),
         )
     if parsed_error:
+        diagnostics = _collect_steam_diagnostics(workshop_id)
+        if diagnostics:
+            logging.error("SteamCMD diagnostics for workshop %s: %s", workshop_id, diagnostics)
         return SteamDownloadResult(
             False,
             parsed_error,
