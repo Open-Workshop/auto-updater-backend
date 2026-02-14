@@ -533,8 +533,15 @@ class OWClient:
         public_mode: int,
         without_author: bool,
         file_path,
-    ) -> int:
+        *,
+        return_created: bool = False,
+    ) -> int | tuple[int, bool]:
         name, short_desc, desc = self.limits.limit_mod_fields(name, short_desc, desc)
+
+        def _result(mod_id: int, created: bool) -> int | tuple[int, bool]:
+            if return_created:
+                return mod_id, created
+            return mod_id
 
         def send(mod_name: str) -> requests.Response:
             data = {
@@ -556,17 +563,17 @@ class OWClient:
 
         response = send(name)
         if response.status_code == 412:
-            existing_id = self.find_mod_by_source(source, source_id)
+            existing_id = self._find_mod_by_source_with_wait(source, source_id)
             if existing_id is not None:
-                return existing_id
+                return _result(existing_id, False)
             raise RuntimeError(
                 f"Failed to add mod: {response.status_code} {response.text}"
             )
         response = self._retry_mod_name(send, name, response)
         if response.status_code == 412:
-            existing_id = self.find_mod_by_source(source, source_id)
+            existing_id = self._find_mod_by_source_with_wait(source, source_id)
             if existing_id is not None:
-                return existing_id
+                return _result(existing_id, False)
             raise RuntimeError(
                 f"Failed to add mod: {response.status_code} {response.text}"
             )
@@ -583,11 +590,73 @@ class OWClient:
             )
         mod_id = self.extract_id(response)
         if mod_id is not None:
-            return mod_id
+            return _result(mod_id, True)
         mod_id = self._find_mod_by_source_with_wait(source, source_id)
         if mod_id is not None:
-            return mod_id
+            return _result(mod_id, True)
         raise RuntimeError("Failed to parse mod id from response")
+
+    def upsert_mod_with_file(
+        self,
+        name: str,
+        short_desc: str,
+        desc: str,
+        source: str,
+        source_id: int,
+        game_id: int,
+        public_mode: int,
+        without_author: bool,
+        file_path,
+    ) -> tuple[int, bool]:
+        existing_id = self.find_mod_by_source(source, source_id)
+        if existing_id is not None:
+            self.edit_mod(
+                existing_id,
+                name,
+                short_desc,
+                desc,
+                source,
+                source_id,
+                game_id,
+                public_mode,
+                file_path,
+                set_source=False,
+            )
+            return int(existing_id), False
+
+        add_result = self.add_mod(
+            name,
+            short_desc,
+            desc,
+            source,
+            source_id,
+            game_id,
+            public_mode,
+            without_author,
+            file_path,
+            return_created=True,
+        )
+        if isinstance(add_result, tuple):
+            mod_id, created = add_result
+        else:
+            mod_id, created = int(add_result), True
+        if created:
+            return int(mod_id), True
+
+        # If add hit source conflict (412), ensure file is uploaded to the existing mod.
+        self.edit_mod(
+            int(mod_id),
+            name,
+            short_desc,
+            desc,
+            source,
+            source_id,
+            game_id,
+            public_mode,
+            file_path,
+            set_source=False,
+        )
+        return int(mod_id), False
 
     def edit_mod(
         self,

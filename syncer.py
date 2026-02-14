@@ -1228,15 +1228,33 @@ class ModSyncer:
                 )
 
     def _process_download_item(self, item_id: str, payload: ModPayload) -> None:
-        if not payload.is_new and _ow_recent_edit(payload.ow_mod):
+        ow_mod = payload.ow_mod
+        ow_mod_id = payload.ow_mod_id
+        if ow_mod is None:
+            ow_mod = self.api.get_mod_by_source("steam", int(item_id))
+            if ow_mod is not None:
+                mod_id = ow_mod.get("id")
+                try:
+                    ow_mod_id = int(mod_id) if mod_id is not None else None
+                except (TypeError, ValueError):
+                    ow_mod_id = None
+                if ow_mod_id is not None:
+                    self.mod_index.set(
+                        str(item_id),
+                        {
+                            "id": int(ow_mod_id),
+                            "source_id": int(item_id),
+                        },
+                    )
+        if ow_mod is not None and _ow_recent_edit(ow_mod):
             logging.info(
                 "Skipping OW mod %s download (recent edit within %s)",
-                payload.ow_mod_id,
+                ow_mod_id,
                 _recent_edit_window_label(),
             )
             return
         logging.info(
-            "Downloading Steam mod %s (new=%s)",
+            "Downloading Steam mod %s (payload_new=%s)",
             item_id,
             payload.is_new,
         )
@@ -1246,61 +1264,39 @@ class ModSyncer:
             return
 
         try:
-            ow_mod_id = payload.ow_mod_id
-            if payload.is_new:
-                logging.info("Creating OW mod for %s", item_id)
-                with start_span(
-                    "ow.mod_upsert",
-                    {
-                        "steam.item_id": str(item_id),
-                        "ow.mode": "create_with_file",
-                        "ow.game_id": self.game_id,
-                    },
-                ):
-                    mod_id = self.api.add_mod(
-                        payload.title,
-                        payload.short_desc,
-                        payload.description,
-                        "steam",
-                        int(item_id),
-                        self.game_id,
-                        self.options.public_mode,
-                        self.options.without_author,
-                        archive_path,
-                    )
-                self.mod_index.set(
-                    str(item_id),
-                    {
-                        "id": mod_id,
-                        "source_id": int(item_id),
-                        "date_update_file": datetime.now(timezone.utc).isoformat(
-                            timespec="seconds"
-                        ),
-                    },
+            with start_span(
+                "ow.mod_upsert",
+                {
+                    "ow.mod_id": int(payload.ow_mod_id) if payload.ow_mod_id else None,
+                    "steam.item_id": str(item_id),
+                    "ow.mode": "upsert_with_file",
+                },
+            ):
+                ow_mod_id, created_now = self.api.upsert_mod_with_file(
+                    payload.title,
+                    payload.short_desc,
+                    payload.description,
+                    "steam",
+                    int(item_id),
+                    self.game_id,
+                    self.options.public_mode,
+                    self.options.without_author,
+                    archive_path,
                 )
-                ow_mod_id = mod_id
+            self.mod_index.set(
+                str(item_id),
+                {
+                    "id": int(ow_mod_id),
+                    "source_id": int(item_id),
+                    "date_update_file": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                },
+            )
+            if created_now:
+                logging.info("Created OW mod %s for %s", int(ow_mod_id), item_id)
             else:
-                logging.info("Updating OW mod %s file", ow_mod_id)
-                with start_span(
-                    "ow.mod_upsert",
-                    {
-                        "ow.mod_id": int(ow_mod_id) if ow_mod_id else None,
-                        "steam.item_id": str(item_id),
-                        "ow.mode": "file_update",
-                    },
-                ):
-                    self.api.edit_mod(
-                        int(ow_mod_id),
-                        payload.title,
-                        payload.short_desc,
-                        payload.description,
-                        "steam",
-                        int(item_id),
-                        self.game_id,
-                        self.options.public_mode,
-                        archive_path,
-                        set_source=False,
-                    )
+                logging.info("Updated OW mod %s file", int(ow_mod_id))
 
             if ow_mod_id is None:
                 return
