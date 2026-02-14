@@ -1324,9 +1324,17 @@ class ModSyncer:
     def _clear_local_caches(self, reason: str) -> None:
         self.mod_index.clear()
         self.steam_mod_cache.clear()
+        appworkshop_acf = (
+            self.steam_root
+            / "steamapps"
+            / "workshop"
+            / f"appworkshop_{self.steam_app_id}.acf"
+        )
+        self._safe_unlink(appworkshop_acf)
         cache_dirs = (
             self.mirror_root / "steam_archives",
             self.mirror_root / "resources",
+            self.steam_root / "steamapps" / "workshop" / "downloads",
             self.steam_root / "steamapps" / "workshop" / "content",
         )
         for cache_dir in cache_dirs:
