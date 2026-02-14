@@ -82,6 +82,8 @@ class ModPayload:
 
 PHASH_MAX_DISTANCE = 6
 RECENT_OW_EDIT_SECONDS = 7 * 24 * 60 * 60
+STEAMCMD_MAX_DOWNLOAD_ATTEMPTS = 3
+STEAMCMD_RETRY_BACKOFF_SECONDS = 5.0
 
 
 def _recent_edit_window_label(seconds: int = RECENT_OW_EDIT_SECONDS) -> str:
@@ -1476,19 +1478,32 @@ class ModSyncer:
                 "steam.app_id": self.steam_app_id,
             },
         ):
-            download_result = download_steam_mod(
-                self.steamcmd_path,
-                self.steam_root,
-                self.steam_app_id,
-                int(item_id),
-            )
-            if not download_result.ok:
-                logging.error(
-                    "SteamCMD download step failed for %s: %s",
-                    item_id,
-                    download_result.reason or "unknown reason",
+            for attempt in range(1, STEAMCMD_MAX_DOWNLOAD_ATTEMPTS + 1):
+                download_result = download_steam_mod(
+                    self.steamcmd_path,
+                    self.steam_root,
+                    self.steam_app_id,
+                    int(item_id),
                 )
-                return None
+                if download_result.ok:
+                    break
+                reason = download_result.reason or "unknown reason"
+                logging.error(
+                    "SteamCMD download attempt %s/%s failed for %s: %s",
+                    attempt,
+                    STEAMCMD_MAX_DOWNLOAD_ATTEMPTS,
+                    item_id,
+                    reason,
+                )
+                if attempt >= STEAMCMD_MAX_DOWNLOAD_ATTEMPTS or not download_result.retryable:
+                    return None
+                delay = STEAMCMD_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                logging.warning(
+                    "Retrying SteamCMD download for %s in %.1fs",
+                    item_id,
+                    delay,
+                )
+                time.sleep(delay)
         workshop_path = (
             self.steam_root
             / "steamapps"

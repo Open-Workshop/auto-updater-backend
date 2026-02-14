@@ -11,6 +11,7 @@ from utils import ensure_dir
 class SteamDownloadResult:
     ok: bool
     reason: str | None = None
+    retryable: bool = False
 
 
 _ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
@@ -38,6 +39,16 @@ def _extract_steamcmd_error(output: str) -> str | None:
     return None
 
 
+def _is_retryable_reason(reason: str | None, returncode: int) -> bool:
+    if reason:
+        normalized = reason.lower()
+        if "failed (failure)" in normalized:
+            return True
+        if "timeout" in normalized:
+            return True
+    return returncode != 0
+
+
 def download_steam_mod(
     steamcmd_path: Path,
     steam_root: Path,
@@ -46,7 +57,11 @@ def download_steam_mod(
 ) -> SteamDownloadResult:
     if not steamcmd_path.exists():
         logging.error("steamcmd not found at %s", steamcmd_path)
-        return SteamDownloadResult(False, f"steamcmd not found at {steamcmd_path}")
+        return SteamDownloadResult(
+            False,
+            f"steamcmd not found at {steamcmd_path}",
+            retryable=False,
+        )
     ensure_dir(steam_root)
     cmd = [
         str(steamcmd_path),
@@ -79,8 +94,15 @@ def download_steam_mod(
         )
         if output_tail:
             logging.error("SteamCMD output tail for %s:\n%s", workshop_id, output_tail)
-        return SteamDownloadResult(False, reason)
+        return SteamDownloadResult(
+            False,
+            reason,
+            retryable=_is_retryable_reason(reason, result.returncode),
+        )
     if parsed_error:
-        logging.error("SteamCMD reported failure for workshop %s: %s", workshop_id, parsed_error)
-        return SteamDownloadResult(False, parsed_error)
+        return SteamDownloadResult(
+            False,
+            parsed_error,
+            retryable=_is_retryable_reason(parsed_error, result.returncode),
+        )
     return SteamDownloadResult(True)
