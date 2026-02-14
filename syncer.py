@@ -1240,7 +1240,7 @@ class ModSyncer:
         )
         archive_path = self._download_mod_archive(item_id)
         if not archive_path:
-            logging.warning("Steam download failed for %s", item_id)
+            logging.error("Steam download failed for %s", item_id)
             return
 
         try:
@@ -1476,12 +1476,18 @@ class ModSyncer:
                 "steam.app_id": self.steam_app_id,
             },
         ):
-            if not download_steam_mod(
+            download_result = download_steam_mod(
                 self.steamcmd_path,
                 self.steam_root,
                 self.steam_app_id,
                 int(item_id),
-            ):
+            )
+            if not download_result.ok:
+                logging.error(
+                    "SteamCMD download step failed for %s: %s",
+                    item_id,
+                    download_result.reason or "unknown reason",
+                )
                 return None
         workshop_path = (
             self.steam_root
@@ -1492,6 +1498,11 @@ class ModSyncer:
             / str(item_id)
         )
         if not has_files(workshop_path):
+            logging.error(
+                "SteamCMD finished but no files found for %s at %s",
+                item_id,
+                workshop_path,
+            )
             return None
         with start_span(
             "mod.zip_archive",
