@@ -6,6 +6,7 @@
 - Keep changes minimal and aligned with actual response schemas.
 - If a quick check fails (no network/tool missing), state it explicitly and avoid speculative fields.
 - Remove temporary scaffolding or unused code before finishing.
+- Avoid blanket `except Exception` in regular control flow; catch concrete exception types only. Broad catches are allowed only at process boundaries with explicit logging.
 
 ## API Field Validation
 - When a feature depends on a response field (e.g., date fields), fetch a real sample and list the keys used.

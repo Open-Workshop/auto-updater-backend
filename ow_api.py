@@ -5,10 +5,11 @@ import logging
 import random
 import time
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 
+from telemetry import start_span
 from utils import truncate
 
 _DEFAULT_LIMITS: Dict[str, int] = {
@@ -235,7 +236,7 @@ class OWClient:
                 if callable(seek):
                     try:
                         seek(0)
-                    except Exception:
+                    except (OSError, ValueError):
                         pass
 
         attempts = self.retries + 1
@@ -281,7 +282,7 @@ class OWClient:
     def load_limits(self) -> bool:
         try:
             response = self.request("get", "/openapi.json")
-        except Exception as exc:
+        except (requests.RequestException, RuntimeError) as exc:
             logging.warning("Failed to load OW OpenAPI limits: %s", exc)
             return False
         if not self.is_success(response):
@@ -293,7 +294,7 @@ class OWClient:
             return False
         try:
             payload = response.json()
-        except Exception as exc:
+        except ValueError as exc:
             logging.warning("Failed to parse OW OpenAPI limits: %s", exc)
             return False
         if not self.limits.update_from_openapi(payload):
@@ -492,18 +493,51 @@ class OWClient:
         upload_url = self._redirect_location(redirect_response)
         if not upload_url:
             raise RuntimeError("Storage redirect does not contain Location header")
-        with file_path.open("rb") as handle:
-            return self.session.request(
-                "post",
-                upload_url,
-                data=handle,
-                headers={
-                    "Content-Type": "application/octet-stream",
-                    "X-File-Name": file_path.name,
-                },
-                timeout=self.timeout,
-                allow_redirects=False,
-            )
+        parsed_upload = urlparse(upload_url)
+        file_size: int | None = None
+        try:
+            file_size = int(file_path.stat().st_size)
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+
+        with start_span(
+            "ow.upload_file_to_storage",
+            {
+                "http.request.method": "POST",
+                "http.route": parsed_upload.path or "/",
+                "ow.upload.host": parsed_upload.netloc or parsed_upload.hostname or "",
+                "ow.upload.file_name": file_path.name,
+                "ow.upload.file_size": file_size,
+                "ow.redirect.status_code": redirect_response.status_code,
+            },
+        ) as span:
+            try:
+                with file_path.open("rb") as handle:
+                    response = self.session.request(
+                        "post",
+                        upload_url,
+                        data=handle,
+                        headers={
+                            "Content-Type": "application/octet-stream",
+                            "X-File-Name": file_path.name,
+                        },
+                        timeout=self.timeout,
+                        allow_redirects=False,
+                    )
+            except requests.RequestException as exc:
+                span.record_exception(exc)
+                span.set_attribute("error.type", type(exc).__name__)
+                span.set_attribute("error.message", str(exc)[:500])
+                raise
+
+            span.set_attribute("http.response.status_code", response.status_code)
+            try:
+                response_size = int(response.headers.get("Content-Length", ""))
+            except (TypeError, ValueError):
+                response_size = None
+            if response_size is not None and response_size >= 0:
+                span.set_attribute("http.response.body.size", response_size)
+            return response
 
     def _find_mod_by_source_with_wait(
         self,
@@ -917,7 +951,7 @@ class OWClient:
     def extract_id(response: requests.Response) -> Optional[int]:
         try:
             payload = response.json()
-        except Exception:
+        except ValueError:
             payload = None
         if isinstance(payload, dict):
             for key in ("id", "tag_id", "mod_id", "game_id", "resource_id"):
