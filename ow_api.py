@@ -407,7 +407,7 @@ class OWClient:
         def fetch(page: int) -> Dict[str, Any]:
             response = self.request(
                 "get",
-                "/list/games/",
+                "/games",
                 params={
                     "page_size": page_size,
                     "page": page,
@@ -485,14 +485,29 @@ class OWClient:
             return None
         return urljoin(response.url, location)
 
+    def _transfer_url_from_init(self, response: requests.Response) -> Optional[str]:
+        redirect_url = self._redirect_location(response)
+        if redirect_url:
+            return redirect_url
+
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict):
+            transfer_url = payload.get("transfer_url")
+            if isinstance(transfer_url, str) and transfer_url.strip():
+                return transfer_url
+        return None
+
     def _upload_file_to_storage(
         self,
         redirect_response: requests.Response,
         file_path,
     ) -> requests.Response:
-        upload_url = self._redirect_location(redirect_response)
+        upload_url = self._transfer_url_from_init(redirect_response)
         if not upload_url:
-            raise RuntimeError("Storage redirect does not contain Location header")
+            raise RuntimeError("Storage init does not contain transfer URL")
         parsed_upload = urlparse(upload_url)
         file_size: int | None = None
         try:
@@ -619,14 +634,14 @@ class OWClient:
             raise RuntimeError(
                 f"Failed to add mod: {response.status_code} {response.text}"
             )
-        if response.status_code == 307:
+        if response.status_code == 307 or self.is_success(response):
             upload_response = self._upload_file_to_storage(response, file_path)
             if not self.is_success(upload_response):
                 raise RuntimeError(
                     "Failed to upload mod file: "
                     f"{upload_response.status_code} {upload_response.text}"
                 )
-        elif not self.is_success(response):
+        else:
             raise RuntimeError(
                 f"Failed to add mod: {response.status_code} {response.text}"
             )
@@ -742,14 +757,14 @@ class OWClient:
                 data={},
                 allow_redirects=False,
             )
-            if file_response.status_code == 307:
+            if file_response.status_code == 307 or self.is_success(file_response):
                 upload_response = self._upload_file_to_storage(file_response, file_path)
                 if not self.is_success(upload_response):
                     raise RuntimeError(
                         f"Failed to update mod file {mod_id}: "
                         f"{upload_response.status_code} {upload_response.text}"
                     )
-            elif not self.is_success(file_response):
+            else:
                 raise RuntimeError(
                     f"Failed to start mod file update {mod_id}: "
                     f"{file_response.status_code} {file_response.text}"
@@ -931,8 +946,18 @@ class OWClient:
             },
             allow_redirects=False,
         )
-        if init_response.status_code == 307:
-            upload_response = self._upload_file_to_storage(init_response, file_path)
+        if init_response.status_code == 307 or self.is_success(init_response):
+            try:
+                upload_response = self._upload_file_to_storage(init_response, file_path)
+            except Exception as exc:
+                logging.warning(
+                    "Failed to start resource file upload %s to %s %s: %s",
+                    file_path,
+                    owner_type,
+                    owner_id,
+                    exc,
+                )
+                return False
             if self.is_success(upload_response):
                 return True
             logging.warning(
