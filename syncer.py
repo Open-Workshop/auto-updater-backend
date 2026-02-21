@@ -466,22 +466,19 @@ class ResourceSyncer:
                 "images.upload_files": self.upload_files,
             },
         ):
+            if not self.upload_files:
+                logging.warning(
+                    "Resource URL sync mode is deprecated; forcing file upload mode for mod %s",
+                    ow_mod_id,
+                )
             current_resources = self.api.get_mod_resources(ow_mod_id)
-            if self.upload_files:
-                self._sync_resource_files(
-                    ow_mod_id,
-                    mod,
-                    images,
-                    images_incomplete,
-                    current_resources,
-                )
-            else:
-                self._sync_resource_urls(
-                    ow_mod_id,
-                    images,
-                    images_incomplete,
-                    current_resources,
-                )
+            self._sync_resource_files(
+                ow_mod_id,
+                mod,
+                images,
+                images_incomplete,
+                current_resources,
+            )
 
     def _sync_resource_urls(
         self,

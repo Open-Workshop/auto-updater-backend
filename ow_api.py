@@ -897,14 +897,24 @@ class OWClient:
         return False
 
     def get_mod_resources(self, mod_id: int) -> List[Dict[str, Any]]:
-        response = self.request("get", f"/mods/{mod_id}/resources")
-        if response.status_code == 404:
-            return []
-        response.raise_for_status()
-        payload = response.json()
-        if isinstance(payload, dict):
-            return payload.get("results", [])
-        return []
+        def fetch(page: int) -> Dict[str, Any]:
+            response = self.request(
+                "get",
+                f"/mods/{mod_id}/resources",
+                params={"page_size": 50, "page": page},
+            )
+            if response.status_code == 404:
+                return {"database_size": 0, "results": []}
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, dict):
+                return payload
+            if isinstance(payload, list):
+                return {"database_size": len(payload), "results": payload}
+            return {"database_size": 0, "results": []}
+
+        results = list_all_pages(fetch)
+        return [item for item in results if isinstance(item, dict)]
 
     def add_resource(
         self, owner_type: str, owner_id: int, res_type: str, url: str
