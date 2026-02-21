@@ -5,7 +5,7 @@ import logging
 import random
 import time
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 
@@ -323,10 +323,10 @@ class OWClient:
                 "game": game_id,
                 "primary_sources": json.dumps(["steam"]),
             }
-            response = self.request("get", "/list/mods/", params=params)
+            response = self.request("get", "/mods", params=params)
             if response.status_code >= 500:
                 params.pop("primary_sources", None)
-                response = self.request("get", "/list/mods/", params=params)
+                response = self.request("get", "/mods", params=params)
             response.raise_for_status()
             return response.json()
 
@@ -341,7 +341,7 @@ class OWClient:
             "primary_sources": json.dumps([source]),
             "allowed_sources_ids": json.dumps([source_id]),
         }
-        response = self.request("get", "/list/mods/", params=params)
+        response = self.request("get", "/mods", params=params)
         if not self.is_success(response):
             return None
         payload = response.json()
@@ -367,10 +367,10 @@ class OWClient:
             "primary_sources": json.dumps([source]),
             "allowed_sources_ids": json.dumps(source_ids),
         }
-        response = self.request("get", "/list/mods/", params=params)
+        response = self.request("get", "/mods", params=params)
         if response.status_code >= 500:
             params.pop("primary_sources", None)
-            response = self.request("get", "/list/mods/", params=params)
+            response = self.request("get", "/mods", params=params)
         if not self.is_success(response):
             return []
         payload = response.json()
@@ -386,7 +386,7 @@ class OWClient:
             "primary_sources": json.dumps([source]),
             "allowed_sources_ids": json.dumps([source_id]),
         }
-        response = self.request("get", "/list/mods/", params=params)
+        response = self.request("get", "/mods", params=params)
         if not self.is_success(response):
             return None
         payload = response.json()
@@ -499,6 +499,11 @@ class OWClient:
             file_size = int(file_path.stat().st_size)
         except (AttributeError, OSError, TypeError, ValueError):
             pass
+        if file_size is not None and file_size >= 0:
+            query = dict(parse_qsl(parsed_upload.query, keep_blank_values=True))
+            query.setdefault("size", str(file_size))
+            upload_url = urlunparse(parsed_upload._replace(query=urlencode(query)))
+            parsed_upload = urlparse(upload_url)
 
         with start_span(
             "ow.upload_file_to_storage",
@@ -513,14 +518,17 @@ class OWClient:
         ) as span:
             try:
                 with file_path.open("rb") as handle:
+                    headers = {
+                        "Content-Type": "application/octet-stream",
+                        "X-File-Name": file_path.name,
+                    }
+                    if file_size is not None and file_size >= 0:
+                        headers["X-File-Size"] = str(file_size)
                     response = self.session.request(
                         "post",
                         upload_url,
                         data=handle,
-                        headers={
-                            "Content-Type": "application/octet-stream",
-                            "X-File-Name": file_path.name,
-                        },
+                        headers=headers,
                         timeout=self.timeout,
                         allow_redirects=False,
                     )
@@ -710,7 +718,6 @@ class OWClient:
 
         def send(mod_name: str) -> requests.Response:
             data = {
-                "mod_id": mod_id,
                 "mod_name": mod_name,
                 "mod_short_description": short_desc,
                 "mod_description": desc,
@@ -720,7 +727,7 @@ class OWClient:
             if set_source:
                 data["mod_source"] = source
                 data["mod_source_id"] = source_id
-            return self.request("post", "/edit/mod", data=data)
+            return self.request("patch", f"/mods/{mod_id}", data=data)
 
         response = send(name)
         response = self._retry_mod_name(send, name, response)
@@ -889,8 +896,9 @@ class OWClient:
     ) -> None:
         response = self.request(
             "post",
-            f"/add/resource/{owner_type}",
+            "/resources",
             data={
+                "owner_type": owner_type,
                 "resource_type": res_type,
                 "resource_url": url,
                 "resource_owner_id": owner_id,
@@ -913,29 +921,50 @@ class OWClient:
         res_type: str,
         file_path,
     ) -> bool:
-        with file_path.open("rb") as handle:
-            files = {"resource_file": (file_path.name, handle)}
-            data = {
+        init_response = self.request(
+            "post",
+            "/resources/upload-init",
+            data={
+                "owner_type": owner_type,
                 "resource_type": res_type,
                 "resource_owner_id": owner_id,
-            }
-            response = self.request(
-                "post",
-                f"/add/resource/{owner_type}",
-                data=data,
-                files=files,
+            },
+            allow_redirects=False,
+        )
+        if init_response.status_code == 307:
+            upload_response = self._upload_file_to_storage(init_response, file_path)
+            if self.is_success(upload_response):
+                return True
+            logging.warning(
+                "Failed to upload resource file %s to %s %s: %s %s",
+                file_path,
+                owner_type,
+                owner_id,
+                upload_response.status_code,
+                (upload_response.text or "")[:200],
             )
-        if not self.is_success(response) and response.status_code != 409:
+            return False
+        if init_response.status_code == 409:
+            return True
+        if not self.is_success(init_response):
             logging.warning(
                 "Failed to add resource file %s to %s %s: %s %s",
                 file_path,
                 owner_type,
                 owner_id,
-                response.status_code,
-                (response.text or "")[:200],
+                init_response.status_code,
+                (init_response.text or "")[:200],
             )
             return False
-        return True
+        logging.warning(
+            "Unexpected resource upload init response for %s to %s %s: %s %s",
+            file_path,
+            owner_type,
+            owner_id,
+            init_response.status_code,
+            (init_response.text or "")[:200],
+        )
+        return False
 
     def delete_resource(self, resource_id: int) -> None:
         response = self.request("delete", f"/resources/{resource_id}")
