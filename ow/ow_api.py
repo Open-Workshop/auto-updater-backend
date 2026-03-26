@@ -9,8 +9,8 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 
-from telemetry import start_span
-from utils import truncate
+from core.telemetry import start_span
+from core.utils import truncate
 
 _DEFAULT_LIMITS: Dict[str, int] = {
     "game_name": 127,

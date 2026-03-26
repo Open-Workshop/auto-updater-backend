@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from steamcmd import download_mod_archive
+from steam.steamcmd import download_mod_archive
 
 
 class _SuccessHandler(BaseHTTPRequestHandler):

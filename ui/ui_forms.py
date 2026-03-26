@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from http_utils import parse_proxy_url, validate_proxy_url
-from kube_client import read_secret_value
-from mirror_instance import DEFAULT_SPEC, deep_merge, instance_name, normalize_instance
-from ui_assets import render_template
-from ui_common import UISettings, _bool_from_form, _escape, _float_from_form, _int_from_form, _url
+from core.http_utils import parse_proxy_url, validate_proxy_url
+from kube.kube_client import read_secret_value
+from kube.mirror_instance import DEFAULT_SPEC, deep_merge, instance_name, normalize_instance
+from ui.ui_assets import render_template
+from ui.ui_common import UISettings, _bool_from_form, _escape, _float_from_form, _int_from_form, _url
 
 
 def _parse_sync_json(raw: str) -> dict[str, Any]:

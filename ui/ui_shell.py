@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from ui_assets import render_template
-from ui_common import UISettings, _escape, _json_script, _toast_kind_from_message, _url
+from ui.ui_assets import render_template
+from ui.ui_common import UISettings, _escape, _json_script, _toast_kind_from_message, _url
 
 
 def _layout(settings: UISettings, body: str, *, flash: str = "", flash_kind: str = "info", page_title: str = "") -> str:

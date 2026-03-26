@@ -1,13 +1,13 @@
 import json
 import unittest
 
-from kube_resources import (
+from kube.kube_resources import (
     build_parser_statefulset,
     build_runner_config_secret,
     build_runner_statefulset,
     render_singbox_config,
 )
-from mirror_instance import runner_service_url
+from kube.mirror_instance import runner_service_url
 
 
 INSTANCE = {

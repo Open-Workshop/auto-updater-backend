@@ -140,7 +140,15 @@ fi
 [[ -d "$CHART_PATH" ]] || fail "chart path not found: $CHART_PATH"
 
 echo "==> Syntax check"
-python3 -m py_compile "$ROOT_DIR"/*.py
+python3 -m compileall \
+  "$ROOT_DIR/main.py" \
+  "$ROOT_DIR/core" \
+  "$ROOT_DIR/kube" \
+  "$ROOT_DIR/ow" \
+  "$ROOT_DIR/services" \
+  "$ROOT_DIR/steam" \
+  "$ROOT_DIR/sync" \
+  "$ROOT_DIR/ui"
 
 echo "==> Building image ${LOCAL_IMAGE_REF}"
 BUILD_CMD=(buildah bud)

@@ -7,8 +7,8 @@ from typing import Any
 
 import requests
 
-from utils import ensure_dir
-from utils import has_files, zip_directory
+from core.utils import ensure_dir
+from core.utils import has_files, zip_directory
 
 
 @dataclass(frozen=True)

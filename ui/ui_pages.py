@@ -4,10 +4,10 @@ import json
 from typing import Any
 from urllib.parse import quote
 
-from ui_assets import render_template
-from ui_common import UISettings, _escape, _json_dump_default, _json_script, _url
-from ui_forms import _settings_form
-from ui_shell import _layout
+from ui.ui_assets import render_template
+from ui.ui_common import UISettings, _escape, _json_dump_default, _json_script, _url
+from ui.ui_forms import _settings_form
+from ui.ui_shell import _layout
 
 
 def _component_label(target: str) -> str:

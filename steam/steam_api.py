@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from http_utils import ProxyPool, RetryPolicy, mask_proxy, is_dns_error
+from core.http_utils import ProxyPool, RetryPolicy, mask_proxy, is_dns_error
 
 
 @dataclass

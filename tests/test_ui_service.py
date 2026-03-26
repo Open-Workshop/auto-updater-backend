@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from ui_service import _create_app, _derive_health, load_ui_settings
+from ui.ui_service import _create_app, _derive_health, load_ui_settings
 
 
 def _auth_headers() -> dict[str, str]:
@@ -150,7 +150,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
         self.env.stop()
 
     async def test_dashboard_accepts_trailing_slash_under_base_path(self) -> None:
-        with patch("ui_service._load_instance_summaries", return_value=[]):
+        with patch("ui.ui_service._load_instance_summaries", return_value=[]):
             app = _create_app(load_ui_settings())
             client = TestClient(TestServer(app))
             await client.start_server()
@@ -178,7 +178,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
             await client.close()
 
     async def test_instances_api_returns_json_under_base_path(self) -> None:
-        with patch("ui_service._load_instance_summaries", return_value=[_sample_summary()]):
+        with patch("ui.ui_service._load_instance_summaries", return_value=[_sample_summary()]):
             app = _create_app(load_ui_settings())
             client = TestClient(TestServer(app))
             await client.start_server()
@@ -193,7 +193,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 await client.close()
 
     async def test_detail_page_logs_tab_contains_live_console(self) -> None:
-        with patch("ui_service._load_instance_summary", return_value=_sample_summary()):
+        with patch("ui.ui_service._load_instance_summary", return_value=_sample_summary()):
             app = _create_app(load_ui_settings())
             client = TestClient(TestServer(app))
             await client.start_server()
@@ -228,9 +228,9 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
             await client.close()
 
     async def test_settings_tab_renders_expert_mode_collapsed(self) -> None:
-        with patch("ui_service._load_instance_summary", return_value=_sample_summary()):
-            with patch("ui_service.get_instance", return_value=_sample_instance()):
-                with patch("ui_forms.read_secret_value", side_effect=_secret_value):
+        with patch("ui.ui_service._load_instance_summary", return_value=_sample_summary()):
+            with patch("ui.ui_service.get_instance", return_value=_sample_instance()):
+                with patch("ui.ui_forms.read_secret_value", side_effect=_secret_value):
                     app = _create_app(load_ui_settings())
                     client = TestClient(TestServer(app))
                     await client.start_server()
@@ -260,8 +260,8 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 "error": "",
             }
         ]
-        with patch("ui_service._load_instance_summary", return_value=_sample_summary()):
-            with patch("ui_service._load_resource_entries", return_value=resources):
+        with patch("ui.ui_service._load_instance_summary", return_value=_sample_summary()):
+            with patch("ui.ui_service._load_resource_entries", return_value=resources):
                 app = _create_app(load_ui_settings())
                 client = TestClient(TestServer(app))
                 await client.start_server()
@@ -284,11 +284,11 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
             captured["body"] = body
             return body
 
-        with patch("ui_service.get_instance", return_value=_sample_instance()):
-            with patch("ui_service.read_secret_value", side_effect=_secret_value):
-                with patch("ui_service.upsert_secret"):
-                    with patch("ui_service.delete_secret"):
-                        with patch("ui_service.replace_or_create_instance", side_effect=remember_replace):
+        with patch("ui.ui_service.get_instance", return_value=_sample_instance()):
+            with patch("ui.ui_service.read_secret_value", side_effect=_secret_value):
+                with patch("ui.ui_service.upsert_secret"):
+                    with patch("ui.ui_service.delete_secret"):
+                        with patch("ui.ui_service.replace_or_create_instance", side_effect=remember_replace):
                             app = _create_app(load_ui_settings())
                             client = TestClient(TestServer(app))
                             await client.start_server()

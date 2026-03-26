@@ -7,22 +7,22 @@ from typing import Any
 
 from aiohttp import web
 
-from config import Config, load_config
-from kube_client import merge_instance_status
-from ow_api import ApiClient, load_api_limits, ow_get_game
-from steam_api import (
+from core.config import Config, load_config
+from kube.kube_client import merge_instance_status
+from ow.ow_api import ApiClient, load_api_limits, ow_get_game
+from steam.steam_api import (
     set_steam_proxy_pool,
     set_steam_request_logging,
     set_steam_request_policy,
 )
-from steam_mod import (
+from steam.steam_mod import (
     set_steam_mod_proxy_images,
     set_steam_mod_proxy_pool,
     set_steam_mod_request_policy,
 )
-from syncer import ensure_game, sync_mods
-from telemetry import init_telemetry, shutdown_telemetry, start_span
-from utils import ensure_dir, set_download_request_policy
+from sync.syncer import ensure_game, sync_mods
+from core.telemetry import init_telemetry, shutdown_telemetry, start_span
+from core.utils import ensure_dir, set_download_request_policy
 
 
 class ParserRuntime:

@@ -6,7 +6,7 @@ from typing import Any
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
-from mirror_instance import GROUP, PLURAL, VERSION
+from kube.mirror_instance import GROUP, PLURAL, VERSION
 
 
 @dataclass

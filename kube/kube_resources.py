@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from http_utils import ParsedProxy, parse_proxy_url
-from mirror_instance import (
+from core.http_utils import ParsedProxy, parse_proxy_url
+from kube.mirror_instance import (
     common_labels,
     instance_name,
     instance_namespace,

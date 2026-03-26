@@ -8,7 +8,7 @@ from typing import Any
 
 from kubernetes.client.rest import ApiException
 
-from kube_client import (
+from kube.kube_client import (
     get_kube_clients,
     list_instances,
     merge_instance_status,
@@ -17,14 +17,14 @@ from kube_client import (
     upsert_service,
     upsert_statefulset,
 )
-from kube_resources import (
+from kube.kube_resources import (
     build_parser_service,
     build_parser_statefulset,
     build_runner_config_secret,
     build_runner_service,
     build_runner_statefulset,
 )
-from mirror_instance import common_labels, instance_name, normalize_instance, set_condition
+from kube.mirror_instance import common_labels, instance_name, normalize_instance, set_condition
 
 
 @dataclass

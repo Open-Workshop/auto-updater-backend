@@ -6,8 +6,8 @@ from string import Template
 
 
 MODULE_DIR = Path(__file__).resolve().parent
-TEMPLATE_DIR = MODULE_DIR / "ui_templates"
-STATIC_DIR = MODULE_DIR / "ui_static"
+TEMPLATE_DIR = MODULE_DIR / "templates"
+STATIC_DIR = MODULE_DIR / "static"
 
 
 @lru_cache(maxsize=None)

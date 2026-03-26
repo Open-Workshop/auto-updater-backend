@@ -6,7 +6,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from steamcmd import download_mod_archive
+from steam.steamcmd import download_mod_archive
 
 
 def _runner_host() -> str:

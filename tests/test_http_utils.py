@@ -1,6 +1,6 @@
 import unittest
 
-from http_utils import parse_proxy_url
+from core.http_utils import parse_proxy_url
 
 
 class ProxyParsingTests(unittest.TestCase):

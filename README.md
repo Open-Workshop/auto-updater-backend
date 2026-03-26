@@ -17,6 +17,20 @@
 - `steamcmd-runner` использует один активный upstream proxy через TUN внутри pod;
 - UI работает через Kubernetes API: создаёт и редактирует `MirrorInstance` и связанные `Secret`, показывает статусы, ресурсы и pod logs.
 
+## Code Layout
+
+Основные Python-модули больше не лежат плоско в корне. Код разложен по пакетам:
+
+- `core/` — общие утилиты, конфиг, telemetry и HTTP helpers;
+- `kube/` — `MirrorInstance`, Kubernetes client/resources и оператор;
+- `ow/` — Open Workshop API и BBCode helpers;
+- `services/` — runtime entrypoints для `parser` и `runner`;
+- `steam/` — Steam API, Steam mod scraping и `steamcmd`;
+- `sync/` — основной sync engine;
+- `ui/` — web UI, шаблоны и статические ассеты.
+
+В корне оставлены только entrypoints и инфраструктурные файлы: `main.py`, `Dockerfile`, `requirements.txt`, `start.sh`, chart/docs и release scripts.
+
 ## Режимы запуска
 
 Образ поддерживает четыре режима:

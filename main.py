@@ -1,9 +1,9 @@
 import os
 import sys
-from operator_service import run_operator
-from parser_service import run_parser
-from runner_service import run_runner
-from ui_service import run_ui
+from kube.operator_service import run_operator
+from services.parser_service import run_parser
+from services.runner_service import run_runner
+from ui.ui_service import run_ui
 
 
 def detect_mode(argv: list[str]) -> str:

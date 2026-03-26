@@ -9,7 +9,7 @@ from urllib.parse import quote, urlencode
 import requests
 from aiohttp import web
 
-from kube_client import (
+from kube.kube_client import (
     delete_instance,
     delete_secret,
     get_instance,
@@ -21,7 +21,7 @@ from kube_client import (
     replace_or_create_instance,
     upsert_secret,
 )
-from mirror_instance import (
+from kube.mirror_instance import (
     API_VERSION,
     DEFAULT_SPEC,
     KIND,
@@ -38,9 +38,9 @@ from mirror_instance import (
     runner_name,
     runner_service_name,
 )
-from ui_assets import STATIC_DIR
-from ui_common import UISettings, _bool_from_form, _format_time, _int_from_form, _truncate, _url, load_ui_settings
-from ui_forms import (
+from ui.ui_assets import STATIC_DIR
+from ui.ui_common import UISettings, _bool_from_form, _format_time, _int_from_form, _truncate, _url, load_ui_settings
+from ui.ui_forms import (
     _build_sync_spec,
     _editor_context,
     _settings_form,
@@ -48,7 +48,7 @@ from ui_forms import (
     _validate_proxy_pool,
     _validate_runner_proxy,
 )
-from ui_pages import _dashboard, _dashboard_counts, _detail_page, _new_instance_page
+from ui.ui_pages import _dashboard, _dashboard_counts, _detail_page, _new_instance_page
 
 
 def _flash_redirect(settings: UISettings, path: str, message: str, kind: str = "info") -> web.HTTPFound:

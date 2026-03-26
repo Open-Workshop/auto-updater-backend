@@ -3,7 +3,7 @@ from unittest.mock import Mock, patch
 
 from aiohttp_socks._errors import ProxyError
 
-from steam_mod import SteamWorkshopClient
+from steam.steam_mod import SteamWorkshopClient
 
 
 class _FakeSession:
@@ -23,8 +23,8 @@ class SteamModProxyTests(unittest.IsolatedAsyncioTestCase):
         client = SteamWorkshopClient()
         session_factory = Mock(side_effect=_FakeSession)
         connector_factory = Mock(return_value="connector")
-        with patch("steam_mod.aiohttp.ClientSession", session_factory):
-            with patch("steam_mod.ProxyConnector.from_url", connector_factory):
+        with patch("steam.steam_mod.aiohttp.ClientSession", session_factory):
+            with patch("steam.steam_mod.ProxyConnector.from_url", connector_factory):
                 async with client._session_for_request(
                     15,
                     "socks5://user:pass@46.8.223.44:3001",

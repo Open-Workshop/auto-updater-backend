@@ -17,9 +17,9 @@ from aiohttp_socks import ProxyConnector
 from aiohttp_socks._errors import ProxyError
 from selectolax.parser import HTMLParser
 
-from bbcode import html_to_bbcode
-from http_utils import ProxyPool, RetryPolicy, is_dns_error, mask_proxy, parse_proxy_url
-from utils import dedupe_images, ensure_dir, normalize_image_url, extension_from_headers
+from ow.bbcode import html_to_bbcode
+from core.http_utils import ProxyPool, RetryPolicy, is_dns_error, mask_proxy, parse_proxy_url
+from core.utils import dedupe_images, ensure_dir, normalize_image_url, extension_from_headers
 
 DEFAULT_TIMEOUT = 20
 DEFAULT_IMAGE_CONCURRENCY = 6

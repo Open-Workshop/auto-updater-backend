@@ -27,8 +27,7 @@ WORKDIR /app
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY *.py /app/
-COPY start.sh /app/
+COPY . /app/
 RUN chmod +x /app/start.sh \
     && mkdir -p /data/mirror /data/mirror/steam /data/mirror/local \
     && chown -R steam:steam /data

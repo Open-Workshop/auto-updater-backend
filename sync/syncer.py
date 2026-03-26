@@ -20,17 +20,17 @@ import imagehash
 
 _PHASH_AVAILABLE = True
 
-from ow_api import ApiClient
-from steam_api import (
+from ow.ow_api import ApiClient
+from steam.steam_api import (
     steam_fetch_workshop_page_ids_html,
     steam_get_app_details,
     steam_stats_reset,
     steam_stats_snapshot,
 )
-from steam_mod import SteamMod
-from telemetry import start_span
-from steamcmd import download_mod_archive
-from utils import (
+from steam.steam_mod import SteamMod
+from core.telemetry import start_span
+from steam.steamcmd import download_mod_archive
+from core.utils import (
     dedupe_images,
     ensure_dir,
     has_files,
