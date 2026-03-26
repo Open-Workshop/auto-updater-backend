@@ -35,4 +35,6 @@ RUN chmod +x /app/start.sh \
 
 USER steam
 
+EXPOSE 8080
+
 ENTRYPOINT ["/app/start.sh"]

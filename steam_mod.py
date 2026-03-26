@@ -5,6 +5,7 @@ import hashlib
 import logging
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,10 +13,12 @@ from typing import List, Tuple
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
+from aiohttp_socks import ProxyConnector
+from aiohttp_socks._errors import ProxyError
 from selectolax.parser import HTMLParser
 
 from bbcode import html_to_bbcode
-from http_utils import ProxyPool, RetryPolicy, mask_proxy, is_dns_error
+from http_utils import ProxyPool, RetryPolicy, is_dns_error, mask_proxy, parse_proxy_url
 from utils import dedupe_images, ensure_dir, normalize_image_url, extension_from_headers
 
 DEFAULT_TIMEOUT = 20
@@ -251,6 +254,31 @@ class SteamWorkshopClient:
     def set_proxy_images(self, enabled: bool) -> None:
         self.proxy_images = bool(enabled)
 
+    @asynccontextmanager
+    async def _session_for_request(
+        self,
+        timeout_value: int,
+        chosen_proxy: str | None,
+        session: aiohttp.ClientSession | None,
+    ):
+        if chosen_proxy:
+            parsed_proxy = parse_proxy_url(chosen_proxy)
+            if parsed_proxy.is_socks:
+                timeout_cfg = aiohttp.ClientTimeout(total=timeout_value)
+                connector = ProxyConnector.from_url(chosen_proxy)
+                async with aiohttp.ClientSession(
+                    timeout=timeout_cfg,
+                    connector=connector,
+                ) as proxied_session:
+                    yield proxied_session, None
+                return
+        if session is not None:
+            yield session, chosen_proxy
+            return
+        timeout_cfg = aiohttp.ClientTimeout(total=timeout_value)
+        async with aiohttp.ClientSession(timeout=timeout_cfg) as direct_session:
+            yield direct_session, chosen_proxy
+
     async def fetch_mod(
         self,
         item_id: str,
@@ -264,26 +292,25 @@ class SteamWorkshopClient:
         if language:
             url = f"{url}&l={language}"
         timeout_value = self._coerce_timeout(timeout)
-        close_session = False
-        if session is None:
-            timeout_cfg = aiohttp.ClientTimeout(total=timeout_value)
-            session = aiohttp.ClientSession(timeout=timeout_cfg)
-            close_session = True
 
         html_text: str | None = None
         attempts = self.policy.retries + 1
         last_exc: Exception | None = None
         last_proxy: str | None = None
-        try:
-            for attempt in range(1, attempts + 1):
-                chosen_proxy = proxy if proxy is not None else self.proxy_pool.next()
-                last_proxy = chosen_proxy
-                await self._throttle.wait()
-                try:
-                    async with session.get(
+        for attempt in range(1, attempts + 1):
+            chosen_proxy = proxy if proxy is not None else self.proxy_pool.next()
+            last_proxy = chosen_proxy
+            await self._throttle.wait()
+            try:
+                async with self._session_for_request(
+                    timeout_value,
+                    chosen_proxy,
+                    session,
+                ) as (active_session, request_proxy):
+                    async with active_session.get(
                         url,
                         headers={"User-Agent": "Mozilla/5.0"},
-                        proxy=chosen_proxy,
+                        proxy=request_proxy,
                         timeout=timeout_value,
                     ) as response:
                         if response.status in self.policy.retry_statuses and attempt < attempts:
@@ -309,39 +336,36 @@ class SteamWorkshopClient:
                             return None
                         html_text = await response.text()
                         break
-                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                    last_exc = exc
-                    if chosen_proxy and is_dns_error(exc) and attempt < attempts:
+            except (aiohttp.ClientError, asyncio.TimeoutError, ProxyError) as exc:
+                last_exc = exc
+                if chosen_proxy and is_dns_error(exc) and attempt < attempts:
+                    logging.warning(
+                        "Steam proxy DNS error for url=%s via %s: %s",
+                        url,
+                        mask_proxy(chosen_proxy),
+                        exc,
+                    )
+                if attempt >= attempts:
+                    if chosen_proxy and is_dns_error(exc):
                         logging.warning(
-                            "Steam proxy DNS error for url=%s via %s: %s",
+                            "Steam page fetch failed for %s url=%s via %s: %s",
+                            item_id,
                             url,
                             mask_proxy(chosen_proxy),
                             exc,
                         )
-                    if attempt >= attempts:
-                        if chosen_proxy and is_dns_error(exc):
-                            logging.warning(
-                                "Steam page fetch failed for %s url=%s via %s: %s",
-                                item_id,
-                                url,
-                                mask_proxy(chosen_proxy),
-                                exc,
-                            )
-                        else:
-                            logging.warning(
-                                "Steam page fetch failed for %s: %s", item_id, exc
-                            )
-                        return None
-                    await self._sleep_backoff(
-                        attempt,
-                        exc,
-                        url=url,
-                        proxy=chosen_proxy,
-                    )
-                    continue
-        finally:
-            if close_session and session is not None:
-                await session.close()
+                    else:
+                        logging.warning(
+                            "Steam page fetch failed for %s: %s", item_id, exc
+                        )
+                    return None
+                await self._sleep_backoff(
+                    attempt,
+                    exc,
+                    url=url,
+                    proxy=chosen_proxy,
+                )
+                continue
         if html_text is None:
             if last_exc:
                 if last_proxy and is_dns_error(last_exc):
@@ -404,12 +428,6 @@ class SteamWorkshopClient:
         )
         concurrency = max(1, concurrency)
 
-        close_session = False
-        if session is None:
-            timeout_cfg = aiohttp.ClientTimeout(total=timeout_value)
-            session = aiohttp.ClientSession(timeout=timeout_cfg)
-            close_session = True
-
         semaphore = asyncio.Semaphore(concurrency)
 
         async def fetch_one(target: ImageTarget) -> ImageDownload | None:
@@ -434,52 +452,57 @@ class SteamWorkshopClient:
                         last_proxy = chosen_proxy
                         await self._throttle.wait()
                         try:
-                            async with session.get(
-                                url,
-                                headers={"User-Agent": "Mozilla/5.0"},
-                                proxy=chosen_proxy,
-                                timeout=timeout_value,
-                            ) as response:
-                                if (
-                                    response.status in self.policy.retry_statuses
-                                    and attempt < attempts
-                                ):
-                                    retry_after = response.headers.get("retry-after")
-                                    if retry_after:
-                                        try:
-                                            await asyncio.sleep(float(retry_after))
-                                        except ValueError:
-                                            pass
-                                    await self._sleep_backoff(
-                                        attempt,
-                                        RuntimeError(f"HTTP {response.status}"),
-                                        url=url,
-                                        proxy=chosen_proxy,
-                                    )
-                                    continue
-                                if response.status != 200:
-                                    logging.warning(
-                                        "Steam image fetch failed for %s: HTTP %s",
-                                        url,
-                                        response.status,
-                                    )
-                                    return None
-                                ext = extension_from_headers(response.headers) or ".bin"
-                                path = dest_dir / f"{basename}{ext}"
-                                temp_path = path.with_suffix(f"{path.suffix}.part")
-                                digest = hashlib.sha256()
-                                with temp_path.open("wb") as handle:
-                                    async for chunk in response.content.iter_chunked(
-                                        1024 * 1024
+                            async with self._session_for_request(
+                                timeout_value,
+                                chosen_proxy,
+                                session,
+                            ) as (active_session, request_proxy):
+                                async with active_session.get(
+                                    url,
+                                    headers={"User-Agent": "Mozilla/5.0"},
+                                    proxy=request_proxy,
+                                    timeout=timeout_value,
+                                ) as response:
+                                    if (
+                                        response.status in self.policy.retry_statuses
+                                        and attempt < attempts
                                     ):
-                                        if not chunk:
-                                            continue
-                                        handle.write(chunk)
-                                        digest.update(chunk)
-                                temp_path.replace(path)
-                                temp_path = None
-                                return (res_type, url, path, digest.hexdigest())
-                        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                                        retry_after = response.headers.get("retry-after")
+                                        if retry_after:
+                                            try:
+                                                await asyncio.sleep(float(retry_after))
+                                            except ValueError:
+                                                pass
+                                        await self._sleep_backoff(
+                                            attempt,
+                                            RuntimeError(f"HTTP {response.status}"),
+                                            url=url,
+                                            proxy=chosen_proxy,
+                                        )
+                                        continue
+                                    if response.status != 200:
+                                        logging.warning(
+                                            "Steam image fetch failed for %s: HTTP %s",
+                                            url,
+                                            response.status,
+                                        )
+                                        return None
+                                    ext = extension_from_headers(response.headers) or ".bin"
+                                    path = dest_dir / f"{basename}{ext}"
+                                    temp_path = path.with_suffix(f"{path.suffix}.part")
+                                    digest = hashlib.sha256()
+                                    with temp_path.open("wb") as handle:
+                                        async for chunk in response.content.iter_chunked(
+                                            1024 * 1024
+                                        ):
+                                            if not chunk:
+                                                continue
+                                            handle.write(chunk)
+                                            digest.update(chunk)
+                                    temp_path.replace(path)
+                                    temp_path = None
+                                    return (res_type, url, path, digest.hexdigest())
+                        except (aiohttp.ClientError, asyncio.TimeoutError, ProxyError) as exc:
                             last_exc = exc
                             if chosen_proxy and is_dns_error(exc) and attempt < attempts:
                                 logging.warning(
@@ -528,17 +551,13 @@ class SteamWorkshopClient:
                         except FileNotFoundError:
                             pass
 
-        try:
-            tasks = [asyncio.create_task(fetch_one(target)) for target in targets]
-            raw_results = await asyncio.gather(*tasks)
-            results: List[ImageDownload] = []
-            for entry in raw_results:
-                if entry is not None:
-                    results.append(entry)
-            return results
-        finally:
-            if close_session and session is not None:
-                await session.close()
+        tasks = [asyncio.create_task(fetch_one(target)) for target in targets]
+        raw_results = await asyncio.gather(*tasks)
+        results: List[ImageDownload] = []
+        for entry in raw_results:
+            if entry is not None:
+                results.append(entry)
+        return results
 
     def _coerce_timeout(self, timeout: int | None) -> int:
         if timeout is None:

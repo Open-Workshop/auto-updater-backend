@@ -1,5 +1,6 @@
-requests
+requests[socks]
 aiohttp
+aiohttp-socks
 selectolax
 Pillow
 ImageHash
@@ -7,3 +8,4 @@ olefile
 uptrace
 opentelemetry-instrumentation-requests
 opentelemetry-instrumentation-aiohttp-client
+kubernetes

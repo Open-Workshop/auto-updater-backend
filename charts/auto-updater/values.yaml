@@ -1,0 +1,30 @@
+image:
+  repository: auto-updater-backend
+  tag: latest
+  pullPolicy: IfNotPresent
+
+singboxImage:
+  repository: ghcr.io/sagernet/sing-box
+  tag: latest
+  pullPolicy: IfNotPresent
+
+operator:
+  reconcileInterval: 15
+
+ui:
+  replicas: 1
+  basePath: ""
+  auth:
+    enabled: true
+    username: admin
+    password: ""
+    existingSecret: ""
+  service:
+    type: ClusterIP
+    port: 8080
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts: []
+    tls: []

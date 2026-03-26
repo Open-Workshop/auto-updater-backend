@@ -1,0 +1,56 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: auto-updater-operator
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["auto-updater.miskler.ru"]
+    resources: ["mirrorinstances"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["auto-updater.miskler.ru"]
+    resources: ["mirrorinstances/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: auto-updater-ui
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["auto-updater.miskler.ru"]
+    resources: ["mirrorinstances"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["auto-updater.miskler.ru"]
+    resources: ["mirrorinstances/status"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: auto-updater-parser
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["auto-updater.miskler.ru"]
+    resources: ["mirrorinstances"]
+    verbs: ["get", "list"]
+  - apiGroups: ["auto-updater.miskler.ru"]
+    resources: ["mirrorinstances/status"]
+    verbs: ["get", "patch", "update"]

@@ -29,7 +29,7 @@ from steam_api import (
 )
 from steam_mod import SteamMod
 from telemetry import start_span
-from steamcmd import download_steam_mod
+from steamcmd import download_mod_archive
 from utils import (
     dedupe_images,
     ensure_dir,
@@ -978,6 +978,7 @@ class ModSyncer:
         mirror_root: Path,
         steam_root: Path,
         steamcmd_path: Path,
+        steamcmd_runner_url: str | None,
         options: SyncOptions,
     ) -> None:
         self.api = api
@@ -986,6 +987,7 @@ class ModSyncer:
         self.mirror_root = mirror_root
         self.steam_root = steam_root
         self.steamcmd_path = steamcmd_path
+        self.steamcmd_runner_url = steamcmd_runner_url
         self.options = options
 
         self.queue = WorkQueue()
@@ -1480,14 +1482,16 @@ class ModSyncer:
             },
         ):
             for attempt in range(1, STEAMCMD_MAX_DOWNLOAD_ATTEMPTS + 1):
-                download_result = download_steam_mod(
+                download_result = download_mod_archive(
                     self.steamcmd_path,
                     self.steam_root,
                     self.steam_app_id,
                     int(item_id),
+                    self.mirror_root / "steam_archives" / f"{item_id}.zip",
+                    self.steamcmd_runner_url,
                 )
                 if download_result.ok:
-                    break
+                    return download_result.archive_path
                 reason = download_result.reason or "unknown reason"
                 logging.error(
                     "SteamCMD download attempt %s/%s failed for %s: %s",
@@ -1505,29 +1509,7 @@ class ModSyncer:
                     delay,
                 )
                 time.sleep(delay)
-        workshop_path = (
-            self.steam_root
-            / "steamapps"
-            / "workshop"
-            / "content"
-            / str(self.steam_app_id)
-            / str(item_id)
-        )
-        if not has_files(workshop_path):
-            logging.error(
-                "SteamCMD finished but no files found for %s at %s",
-                item_id,
-                workshop_path,
-            )
-            return None
-        with start_span(
-            "mod.zip_archive",
-            {"steam.item_id": str(item_id)},
-        ):
-            return zip_directory(
-                workshop_path,
-                self.mirror_root / "steam_archives" / f"{item_id}.zip",
-            )
+        return None
 
 
 def ensure_game(
@@ -1641,6 +1623,7 @@ def sync_mods(
     force_required_item_id: Optional[str],
     language: str,
     steamcmd_path: Path,
+    steamcmd_runner_url: Optional[str] = None,
 ) -> None:
     options = SyncOptions(
         page_size=page_size,
@@ -1671,5 +1654,6 @@ def sync_mods(
         mirror_root,
         steam_root,
         steamcmd_path,
+        steamcmd_runner_url,
         options,
     ).run()

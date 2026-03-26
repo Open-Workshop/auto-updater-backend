@@ -3,8 +3,12 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+import requests
 
 from utils import ensure_dir
+from utils import has_files, zip_directory
 
 
 @dataclass(frozen=True)
@@ -12,6 +16,8 @@ class SteamDownloadResult:
     ok: bool
     reason: str | None = None
     retryable: bool = False
+    archive_path: Path | None = None
+    diagnostics: str | None = None
 
 
 _ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
@@ -188,6 +194,7 @@ def download_steam_mod(
             False,
             reason,
             retryable=_is_retryable_reason(reason, result.returncode),
+            diagnostics=diagnostics,
         )
     if parsed_error:
         diagnostics = _collect_steam_diagnostics(workshop_id)
@@ -197,5 +204,88 @@ def download_steam_mod(
             False,
             parsed_error,
             retryable=_is_retryable_reason(parsed_error, result.returncode),
+            diagnostics=diagnostics,
         )
     return SteamDownloadResult(True)
+
+
+def _workshop_path(steam_root: Path, app_id: int, workshop_id: int) -> Path:
+    return (
+        steam_root
+        / "steamapps"
+        / "workshop"
+        / "content"
+        / str(app_id)
+        / str(workshop_id)
+    )
+
+
+def _download_remote_archive(
+    runner_url: str,
+    app_id: int,
+    workshop_id: int,
+    dest_zip: Path,
+) -> SteamDownloadResult:
+    ensure_dir(dest_zip.parent)
+    temp_path = dest_zip.with_suffix(f"{dest_zip.suffix}.part")
+    endpoint = runner_url.rstrip("/") + "/api/v1/archive"
+    response: requests.Response | None = None
+    try:
+        response = requests.post(
+            endpoint,
+            json={"appId": app_id, "workshopId": workshop_id},
+            timeout=(15, 1800),
+            stream=True,
+        )
+        if response.status_code != 200:
+            try:
+                payload: dict[str, Any] = response.json()
+            except ValueError:
+                payload = {}
+            reason = str(payload.get("reason") or f"runner returned HTTP {response.status_code}")
+            diagnostics = payload.get("diagnostics")
+            return SteamDownloadResult(
+                False,
+                reason=reason,
+                retryable=bool(payload.get("retryable", False)),
+                diagnostics=str(diagnostics) if diagnostics else None,
+            )
+        with temp_path.open("wb") as handle:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                handle.write(chunk)
+        temp_path.replace(dest_zip)
+        return SteamDownloadResult(True, archive_path=dest_zip)
+    except requests.RequestException as exc:
+        return SteamDownloadResult(False, reason=str(exc), retryable=True)
+    finally:
+        if response is not None:
+            response.close()
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def download_mod_archive(
+    steamcmd_path: Path,
+    steam_root: Path,
+    app_id: int,
+    workshop_id: int,
+    dest_zip: Path,
+    runner_url: str | None = None,
+) -> SteamDownloadResult:
+    if runner_url:
+        return _download_remote_archive(runner_url, app_id, workshop_id, dest_zip)
+    result = download_steam_mod(steamcmd_path, steam_root, app_id, workshop_id)
+    if not result.ok:
+        return result
+    workshop_path = _workshop_path(steam_root, app_id, workshop_id)
+    if not has_files(workshop_path):
+        reason = f"steamcmd finished but no files found at {workshop_path}"
+        logging.error(reason)
+        return SteamDownloadResult(False, reason=reason, retryable=False)
+    archive_path = zip_directory(workshop_path, dest_zip)
+    return SteamDownloadResult(True, archive_path=archive_path)

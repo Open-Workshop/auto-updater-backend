@@ -1,0 +1,6 @@
+apiVersion: v2
+name: auto-updater
+description: Kubernetes-native control plane for auto-updater instances
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

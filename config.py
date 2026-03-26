@@ -98,6 +98,11 @@ class Config:
     sync_resources: bool
     prune_resources: bool
     language: str
+    steamcmd_runner_url: str
+    admin_host: str
+    admin_port: int
+    instance_name: str
+    instance_namespace: str
 
 
 def load_config() -> Config:
@@ -161,6 +166,11 @@ def load_config() -> Config:
     sync_resources = parse_bool(os.environ.get("OW_SYNC_RESOURCES"), True)
     prune_resources = parse_bool(os.environ.get("OW_PRUNE_RESOURCES"), True)
     language = os.environ.get("STEAM_LANGUAGE", "english")
+    steamcmd_runner_url = os.environ.get("OW_STEAMCMD_RUNNER_URL", "").strip()
+    admin_host = os.environ.get("OW_ADMIN_HOST", "0.0.0.0").strip() or "0.0.0.0"
+    admin_port = parse_int(os.environ.get("OW_ADMIN_PORT"), 8080)
+    instance_name = os.environ.get("OW_INSTANCE_NAME", "").strip()
+    instance_namespace = os.environ.get("OW_INSTANCE_NAMESPACE", "").strip()
 
     return Config(
         api_base=api_base,
@@ -202,4 +212,9 @@ def load_config() -> Config:
         sync_resources=sync_resources,
         prune_resources=prune_resources,
         language=language,
+        steamcmd_runner_url=steamcmd_runner_url,
+        admin_host=admin_host,
+        admin_port=admin_port,
+        instance_name=instance_name,
+        instance_namespace=instance_namespace,
     )

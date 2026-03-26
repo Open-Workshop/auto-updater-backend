@@ -71,6 +71,48 @@ class RetryPolicy:
         return delay
 
 
+@dataclass(frozen=True)
+class ParsedProxy:
+    scheme: str
+    host: str
+    port: int
+    username: str | None = None
+    password: str | None = None
+
+    @property
+    def is_socks(self) -> bool:
+        return self.scheme in {"socks5", "socks5h"}
+
+    @property
+    def is_http(self) -> bool:
+        return self.scheme in {"http", "https"}
+
+
+def parse_proxy_url(value: str) -> ParsedProxy:
+    raw = (value or "").strip()
+    if not raw:
+        raise ValueError("proxy URL is empty")
+    parsed = urlparse(raw)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in {"http", "https", "socks5", "socks5h"}:
+        raise ValueError(f"unsupported proxy scheme: {parsed.scheme or '-'}")
+    if not parsed.hostname:
+        raise ValueError("proxy host is required")
+    if parsed.port is None:
+        raise ValueError("proxy port is required")
+    return ParsedProxy(
+        scheme=scheme,
+        host=parsed.hostname,
+        port=int(parsed.port),
+        username=parsed.username,
+        password=parsed.password,
+    )
+
+
+def validate_proxy_url(value: str) -> None:
+    parse_proxy_url(value)
+
+
 def mask_proxy(proxy: str | None) -> str:
     if not proxy:
         return "-"

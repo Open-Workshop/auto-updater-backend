@@ -1,119 +1,294 @@
-# Auto Updater - backend
+# Auto Updater Backend
 
-Бот зеркалирует каталог модов из Steam Workshop в Open Workshop и поддерживает их в актуальном состоянии.
+Сервис зеркалирует моды из Steam Workshop в Open Workshop. Репозиторий теперь поддерживает не только одиночный запуск parser, но и kubernetes-native control plane: `MirrorInstance` CRD, оператор, web UI и раздельные workload'ы для parser и `steamcmd-runner`.
 
-Что делает:
-- авторизуется по паролю и использует сессионные cookies
-- находит игру по Steam App ID (или создаёт в OW, если отсутствует)
-- обходит каталог Workshop и создаёт/обновляет моды в OW
-- синхронизирует описание, теги, зависимости, скриншоты
-- скачивает моды через `steamcmd` (анонимный режим) и публикует актуальный архив
+## Архитектура
 
-## Переменные окружения
-Обязательные:
-- `OW_LOGIN` — логин пользователя
-- `OW_PASSWORD` — пароль пользователя
-- `OW_STEAM_APP_ID` — Steam App ID игры (или `STEAM_APP_ID`)
+На каждый экземпляр создаются два отдельных `StatefulSet`:
 
-Опционально:
-- `OW_GAME_ID` — ID игры в Open Workshop (если не задан, будет найден/создан по Steam App ID)
-- `OW_API_BASE` — базовый URL API, по умолчанию `https://api.openworkshop.miskler.ru`
-- `OW_MIRROR_DIR` — корень зеркала, по умолчанию `/data/mirror`
-- `STEAM_ROOT` — корень данных steamcmd, по умолчанию `${OW_MIRROR_DIR}/steam`
-- `OW_PAGE_SIZE` — размер страницы API, по умолчанию `50`
-- `OW_POLL_INTERVAL` — интервал синхронизации в секундах, по умолчанию `600`
-- `OW_HTTP_TIMEOUT` — таймаут запросов, по умолчанию `60`
-- `OW_HTTP_RETRIES` — количество ретраев HTTP запросов, по умолчанию `3`
-- `OW_HTTP_RETRY_BACKOFF` — базовая задержка для экспоненциального backoff, по умолчанию `1.0`
-- `OW_RUN_ONCE` — выполнить одну синхронизацию и завершить (`true/false`)
-- `OW_LOG_LEVEL` — уровень логирования (`INFO`, `DEBUG`), по умолчанию `INFO`
-- `OW_LOG_STEAM_REQUESTS` — логировать каждый запрос к Steam (`true/false`)
-- `OW_STEAM_HTTP_RETRIES` — ретраи для запросов к Steam и загрузки изображений, по умолчанию `2`
-- `OW_STEAM_HTTP_BACKOFF` — базовая задержка backoff для Steam и загрузки изображений, по умолчанию `1.0`
-- `OW_STEAM_REQUEST_DELAY` — минимальная задержка между запросами к Steam (сек), по умолчанию `0.0`
-- `OW_STEAM_PROXY_POOL` — список прокси для Steam (через запятую или пробел), например `http://user:pass@host:port,socks5://host:1080`
-- `OW_STEAM_PROXY_SCOPE` — область применения прокси: `all` (все запросы к Steam), `mod_pages` (только страницы модов), `none` (выключить прокси), по умолчанию `all`
+- `parser` — синхронизация каталога, работа с Open Workshop, HTML/API обход Steam и публикация ресурсов.
+- `steamcmd-runner` — отдельный pod со своим локальным `steamcmd` и sidecar на `sing-box`, который уводит egress через TUN и upstream proxy.
 
-OpenTelemetry / Uptrace:
-- `UPTRACE_DSN` — DSN Uptrace. Если не задан, telemetry отключена.
-- `OTEL_SERVICE_NAME` — имя сервиса в трассировке, по умолчанию `auto-updater-backend`
-- `OTEL_SERVICE_VERSION` — версия сервиса (опционально)
-- `OTEL_DEPLOYMENT_ENVIRONMENT` — окружение (`prod`, `staging` и т.п., опционально)
-- `UPTRACE_DISABLED` — принудительно отключить экспорт (`True`)
+Ключевые свойства:
 
-Steam / Workshop:
-- `OW_STEAM_MAX_PAGES` — максимум страниц Workshop при HTML‑обходе, по умолчанию `50` (0 = без лимита)
-- `OW_STEAM_START_PAGE` — стартовая страница Workshop, по умолчанию `1`
-- `OW_STEAM_MAX_ITEMS` — максимум модов в одном проходе, по умолчанию `0` (без лимита)
-- `OW_STEAM_DELAY` — задержка между страницами Workshop, по умолчанию `1.0`
-- `OW_MAX_SCREENSHOTS` — максимум скриншотов, по умолчанию `8`
-- `STEAM_LANGUAGE` — язык Steam страниц и описаний, по умолчанию `english`
-- `STEAMCMD_PATH` — путь к `steamcmd.sh`, по умолчанию `/opt/steamcmd/steamcmd.sh`
+- управление идёт через `MirrorInstance`, а не через ручные Deployment'ы;
+- OW credentials, parser proxy pool и steamcmd upstream proxy хранятся в отдельных `Secret`;
+- parser использует свой proxy pool на application level;
+- `steamcmd-runner` использует один активный upstream proxy через TUN внутри pod;
+- UI работает через Kubernetes API: создаёт и редактирует `MirrorInstance` и связанные `Secret`, показывает статусы, ресурсы и pod logs.
 
-Поведение синхронизации:
-- `OW_MOD_PUBLIC` — публичность мода: `0` публичный, `1` по ссылке, `2` скрытый
-- `OW_WITHOUT_AUTHOR` — не указывать авторство (нужно админ‑право), по умолчанию `false`
-- `OW_SYNC_TAGS` / `OW_PRUNE_TAGS` — синхронизировать/удалять теги
-- `OW_SYNC_DEPENDENCIES` / `OW_PRUNE_DEPENDENCIES` — синхронизировать/удалять зависимости
-- `OW_SYNC_RESOURCES` / `OW_PRUNE_RESOURCES` — синхронизировать/удалять ресурсы (скриншоты)
-- `OW_RESOURCE_UPLOAD_FILES` — загружать скриншоты файлом вместо URL, по умолчанию `true`
-- `OW_SCRAPE_PREVIEW_IMAGES` — пытаться вытянуть дополнительные скриншоты со страницы Steam, по умолчанию `true`
-- `OW_SCRAPE_REQUIRED_ITEMS` — вытягивать зависимости из HTML, по умолчанию `true`
+## Режимы запуска
 
-Структура зеркала по умолчанию:
-- `OW_MIRROR_DIR/steam/steamapps/workshop/content/<app_id>/<workshop_id>/...` — Steam‑моды
-- `OW_MIRROR_DIR/steam_archives/<workshop_id>.zip` — архивы для публикации в OW
-- `OW_MIRROR_DIR/resources/<workshop_id>/...` — кеш загруженных изображений
+Образ поддерживает четыре режима:
 
-## Установка steamcmd (Ubuntu)
-Если запускаете бота не в Docker, `steamcmd` нужно установить отдельно и указать `STEAMCMD_PATH`.
+- `parser`
+- `runner`
+- `operator`
+- `ui`
 
-Установка в домашнюю директорию пользователя:
+Режим определяется аргументом контейнера или `OW_MODE`.
+
+Примеры:
+
 ```bash
-sudo dpkg --add-architecture i386
-sudo apt update
-sudo apt install -y curl ca-certificates lib32gcc-s1 lib32stdc++6 lib32z1
-
-mkdir -p ~/.local/steamcmd
-curl -sSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz \
-  | tar -xz -C ~/.local/steamcmd
-
-~/.local/steamcmd/steamcmd.sh +quit
+python3 main.py parser
+python3 main.py runner
+python3 main.py operator
+python3 main.py ui
 ```
 
-После установки выставьте путь:
+## Kubernetes Install
+
+Helm chart лежит в `charts/auto-updater`.
+
+Сборка образа:
+
 ```bash
-export STEAMCMD_PATH="$HOME/.local/steamcmd/steamcmd.sh"
+docker build -t ghcr.io/your-org/auto-updater-backend:latest .
 ```
 
-Для `systemd`/`.env`:
+Установка chart:
+
 ```bash
-STEAMCMD_PATH=/home/<user>/.local/steamcmd/steamcmd.sh
+helm upgrade --install auto-updater ./charts/auto-updater \
+  --namespace auto-updater \
+  --create-namespace \
+  --set image.repository=ghcr.io/your-org/auto-updater-backend \
+  --set image.tag=latest
 ```
 
-## Docker
-Сборка:
-```bash
-docker build -t ow-mirror .
+Chart ставит:
+
+- `MirrorInstance` CRD;
+- `Deployment` оператора;
+- `Deployment` web UI;
+- `ServiceAccount`, `Role`, `RoleBinding`;
+- опциональный ingress для UI.
+
+## MirrorInstance
+
+Базовый объект:
+
+```yaml
+apiVersion: auto-updater.miskler.ru/v1alpha1
+kind: MirrorInstance
+metadata:
+  name: rimworld-main
+  namespace: auto-updater
+spec:
+  enabled: true
+  source:
+    steamAppId: 294100
+    owGameId: 0
+    language: english
+  sync:
+    pollIntervalSeconds: 600
+    pageSize: 50
+    timeoutSeconds: 60
+    httpRetries: 3
+    httpRetryBackoff: 5.0
+    logLevel: INFO
+    steamHttpRetries: 2
+    steamHttpBackoff: 2.0
+    steamRequestDelay: 1.0
+    steamMaxPages: 1000
+    steamStartPage: 1
+    steamMaxItems: 0
+    steamDelay: 1.0
+    maxScreenshots: 20
+    uploadResourceFiles: true
+    scrapePreviewImages: true
+    scrapeRequiredItems: true
+    publicMode: 0
+    withoutAuthor: false
+    syncTags: true
+    pruneTags: true
+    syncDependencies: true
+    pruneDependencies: true
+    syncResources: true
+    pruneResources: true
+  credentials:
+    secretRef: rimworld-main-ow-credentials
+  parser:
+    proxyPoolSecretRef: rimworld-main-parser-proxies
+  steamcmd:
+    proxy:
+      type: socks5
+      secretRef: rimworld-main-steamcmd-proxy
+  storage:
+    parser:
+      size: 20Gi
+      storageClassName: local-path
+    runner:
+      size: 10Gi
+      storageClassName: local-path
 ```
 
-Запуск:
-```bash
-docker run --rm \
-  -e OW_LOGIN=your_login \
-  -e OW_PASSWORD=your_password \
-  -e OW_STEAM_APP_ID=294100 \
-  -v /path/to/mirror:/data/mirror \
-  ow-mirror
+Связанные секреты:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rimworld-main-ow-credentials
+  namespace: auto-updater
+type: Opaque
+stringData:
+  login: your-login
+  password: your-password
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rimworld-main-parser-proxies
+  namespace: auto-updater
+type: Opaque
+stringData:
+  proxyPool: |
+    socks5://user:pass@host-1:3001
+    http://user:pass@host-2:3000
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rimworld-main-steamcmd-proxy
+  namespace: auto-updater
+type: Opaque
+stringData:
+  proxyUrl: socks5://user:pass@host:3001
 ```
 
-Однократная синхронизация:
+## Web UI
+
+UI поднимается в режиме `ui` и работает прямо с Kubernetes API.
+
+Что умеет:
+
+- создавать и редактировать `MirrorInstance`;
+- управлять связанными `Secret`;
+- `pause` / `resume`;
+- `Sync now` через parser admin endpoint;
+- показывать `phase`, `conditions`, `lastSync*`, `lastError`;
+- открывать связанные ресурсы;
+- читать `parser`, `runner` и `tun-proxy` pod logs без отдельной БД.
+
+## Parser / Runner API
+
+Внутренние HTTP интерфейсы:
+
+- parser:
+  - `GET /healthz`
+  - `GET /api/v1/status`
+  - `POST /api/v1/sync`
+- runner:
+  - `GET /healthz`
+  - `POST /api/v1/archive`
+
+`POST /api/v1/archive` принимает JSON:
+
+```json
+{"appId": 294100, "workshopId": 1234567890}
+```
+
+Успешный ответ — ZIP stream. Ошибка — JSON:
+
+```json
+{
+  "reason": "steamcmd exit code 8",
+  "retryable": true,
+  "diagnostics": "..."
+}
+```
+
+## Локальный / Legacy запуск
+
+Старый single-process сценарий сохранён. Если вы запускаете только parser, используются те же env-переменные:
+
+- `OW_LOGIN`
+- `OW_PASSWORD`
+- `OW_STEAM_APP_ID` или `STEAM_APP_ID`
+
+Дополнительные env:
+
+- `OW_STEAMCMD_RUNNER_URL` — вынести `steamcmd` в отдельный runner service;
+- `OW_ADMIN_HOST`, `OW_ADMIN_PORT` — поднять parser admin HTTP endpoint;
+- `OW_INSTANCE_NAME`, `OW_INSTANCE_NAMESPACE` — писать runtime status обратно в `MirrorInstance`.
+
+Пример локального однократного запуска:
+
 ```bash
 docker run --rm \
   -e OW_LOGIN=your_login \
   -e OW_PASSWORD=your_password \
   -e OW_STEAM_APP_ID=294100 \
   -e OW_RUN_ONCE=true \
-  -v /path/to/mirror:/data/mirror \
-  ow-mirror
+  -v /path/to/runtime:/data \
+  ghcr.io/your-org/auto-updater-backend:latest parser
+```
+
+## Переменные окружения Parser
+
+Обязательные:
+
+- `OW_LOGIN`
+- `OW_PASSWORD`
+- `OW_STEAM_APP_ID` или `STEAM_APP_ID`
+
+Основные опциональные:
+
+- `OW_GAME_ID`
+- `OW_API_BASE`
+- `OW_MIRROR_DIR`
+- `STEAM_ROOT`
+- `OW_PAGE_SIZE`
+- `OW_POLL_INTERVAL`
+- `OW_HTTP_TIMEOUT`
+- `OW_HTTP_RETRIES`
+- `OW_HTTP_RETRY_BACKOFF`
+- `OW_RUN_ONCE`
+- `OW_LOG_LEVEL`
+- `OW_LOG_STEAM_REQUESTS`
+- `OW_STEAM_HTTP_RETRIES`
+- `OW_STEAM_HTTP_BACKOFF`
+- `OW_STEAM_REQUEST_DELAY`
+- `OW_STEAM_PROXY_POOL`
+- `OW_STEAM_PROXY_SCOPE`
+- `OW_STEAM_MAX_PAGES`
+- `OW_STEAM_START_PAGE`
+- `OW_STEAM_MAX_ITEMS`
+- `OW_STEAM_DELAY`
+- `OW_MAX_SCREENSHOTS`
+- `STEAM_LANGUAGE`
+- `STEAMCMD_PATH`
+- `OW_RESOURCE_UPLOAD_FILES`
+- `OW_SCRAPE_PREVIEW_IMAGES`
+- `OW_SCRAPE_REQUIRED_ITEMS`
+- `OW_FORCE_REQUIRED_ITEM_ID`
+- `OW_MOD_PUBLIC`
+- `OW_WITHOUT_AUTHOR`
+- `OW_SYNC_TAGS`
+- `OW_PRUNE_TAGS`
+- `OW_SYNC_DEPENDENCIES`
+- `OW_PRUNE_DEPENDENCIES`
+- `OW_SYNC_RESOURCES`
+- `OW_PRUNE_RESOURCES`
+
+## Прокси
+
+Parser proxy pool поддерживает:
+
+- `http://`
+- `https://`
+- `socks5://`
+- `socks5h://`
+
+`steamcmd-runner` принимает один upstream proxy URL и валидирует его тип относительно `spec.steamcmd.proxy.type`.
+
+## Проверка
+
+Быстрые проверки:
+
+```bash
+python3 -m compileall .
+python3 -m unittest discover -s tests -v
 ```
