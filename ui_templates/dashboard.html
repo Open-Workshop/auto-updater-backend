@@ -1,0 +1,58 @@
+<section class="page-top">
+  <div>
+    <div class="eyebrow">Operations Control Center</div>
+    <h1>$title</h1>
+    <div class="subtitle">$subtitle</div>
+  </div>
+  <div class="page-actions">
+    <a class="button" href="$new_instance_url">New instance</a>
+  </div>
+</section>
+
+<section class="metrics-grid" id="dashboard-metrics">
+  $metrics_html
+</section>
+
+<section class="panel-section">
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <input id="instance-search" class="input search-input" type="search" placeholder="Search instances">
+      <div class="filter-row" id="instance-filters">
+        <button type="button" class="filter-chip active" data-filter="All">All</button>
+        <button type="button" class="filter-chip" data-filter="Healthy">Healthy</button>
+        <button type="button" class="filter-chip" data-filter="Syncing">Syncing</button>
+        <button type="button" class="filter-chip" data-filter="Degraded">Degraded</button>
+        <button type="button" class="filter-chip" data-filter="Error">Error</button>
+        <button type="button" class="filter-chip" data-filter="Disabled">Paused</button>
+      </div>
+    </div>
+    <div class="toolbar-right">
+      <div class="toolbar-note" id="dashboard-sync-state">Auto-refresh every 10s</div>
+      <button type="button" class="button secondary" id="dashboard-refresh">Refresh now</button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table class="ops-table">
+      <thead>
+        <tr>
+          <th>Instance</th>
+          <th>Enabled</th>
+          <th>Health</th>
+          <th>Sync state</th>
+          <th>Last sync</th>
+          <th>Error summary</th>
+          <th>Parser</th>
+          <th>Runner</th>
+          <th>Quick actions</th>
+        </tr>
+      </thead>
+      <tbody id="instance-table-body">
+        $rows_html
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<script id="dashboard-payload" type="application/json">$dashboard_payload_json</script>
+<script id="dashboard-config" type="application/json">$dashboard_config_json</script>
+<script src="$dashboard_js_href"></script>

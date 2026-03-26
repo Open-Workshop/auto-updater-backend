@@ -1,19 +1,14 @@
 from __future__ import annotations
 
 import base64
-import html
 import hmac
-import json
 import logging
-import os
-from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlencode
 
 import requests
 from aiohttp import web
 
-from http_utils import parse_proxy_url, validate_proxy_url
 from kube_client import (
     delete_instance,
     delete_secret,
@@ -30,7 +25,6 @@ from mirror_instance import (
     API_VERSION,
     DEFAULT_SPEC,
     KIND,
-    PLURAL,
     common_labels,
     deep_merge,
     instance_name,
@@ -39,315 +33,62 @@ from mirror_instance import (
     managed_runner_proxy_secret_name,
     normalize_instance,
     parser_name,
-    parser_service_url,
     parser_service_name,
+    parser_service_url,
     runner_name,
     runner_service_name,
 )
+from ui_assets import STATIC_DIR
+from ui_common import UISettings, _bool_from_form, _format_time, _int_from_form, _truncate, _url, load_ui_settings
+from ui_forms import (
+    _build_sync_spec,
+    _editor_context,
+    _settings_form,
+    _validation_errors,
+    _validate_proxy_pool,
+    _validate_runner_proxy,
+)
+from ui_pages import _dashboard, _dashboard_counts, _detail_page, _new_instance_page
 
 
-@dataclass
-class UISettings:
-    namespace: str
-    host: str
-    port: int
-    title: str
-    base_path: str
-    username: str
-    password: str
-
-
-def _normalize_base_path(value: str) -> str:
-    raw = (value or "").strip()
-    if not raw or raw == "/":
-        return ""
-    if not raw.startswith("/"):
-        raw = "/" + raw
-    return raw.rstrip("/")
-
-
-def load_ui_settings() -> UISettings:
-    try:
-        port = int(os.environ.get("OW_UI_PORT", "8080"))
-    except ValueError:
-        port = 8080
-    return UISettings(
-        namespace=os.environ.get("AUTO_UPDATER_NAMESPACE", "auto-updater").strip() or "auto-updater",
-        host=os.environ.get("OW_UI_HOST", "0.0.0.0").strip() or "0.0.0.0",
-        port=port,
-        title=os.environ.get("OW_UI_TITLE", "Auto Updater Control Plane").strip()
-        or "Auto Updater Control Plane",
-        base_path=_normalize_base_path(os.environ.get("OW_UI_BASE_PATH", "")),
-        username=os.environ.get("OW_UI_USERNAME", "").strip(),
-        password=os.environ.get("OW_UI_PASSWORD", ""),
-    )
-
-
-def _escape(value: Any) -> str:
-    return html.escape(str(value or ""), quote=True)
-
-
-def _bool_from_form(value: Any) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "on", "yes"}
-
-
-def _int_from_form(value: Any, default: int = 0) -> int:
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return default
-
-
-def _sync_json(spec: dict[str, Any]) -> str:
-    return json.dumps(spec["sync"], ensure_ascii=False, indent=2, sort_keys=True)
-
-
-def _url(settings: UISettings, path: str) -> str:
-    normalized_path = path if path.startswith("/") else f"/{path}"
-    if not settings.base_path:
-        return normalized_path
-    if normalized_path == "/":
-        return settings.base_path + "/"
-    return settings.base_path + normalized_path
-
-
-def _layout(settings: UISettings, body: str, flash: str = "") -> str:
-    flash_html = (
-        f"<div class='flash'>{_escape(flash)}</div>"
-        if flash
-        else ""
-    )
-    return f"""<!doctype html>
-<html lang="ru">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{_escape(settings.title)}</title>
-    <style>
-      :root {{
-        --bg: #f6f1e8;
-        --panel: #fffaf2;
-        --ink: #16202a;
-        --muted: #5c6670;
-        --line: #ddcfbe;
-        --accent: #1d6a58;
-        --warn: #a33e2e;
-        --mono: "IBM Plex Mono", "Consolas", monospace;
-        --sans: "IBM Plex Sans", "Trebuchet MS", sans-serif;
-      }}
-      * {{ box-sizing: border-box; }}
-      body {{ margin: 0; font-family: var(--sans); background: linear-gradient(180deg, #faf5ec, var(--bg)); color: var(--ink); }}
-      main {{ max-width: 1220px; margin: 0 auto; padding: 24px 18px 42px; }}
-      h1, h2 {{ margin: 0; }}
-      .top {{ display: grid; gap: 8px; margin-bottom: 18px; }}
-      .eyebrow {{ color: var(--accent); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; font-weight: 700; }}
-      .subtitle {{ color: var(--muted); max-width: 860px; }}
-      .actions {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0 22px; }}
-      .button, button {{ appearance: none; border: 0; border-radius: 999px; padding: 10px 16px; text-decoration: none; cursor: pointer; font: inherit; background: var(--ink); color: white; }}
-      .button.secondary, button.secondary {{ background: #e7ddcf; color: var(--ink); }}
-      .button.warn, button.warn {{ background: var(--warn); }}
-      .flash {{ padding: 14px 16px; border: 1px solid #f0c98f; background: #fff0d8; border-radius: 14px; margin-bottom: 16px; }}
-      .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }}
-      .card, form.panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 22px; padding: 18px; box-shadow: 0 12px 28px rgba(22,32,42,.05); }}
-      .meta {{ display: grid; gap: 6px; font-size: 14px; color: var(--muted); margin: 12px 0; }}
-      .status {{ display: inline-block; padding: 7px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; text-transform: uppercase; background: rgba(29,106,88,.12); color: var(--accent); }}
-      .status.error {{ background: rgba(163,62,46,.12); color: var(--warn); }}
-      .inline-actions {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }}
-      .inline-actions form {{ margin: 0; }}
-      .fields {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }}
-      label {{ display: grid; gap: 7px; font-weight: 700; }}
-      input, textarea, select {{ width: 100%; border-radius: 15px; border: 1px solid var(--line); padding: 11px 13px; font: inherit; background: #fffefb; color: var(--ink); }}
-      textarea {{ min-height: 180px; font-family: var(--mono); font-size: 13px; resize: vertical; }}
-      .hint {{ color: var(--muted); font-size: 13px; font-weight: 400; }}
-      code, pre {{ font-family: var(--mono); }}
-      pre {{ background: #19222b; color: #eef5ff; border-radius: 16px; padding: 12px; overflow: auto; }}
-      .checkbox {{ display: flex; align-items: center; gap: 10px; }}
-      .checkbox input {{ width: 18px; height: 18px; }}
-    </style>
-  </head>
-  <body>
-    <main>
-      {flash_html}
-      {body}
-    </main>
-  </body>
-</html>"""
-
-
-def _dashboard(settings: UISettings, instances: list[dict[str, Any]], flash: str) -> str:
-    cards = []
-    for item in instances:
-        normalized = normalize_instance(item)
-        status = dict(item.get("status") or {})
-        name = instance_name(item)
-        phase = str(status.get("phase") or "Unknown")
-        status_class = "status error" if phase == "Error" else "status"
-        conditions = list(status.get("conditions") or [])
-        cards.append(
-            f"""
-            <section class="card">
-              <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
-                <div>
-                  <h2>{_escape(name)}</h2>
-                  <div class="hint">Steam App ID {_escape(normalized['spec']['source'].get('steamAppId', 0))}, OW Game ID {_escape(normalized['spec']['source'].get('owGameId', 0))}</div>
-                </div>
-                <span class="{status_class}">{_escape(phase)}</span>
-              </div>
-              <div class="meta">
-                <div>enabled: <strong>{_escape(normalized['spec'].get('enabled', True))}</strong></div>
-                <div>parser pod: <code>{_escape(status.get('parserPod') or 'n/a')}</code></div>
-                <div>runner pod: <code>{_escape(status.get('runnerPod') or 'n/a')}</code></div>
-                <div>last sync: <strong>{_escape(status.get('lastSyncResult') or 'n/a')}</strong></div>
-                <div>last error: {_escape(status.get('lastError') or 'n/a')}</div>
-              </div>
-              <details>
-                <summary>Sync spec</summary>
-                <pre>{_escape(_sync_json(normalized['spec']))}</pre>
-              </details>
-              <details>
-                <summary>Conditions</summary>
-                <pre>{_escape(json.dumps(conditions, ensure_ascii=False, indent=2, sort_keys=True))}</pre>
-              </details>
-              <div class="inline-actions">
-                <a class="button secondary" href="{_url(settings, f'/instances/{quote(name)}/edit')}">Изменить</a>
-                <a class="button secondary" href="{_url(settings, f'/instances/{quote(name)}/resources')}">Ресурсы</a>
-                <a class="button secondary" href="{_url(settings, f'/instances/{quote(name)}/logs/parser')}">Parser logs</a>
-                <a class="button secondary" href="{_url(settings, f'/instances/{quote(name)}/logs/runner')}">Runner logs</a>
-                <a class="button secondary" href="{_url(settings, f'/instances/{quote(name)}/logs/tun')}">TUN logs</a>
-                <form method="post" action="{_url(settings, f'/instances/{quote(name)}/sync')}"><button type="submit">Sync now</button></form>
-                <form method="post" action="{_url(settings, f'/instances/{quote(name)}/toggle')}"><button type="submit" class="secondary">{'Pause' if normalized['spec'].get('enabled', True) else 'Resume'}</button></form>
-                <form method="post" action="{_url(settings, f'/instances/{quote(name)}/delete')}" onsubmit="return confirm('Удалить {_escape(name)}?')"><button type="submit" class="warn">Удалить</button></form>
-              </div>
-            </section>
-            """
-        )
-    body = f"""
-    <section class="top">
-      <div class="eyebrow">MirrorInstance Control Plane</div>
-      <h1>{_escape(settings.title)}</h1>
-      <div class="subtitle">Kubernetes-native управление инстансами. UI редактирует CR и связанные Secret, оператор раскладывает parser/steamcmd-runner workload'ы.</div>
-    </section>
-    <div class="actions">
-      <a class="button" href="{_url(settings, '/instances/new')}">Новый экземпляр</a>
-    </div>
-    <div class="grid">
-      {''.join(cards) or "<section class='card'>Экземпляров пока нет.</section>"}
-    </div>
-    """
-    return _layout(settings, body, flash)
-
-
-def _form(settings: UISettings, instance: dict[str, Any] | None, flash: str) -> str:
-    if instance is None:
-        spec = deep_merge(DEFAULT_SPEC, {})
-        name = ""
-        login = ""
-        parser_proxy_pool = ""
-        runner_proxy_url = ""
-    else:
-        normalized = normalize_instance(instance)
-        spec = normalized["spec"]
-        name = instance_name(instance)
-        credentials_secret = spec["credentials"]["secretRef"]
-        parser_secret = spec["parser"].get("proxyPoolSecretRef", "")
-        runner_secret = spec["steamcmd"]["proxy"].get("secretRef", "")
-        login = read_secret_value(settings.namespace, credentials_secret, "login")
-        parser_proxy_pool = ""
-        runner_proxy_url = ""
-        if parser_secret:
-            try:
-                parser_proxy_pool = read_secret_value(settings.namespace, parser_secret, "proxyPool")
-            except Exception:
-                parser_proxy_pool = ""
-        if runner_secret:
-            try:
-                runner_proxy_url = read_secret_value(settings.namespace, runner_secret, "proxyUrl")
-            except Exception:
-                runner_proxy_url = ""
-    body = f"""
-    <section class="top">
-      <div class="eyebrow">MirrorInstance Editor</div>
-      <h1>{_escape(name or 'Новый экземпляр')}</h1>
-      <div class="subtitle">Основные поля вынесены отдельно, полный runtime можно править через JSON `spec.sync`.</div>
-    </section>
-    <div class="actions">
-      <a class="button secondary" href="{_url(settings, '/')}">Назад</a>
-    </div>
-    <form class="panel" method="post" action="{_url(settings, '/instances/save')}">
-      <input type="hidden" name="original_name" value="{_escape(name)}">
-      <div class="fields">
-        <label>
-          <span>Имя экземпляра</span>
-          <input type="text" name="name" value="{_escape(name)}" required>
-        </label>
-        <label class="checkbox">
-          <input type="checkbox" name="enabled" {'checked' if spec.get('enabled', True) else ''}>
-          <span>Enabled</span>
-        </label>
-        <label>
-          <span>Steam App ID</span>
-          <input type="number" name="steam_app_id" value="{_escape(spec['source'].get('steamAppId', 0))}">
-        </label>
-        <label>
-          <span>OW Game ID</span>
-          <input type="number" name="ow_game_id" value="{_escape(spec['source'].get('owGameId', 0))}">
-        </label>
-        <label>
-          <span>Language</span>
-          <input type="text" name="language" value="{_escape(spec['source'].get('language', 'english'))}">
-        </label>
-        <label>
-          <span>Parser PVC size</span>
-          <input type="text" name="parser_storage_size" value="{_escape(spec['storage']['parser'].get('size', '20Gi'))}">
-        </label>
-        <label>
-          <span>Runner PVC size</span>
-          <input type="text" name="runner_storage_size" value="{_escape(spec['storage']['runner'].get('size', '10Gi'))}">
-        </label>
-        <label>
-          <span>OW login</span>
-          <input type="text" name="ow_login" value="{_escape(login)}" required>
-        </label>
-        <label>
-          <span>OW password</span>
-          <input type="password" name="ow_password" value="">
-          <span class="hint">Оставьте пустым, чтобы сохранить текущий пароль.</span>
-        </label>
-        <label>
-          <span>Steamcmd proxy type</span>
-          <select name="runner_proxy_type">
-            <option value="socks5" {'selected' if spec['steamcmd']['proxy'].get('type') == 'socks5' else ''}>socks5</option>
-            <option value="http" {'selected' if spec['steamcmd']['proxy'].get('type') == 'http' else ''}>http</option>
-          </select>
-        </label>
-      </div>
-      <label style="margin-top:16px;">
-        <span>Steamcmd proxy URL</span>
-        <textarea name="runner_proxy_url" style="min-height:90px;">{_escape(runner_proxy_url)}</textarea>
-        <span class="hint">Один upstream proxy для TUN sidecar. Хранится в отдельном Secret как `proxyUrl`.</span>
-      </label>
-      <label style="margin-top:16px;">
-        <span>Parser proxy pool</span>
-        <textarea name="parser_proxy_pool">{_escape(parser_proxy_pool)}</textarea>
-        <span class="hint">Один URL на строку или через запятую. Это отдельный pool только для parser HTTP-запросов.</span>
-      </label>
-      <label style="margin-top:16px;">
-        <span>spec.sync JSON</span>
-        <textarea name="sync_json">{_escape(_sync_json(spec))}</textarea>
-      </label>
-      <div class="actions">
-        <button type="submit">Сохранить</button>
-        <a class="button secondary" href="{_url(settings, '/')}">Отмена</a>
-      </div>
-    </form>
-    """
-    return _layout(settings, body, flash)
-
-
-def _flash_redirect(settings: UISettings, path: str, message: str) -> web.HTTPFound:
+def _flash_redirect(settings: UISettings, path: str, message: str, kind: str = "info") -> web.HTTPFound:
     target = _url(settings, path)
     separator = "&" if "?" in path else "?"
-    return web.HTTPFound(f"{target}{separator}{urlencode({'flash': message})}")
+    query = urlencode({"flash": message, "flashKind": kind})
+    return web.HTTPFound(f"{target}{separator}{query}")
+
+
+def _flash_from_request(request: web.Request) -> tuple[str, str]:
+    message = str(request.query.get("flash", "")).strip()
+    kind = str(request.query.get("flashKind", "info")).strip().lower() or "info"
+    return message, kind
+
+
+def _wants_json(request: web.Request) -> bool:
+    accept = request.headers.get("Accept", "")
+    return "application/json" in accept or request.path.startswith("/api/") or "/api/" in request.path
+
+
+def _component_log_target(target: str) -> tuple[str, str]:
+    normalized = str(target or "").strip().lower()
+    if normalized == "parser":
+        return "parser", "parser"
+    if normalized == "runner":
+        return "runner", "runner"
+    if normalized == "tun":
+        return "runner", "tun-proxy"
+    raise web.HTTPNotFound(text="unknown log target")
+
+
+def _component_label(target: str) -> str:
+    normalized = str(target or "").strip().lower()
+    if normalized == "parser":
+        return "Parser"
+    if normalized == "runner":
+        return "Runner"
+    if normalized == "tun":
+        return "TUN"
+    return normalized.title()
 
 
 def _managed_secret_names(name: str) -> set[str]:
@@ -371,56 +112,277 @@ def _json_ready(value: Any) -> Any:
     return payload
 
 
-def _parse_sync_json(raw: str) -> dict[str, Any]:
-    payload = json.loads(raw or "{}")
-    if not isinstance(payload, dict):
-        raise ValueError("spec.sync JSON must be an object")
-    return payload
+def _labels_selector(name: str, component: str) -> str:
+    return ",".join(f"{key}={value}" for key, value in common_labels(name, component).items())
 
 
-def _validate_proxy_pool(raw: str) -> str:
-    values = []
-    for chunk in raw.replace(",", "\n").splitlines():
-        value = chunk.strip()
-        if not value:
+def _select_best_pod(pods: list[Any]) -> Any | None:
+    if not pods:
+        return None
+    ranked = sorted(
+        pods,
+        key=lambda item: (
+            item.metadata.deletion_timestamp is None,
+            item.metadata.creation_timestamp.isoformat() if item.metadata.creation_timestamp else "",
+        ),
+        reverse=True,
+    )
+    return ranked[0]
+
+
+def _pod_snapshot(pod: Any | None) -> dict[str, Any]:
+    if pod is None:
+        return {
+            "podName": "",
+            "phase": "Missing",
+            "ready": False,
+            "deleting": False,
+            "images": {},
+            "containerReady": {},
+        }
+    container_statuses = list(getattr(pod.status, "container_statuses", None) or [])
+    container_ready = {status.name: bool(status.ready) for status in container_statuses}
+    images = {container.name: container.image for container in list(getattr(pod.spec, "containers", None) or [])}
+    conditions = {condition.type: condition.status for condition in list(getattr(pod.status, "conditions", None) or [])}
+    return {
+        "podName": str(pod.metadata.name or ""),
+        "phase": str(getattr(pod.status, "phase", "") or "Unknown"),
+        "ready": conditions.get("Ready") == "True",
+        "deleting": getattr(pod.metadata, "deletion_timestamp", None) is not None,
+        "images": images,
+        "containerReady": container_ready,
+    }
+
+
+def _component_state(snapshot: dict[str, Any], fallback_pod_name: str = "") -> dict[str, str]:
+    pod_name = str(snapshot.get("podName") or fallback_pod_name or "")
+    if not pod_name:
+        return {"label": "Missing", "tone": "error"}
+    if snapshot.get("deleting"):
+        return {"label": "Updating", "tone": "warning"}
+    if snapshot.get("ready"):
+        return {"label": "Ready", "tone": "healthy"}
+    phase = str(snapshot.get("phase") or "Unknown")
+    if phase in {"Pending", "ContainerCreating"}:
+        return {"label": "Starting", "tone": "warning"}
+    return {"label": phase or "Not ready", "tone": "warning"}
+
+
+def _component_snapshots_for_names(namespace: str, names: set[str]) -> dict[str, dict[str, Any]]:
+    if not names:
+        return {}
+    try:
+        pods = get_kube_clients().core.list_namespaced_pod(
+            namespace,
+            label_selector="app.kubernetes.io/name=auto-updater",
+        ).items
+    except Exception:
+        return {}
+    grouped: dict[str, dict[str, list[Any]]] = {}
+    for pod in pods:
+        labels = dict(getattr(pod.metadata, "labels", None) or {})
+        instance = str(labels.get("auto-updater.miskler.ru/instance") or "")
+        component = str(labels.get("app.kubernetes.io/component") or "")
+        if instance not in names or component not in {"parser", "runner"}:
             continue
-        validate_proxy_url(value)
-        values.append(value)
-    return "\n".join(values)
+        grouped.setdefault(instance, {}).setdefault(component, []).append(pod)
+    snapshots: dict[str, dict[str, Any]] = {}
+    for name in names:
+        snapshots[name] = {}
+        for component in ("parser", "runner"):
+            best = _select_best_pod(grouped.get(name, {}).get(component, []))
+            snapshots[name][component] = _pod_snapshot(best)
+    return snapshots
 
 
-def _validate_runner_proxy(raw: str, proxy_type: str) -> str:
-    value = str(raw or "").strip()
-    parsed = parse_proxy_url(value)
-    normalized_type = str(proxy_type or "socks5").strip().lower() or "socks5"
-    if normalized_type == "socks5" and not parsed.is_socks:
-        raise ValueError("Steamcmd proxy type=socks5, но URL не socks5://")
-    if normalized_type == "http" and not parsed.is_http:
-        raise ValueError("Steamcmd proxy type=http, но URL не http:// или https://")
-    return value
+def _derive_health(
+    *,
+    enabled: bool,
+    phase: str,
+    last_sync_result: str,
+    last_error: str,
+    parser_ready: bool,
+    runner_ready: bool,
+) -> str:
+    if not enabled:
+        return "Disabled"
+    if phase == "Error" or last_error:
+        return "Error"
+    if last_sync_result == "running":
+        return "Syncing"
+    if phase == "Ready" and parser_ready and runner_ready:
+        return "Healthy"
+    return "Degraded"
 
 
-def _component_log_target(target: str) -> tuple[str, str]:
-    normalized = str(target or "").strip().lower()
-    if normalized == "parser":
-        return "parser", "parser"
-    if normalized == "runner":
-        return "runner", "runner"
-    if normalized == "tun":
-        return "runner", "tun-proxy"
-    raise web.HTTPNotFound(text="unknown log target")
+def _health_tone(health: str) -> str:
+    return {
+        "Healthy": "healthy",
+        "Syncing": "info",
+        "Degraded": "warning",
+        "Error": "error",
+        "Disabled": "muted",
+    }.get(health, "muted")
+
+
+def _sync_state_label(status: dict[str, Any]) -> str:
+    result = str(status.get("lastSyncResult") or "").strip().lower()
+    if result == "running":
+        return "Running"
+    if result == "success":
+        return "Succeeded"
+    if result == "failed":
+        return "Failed"
+    if result:
+        return result.title()
+    return "Idle"
+
+
+def _last_sync_label(status: dict[str, Any]) -> str:
+    result = str(status.get("lastSyncResult") or "").strip().lower()
+    started_at = _format_time(status.get("lastSyncStartedAt"))
+    finished_at = _format_time(status.get("lastSyncFinishedAt"))
+    if result == "running":
+        return f"Running since {started_at}"
+    if result == "success":
+        return f"Succeeded at {finished_at}"
+    if result == "failed":
+        return f"Failed at {finished_at}"
+    if finished_at != "n/a":
+        return finished_at
+    if started_at != "n/a":
+        return started_at
+    return "Never"
+
+
+def _error_summary(
+    health: str,
+    phase: str,
+    status: dict[str, Any],
+    parser_snapshot: dict[str, Any],
+    runner_snapshot: dict[str, Any],
+) -> str:
+    last_error = str(status.get("lastError") or "").strip()
+    if last_error:
+        return _truncate(last_error, 110)
+    if health == "Disabled":
+        return "Paused by operator"
+    if health == "Syncing":
+        return "Sync in progress"
+    if not parser_snapshot.get("ready"):
+        return "Parser pod is not ready"
+    if not runner_snapshot.get("ready"):
+        return "Runner pod is not ready"
+    if phase and phase != "Ready":
+        return phase
+    return "—"
+
+
+def _instance_urls(settings: UISettings, name: str) -> dict[str, str]:
+    return {
+        "detail": _url(settings, f"/instances/{quote(name)}"),
+        "overview": _url(settings, f"/instances/{quote(name)}?tab=overview"),
+        "logs": _url(settings, f"/instances/{quote(name)}?tab=logs"),
+        "resources": _url(settings, f"/instances/{quote(name)}?tab=resources"),
+        "settings": _url(settings, f"/instances/{quote(name)}?tab=settings"),
+        "edit": _url(settings, f"/instances/{quote(name)}/edit"),
+        "legacyLogs": _url(settings, f"/instances/{quote(name)}/logs/parser"),
+        "legacyResources": _url(settings, f"/instances/{quote(name)}/resources"),
+        "sync": _url(settings, f"/instances/{quote(name)}/sync"),
+        "toggle": _url(settings, f"/instances/{quote(name)}/toggle"),
+        "delete": _url(settings, f"/instances/{quote(name)}/delete"),
+        "logsApi": _url(settings, f"/api/instances/{quote(name)}/logs"),
+    }
+
+
+def _instance_summary(
+    settings: UISettings,
+    instance: dict[str, Any],
+    component_snapshots: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized = normalize_instance(instance)
+    status = dict(normalized.get("status") or {})
+    name = instance_name(normalized)
+    component_snapshots = component_snapshots or {}
+    parser_snapshot = dict(component_snapshots.get("parser") or {})
+    runner_snapshot = dict(component_snapshots.get("runner") or {})
+    parser_pod_name = str(status.get("parserPod") or "") or str(parser_snapshot.get("podName") or "")
+    runner_pod_name = str(status.get("runnerPod") or "") or str(runner_snapshot.get("podName") or "")
+    parser_state = _component_state(parser_snapshot, parser_pod_name)
+    runner_state = _component_state(runner_snapshot, runner_pod_name)
+    phase = str(status.get("phase") or "Unknown")
+    last_sync_result = str(status.get("lastSyncResult") or "").strip().lower()
+    enabled = bool(normalized["spec"].get("enabled", True))
+    health = _derive_health(
+        enabled=enabled,
+        phase=phase,
+        last_sync_result=last_sync_result,
+        last_error=str(status.get("lastError") or "").strip(),
+        parser_ready=bool(parser_snapshot.get("ready")),
+        runner_ready=bool(runner_snapshot.get("ready")),
+    )
+    return {
+        "name": name,
+        "enabled": enabled,
+        "health": health,
+        "healthTone": _health_tone(health),
+        "phase": phase,
+        "syncState": _sync_state_label(status),
+        "lastSyncResult": last_sync_result or "idle",
+        "lastSyncLabel": _last_sync_label(status),
+        "lastSyncStartedAt": str(status.get("lastSyncStartedAt") or ""),
+        "lastSyncFinishedAt": str(status.get("lastSyncFinishedAt") or ""),
+        "errorSummary": _error_summary(health, phase, status, parser_snapshot, runner_snapshot),
+        "lastError": str(status.get("lastError") or ""),
+        "source": {
+            "steamAppId": normalized["spec"]["source"].get("steamAppId", 0),
+            "owGameId": normalized["spec"]["source"].get("owGameId", 0),
+            "language": normalized["spec"]["source"].get("language", "english"),
+        },
+        "parser": {
+            "podName": parser_pod_name,
+            "state": parser_state["label"],
+            "tone": parser_state["tone"],
+            "ready": bool(parser_snapshot.get("ready")),
+            "image": str(parser_snapshot.get("images", {}).get("parser") or ""),
+        },
+        "runner": {
+            "podName": runner_pod_name,
+            "state": runner_state["label"],
+            "tone": runner_state["tone"],
+            "ready": bool(runner_snapshot.get("ready")),
+            "image": str(runner_snapshot.get("images", {}).get("runner") or ""),
+            "tunImage": str(runner_snapshot.get("images", {}).get("tun-proxy") or ""),
+            "tunReady": bool(runner_snapshot.get("containerReady", {}).get("tun-proxy", False)),
+        },
+        "conditions": list(status.get("conditions") or []),
+        "urls": _instance_urls(settings, name),
+    }
+
+
+def _load_instance_summaries(settings: UISettings) -> list[dict[str, Any]]:
+    instances = list_instances(settings.namespace)
+    names = {instance_name(item) for item in instances if instance_name(item)}
+    snapshots = _component_snapshots_for_names(settings.namespace, names)
+    summaries = [
+        _instance_summary(settings, item, snapshots.get(instance_name(item), {}))
+        for item in instances
+    ]
+    summaries.sort(key=lambda item: item["name"].lower())
+    return summaries
+
+
+def _load_instance_summary(settings: UISettings, name: str) -> dict[str, Any]:
+    instance = get_instance(settings.namespace, name)
+    snapshots = _component_snapshots_for_names(settings.namespace, {name})
+    return _instance_summary(settings, instance, snapshots.get(name, {}))
 
 
 def _latest_pod_name(namespace: str, name: str, component: str) -> str:
-    selector = ",".join(f"{key}={value}" for key, value in common_labels(name, component).items())
+    selector = _labels_selector(name, component)
     pods = get_kube_clients().core.list_namespaced_pod(namespace, label_selector=selector).items
-    if not pods:
-        return ""
-    pods.sort(
-        key=lambda item: (item.metadata.creation_timestamp.isoformat() if item.metadata.creation_timestamp else ""),
-        reverse=True,
-    )
-    return str(pods[0].metadata.name or "")
+    best = _select_best_pod(list(pods))
+    return str(best.metadata.name or "") if best is not None else ""
 
 
 def _tail_lines_from_request(request: web.Request, default: int = 400) -> int:
@@ -435,10 +397,11 @@ def _pod_log_snapshot(settings: UISettings, name: str, target: str, tail_lines: 
     component, container = _component_log_target(target)
     pod_name = _latest_pod_name(settings.namespace, name, component)
     if not pod_name:
-        raise web.HTTPNotFound(text=f"Pod для {name}/{target} пока не найден")
+        raise web.HTTPNotFound(text=f"Pod for {name}/{target} is not available yet")
     return {
         "instance": name,
         "target": target,
+        "targetLabel": _component_label(target),
         "component": component,
         "container": container,
         "podName": pod_name,
@@ -452,182 +415,14 @@ def _pod_log_snapshot(settings: UISettings, name: str, target: str, tail_lines: 
     }
 
 
-async def healthz(_: web.Request) -> web.Response:
-    return web.json_response({"status": "ok"})
-
-
-async def dashboard(request: web.Request) -> web.Response:
-    settings: UISettings = request.app["settings"]
-    instances = list_instances(settings.namespace)
-    flash = request.query.get("flash", "")
-    return web.Response(text=_dashboard(settings, instances, flash), content_type="text/html")
-
-
-async def new_instance_page(request: web.Request) -> web.Response:
-    settings: UISettings = request.app["settings"]
-    flash = request.query.get("flash", "")
-    return web.Response(text=_form(settings, None, flash), content_type="text/html")
-
-
-async def edit_instance_page(request: web.Request) -> web.Response:
-    settings: UISettings = request.app["settings"]
-    name = request.match_info["name"]
-    flash = request.query.get("flash", "")
-    instance = get_instance(settings.namespace, name)
-    return web.Response(text=_form(settings, instance, flash), content_type="text/html")
-
-
-async def save_instance(request: web.Request) -> web.StreamResponse:
-    settings: UISettings = request.app["settings"]
-    form = await request.post()
-    name = str(form.get("name", "")).strip()
-    if not name:
-        raise _flash_redirect(settings, "/instances/new", "Имя обязательно")
-    original_name = str(form.get("original_name", "")).strip() or name
-    instance = None
-    existing_password = ""
-    try:
-        instance = get_instance(settings.namespace, original_name)
-        credentials_ref = normalize_instance(instance)["spec"]["credentials"]["secretRef"]
-        existing_password = read_secret_value(settings.namespace, credentials_ref, "password")
-    except Exception:
-        instance = None
-    try:
-        sync_spec = deep_merge(DEFAULT_SPEC["sync"], _parse_sync_json(str(form.get("sync_json", "{}"))))
-        runner_proxy_type = str(form.get("runner_proxy_type", "socks5")).strip() or "socks5"
-        runner_proxy_url = _validate_runner_proxy(form.get("runner_proxy_url", ""), runner_proxy_type)
-        parser_proxy_pool = _validate_proxy_pool(str(form.get("parser_proxy_pool", "")))
-    except Exception as exc:
-        body = _form(settings, instance, str(exc))
-        return web.Response(text=body, content_type="text/html", status=400)
-
-    credentials_secret = managed_credentials_secret_name(name)
-    parser_proxy_secret = managed_parser_proxy_secret_name(name)
-    runner_proxy_secret = managed_runner_proxy_secret_name(name)
-    password = str(form.get("ow_password", "")).strip() or existing_password
-    upsert_secret(
-        settings.namespace,
-        {
-            "apiVersion": "v1",
-            "kind": "Secret",
-            "metadata": {
-                "name": credentials_secret,
-                "namespace": settings.namespace,
-                "labels": {**common_labels(name, "credentials"), "auto-updater.miskler.ru/managed-secret": "true"},
-            },
-            "type": "Opaque",
-            "stringData": {
-                "login": str(form.get("ow_login", "")).strip(),
-                "password": password,
-            },
-        },
-    )
-    if parser_proxy_pool:
-        upsert_secret(
-            settings.namespace,
-            {
-                "apiVersion": "v1",
-                "kind": "Secret",
-                "metadata": {
-                    "name": parser_proxy_secret,
-                    "namespace": settings.namespace,
-                    "labels": {**common_labels(name, "parser-proxies"), "auto-updater.miskler.ru/managed-secret": "true"},
-                },
-                "type": "Opaque",
-                "stringData": {
-                    "proxyPool": parser_proxy_pool,
-                },
-            },
-        )
-        parser_proxy_ref = parser_proxy_secret
-    else:
-        parser_proxy_ref = ""
-        delete_secret(settings.namespace, parser_proxy_secret)
-    upsert_secret(
-        settings.namespace,
-        {
-            "apiVersion": "v1",
-            "kind": "Secret",
-            "metadata": {
-                "name": runner_proxy_secret,
-                "namespace": settings.namespace,
-                "labels": {**common_labels(name, "runner-proxy"), "auto-updater.miskler.ru/managed-secret": "true"},
-            },
-            "type": "Opaque",
-            "stringData": {
-                "proxyUrl": runner_proxy_url,
-            },
-        },
-    )
-
-    body = {
-        "apiVersion": API_VERSION,
-        "kind": KIND,
-        "metadata": {
-            "name": name,
-            "namespace": settings.namespace,
-            "labels": common_labels(name, "instance"),
-        },
-        "spec": {
-            "enabled": _bool_from_form(form.get("enabled")),
-            "source": {
-                "steamAppId": _int_from_form(form.get("steam_app_id"), 0),
-                "owGameId": _int_from_form(form.get("ow_game_id"), 0),
-                "language": str(form.get("language", "")).strip() or "english",
-            },
-            "sync": sync_spec,
-            "credentials": {"secretRef": credentials_secret},
-            "parser": {"proxyPoolSecretRef": parser_proxy_ref},
-            "steamcmd": {
-                "proxy": {
-                    "type": runner_proxy_type,
-                    "secretRef": runner_proxy_secret,
-                }
-            },
-            "storage": {
-                "parser": {
-                    "size": str(form.get("parser_storage_size", "")).strip() or "20Gi",
-                    "storageClassName": "local-path",
-                },
-                "runner": {
-                    "size": str(form.get("runner_storage_size", "")).strip() or "10Gi",
-                    "storageClassName": "local-path",
-                },
-            },
-        },
-    }
-    replace_or_create_instance(settings.namespace, name, body)
-    if original_name != name:
-        delete_instance(settings.namespace, original_name)
-        for secret_name in _managed_secret_names(original_name):
-            delete_secret(settings.namespace, secret_name)
-    raise _flash_redirect(settings, "/", f"Инстанс {name} сохранён")
-
-
-async def sync_now(request: web.Request) -> web.StreamResponse:
-    settings: UISettings = request.app["settings"]
-    name = request.match_info["name"]
-    url = parser_service_url(name, settings.namespace) + "/api/v1/sync"
-    try:
-        response = requests.post(url, timeout=5)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise _flash_redirect(settings, "/", f"Sync now failed: {exc}")
-    raise _flash_redirect(settings, "/", f"Sync now отправлен для {name}")
-
-
-async def resource_page(request: web.Request) -> web.Response:
-    settings: UISettings = request.app["settings"]
-    name = request.match_info["name"]
+def _load_resource_entries(settings: UISettings, name: str) -> list[dict[str, Any]]:
     kube = get_kube_clients()
     instance = get_instance(settings.namespace, name)
     status = dict(instance.get("status") or {})
     parser_pod_name = str(status.get("parserPod") or "") or _latest_pod_name(settings.namespace, name, "parser")
     runner_pod_name = str(status.get("runnerPod") or "") or _latest_pod_name(settings.namespace, name, "runner")
-    entries: list[tuple[str, str, Any]] = [
-        ("MirrorInstance", name, _json_ready(instance)),
-    ]
-    readers = [
+    readers: list[tuple[str, str, Any]] = [
+        ("MirrorInstance", name, lambda: instance),
         ("StatefulSet", parser_name(name), lambda: kube.apps.read_namespaced_stateful_set(parser_name(name), settings.namespace)),
         ("StatefulSet", runner_name(name), lambda: kube.apps.read_namespaced_stateful_set(runner_name(name), settings.namespace)),
         ("Service", parser_service_name(name), lambda: kube.core.read_namespaced_service(parser_service_name(name), settings.namespace)),
@@ -637,39 +432,136 @@ async def resource_page(request: web.Request) -> web.Response:
         readers.append(("Pod", parser_pod_name, lambda: kube.core.read_namespaced_pod(parser_pod_name, settings.namespace)))
     if runner_pod_name:
         readers.append(("Pod", runner_pod_name, lambda: kube.core.read_namespaced_pod(runner_pod_name, settings.namespace)))
+    entries = []
     for kind, resource_name, reader in readers:
         try:
-            entries.append((kind, resource_name, _json_ready(reader())))
+            payload = _json_ready(reader())
+            error = ""
         except Exception as exc:
-            entries.append((kind, resource_name, {"error": str(exc)}))
-    sections = []
-    for kind, resource_name, payload in entries:
-        sections.append(
-            f"""
-            <section class="card">
-              <div class="eyebrow">{_escape(kind)}</div>
-              <h2>{_escape(resource_name)}</h2>
-              <pre>{_escape(json.dumps(_json_ready(payload), ensure_ascii=False, indent=2, sort_keys=True))}</pre>
-            </section>
-            """
+            payload = {"error": str(exc)}
+            error = str(exc)
+        entries.append(
+            {
+                "kind": kind,
+                "name": resource_name,
+                "payload": payload,
+                "error": error,
+            }
         )
-    body = f"""
-    <section class="top">
-      <div class="eyebrow">Related Resources</div>
-      <h1>{_escape(name)}</h1>
-      <div class="subtitle">Снимок связанных Kubernetes-ресурсов без показа Secret data.</div>
-    </section>
-    <div class="actions">
-      <a class="button secondary" href="{_url(settings, '/')}">Назад</a>
-      <a class="button secondary" href="{_url(settings, f'/instances/{quote(name)}/logs/parser')}">Parser logs</a>
-      <a class="button secondary" href="{_url(settings, f'/instances/{quote(name)}/logs/runner')}">Runner logs</a>
-      <a class="button secondary" href="{_url(settings, f'/instances/{quote(name)}/logs/tun')}">TUN logs</a>
-    </div>
-    <div class="grid">
-      {''.join(sections)}
-    </div>
-    """
-    return web.Response(text=_layout(settings, body), content_type="text/html")
+    return entries
+
+
+def _json_response(message: str, *, kind: str = "success", status: int = 200, **extra: Any) -> web.Response:
+    payload = {"message": message, "kind": kind}
+    payload.update(extra)
+    return web.json_response(payload, status=status)
+
+
+def _action_response(
+    request: web.Request,
+    settings: UISettings,
+    *,
+    message: str,
+    redirect_path: str,
+    kind: str = "success",
+    status: int = 200,
+    extra: dict[str, Any] | None = None,
+) -> web.StreamResponse:
+    extra = extra or {}
+    if _wants_json(request):
+        return _json_response(
+            message,
+            kind=kind,
+            status=status,
+            redirectUrl=_url(settings, redirect_path),
+            **extra,
+        )
+    raise _flash_redirect(settings, redirect_path, message, kind)
+
+
+async def healthz(_: web.Request) -> web.Response:
+    return web.json_response({"status": "ok"})
+
+
+async def dashboard(request: web.Request) -> web.Response:
+    settings: UISettings = request.app["settings"]
+    flash, flash_kind = _flash_from_request(request)
+    items = _load_instance_summaries(settings)
+    return web.Response(text=_dashboard(settings, items, flash, flash_kind), content_type="text/html")
+
+
+async def instances_api(request: web.Request) -> web.Response:
+    settings: UISettings = request.app["settings"]
+    items = _load_instance_summaries(settings)
+    return web.json_response({"items": items, "counts": _dashboard_counts(items)})
+
+
+async def instance_summary_api(request: web.Request) -> web.Response:
+    settings: UISettings = request.app["settings"]
+    name = request.match_info["name"]
+    try:
+        payload = _load_instance_summary(settings, name)
+    except web.HTTPException:
+        raise
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=502)
+    return web.json_response(payload)
+
+
+async def new_instance_page(request: web.Request) -> web.Response:
+    settings: UISettings = request.app["settings"]
+    flash, flash_kind = _flash_from_request(request)
+    context = _editor_context(settings, None)
+    return web.Response(text=_new_instance_page(settings, context, flash, flash_kind), content_type="text/html")
+
+
+async def edit_instance_page(request: web.Request) -> web.StreamResponse:
+    settings: UISettings = request.app["settings"]
+    name = request.match_info["name"]
+    raise web.HTTPFound(_url(settings, f"/instances/{quote(name)}?tab=settings"))
+
+
+async def instance_detail_page(request: web.Request) -> web.Response:
+    settings: UISettings = request.app["settings"]
+    name = request.match_info["name"]
+    tab = str(request.query.get("tab", "overview")).strip().lower() or "overview"
+    target = str(request.query.get("target", "parser")).strip().lower() or "parser"
+    tail_lines = _tail_lines_from_request(request)
+    flash, flash_kind = _flash_from_request(request)
+    summary = _load_instance_summary(settings, name)
+    resources = _load_resource_entries(settings, name) if tab == "resources" else []
+    instance = get_instance(settings.namespace, name) if tab == "settings" else None
+    settings_form = ""
+    if tab == "settings":
+        context = _editor_context(settings, instance)
+        settings_form = _settings_form(
+            settings,
+            context,
+            return_path=f"/instances/{quote(name)}?tab=overview",
+            embedded=True,
+        )
+    return web.Response(
+        text=_detail_page(
+            settings,
+            summary,
+            active_tab=tab,
+            resources=resources,
+            settings_form=settings_form,
+            flash=flash,
+            flash_kind=flash_kind,
+            target=target,
+            tail_lines=tail_lines,
+        ),
+        content_type="text/html",
+    )
+
+
+async def resource_page(request: web.Request) -> web.Response:
+    settings: UISettings = request.app["settings"]
+    name = request.match_info["name"]
+    query = dict(request.query)
+    query["tab"] = "resources"
+    raise web.HTTPFound(_url(settings, f"/instances/{quote(name)}?{urlencode(query)}"))
 
 
 async def pod_logs_api(request: web.Request) -> web.Response:
@@ -706,142 +598,247 @@ async def pod_logs_page(request: web.Request) -> web.Response:
     settings: UISettings = request.app["settings"]
     name = request.match_info["name"]
     target = request.match_info["target"]
-    tail_lines = _tail_lines_from_request(request)
+    query = dict(request.query)
+    query["tab"] = "logs"
+    query["target"] = target
+    raise web.HTTPFound(_url(settings, f"/instances/{quote(name)}?{urlencode(query)}"))
+
+
+async def save_instance(request: web.Request) -> web.StreamResponse:
+    settings: UISettings = request.app["settings"]
+    form = await request.post()
+    submitted = {key: value for key, value in form.items()}
+    original_name = str(form.get("original_name", "")).strip()
+    name = str(form.get("name", "")).strip()
+    return_path = str(form.get("return_path", "")).strip() or (
+        f"/instances/{quote(original_name)}?tab=settings" if original_name else "/"
+    )
+    instance = None
+    existing_password = ""
+    if original_name:
+        try:
+            instance = get_instance(settings.namespace, original_name)
+            credentials_ref = normalize_instance(instance)["spec"]["credentials"]["secretRef"]
+            existing_password = read_secret_value(settings.namespace, credentials_ref, "password")
+        except Exception:
+            instance = None
+    runner_proxy_type = str(form.get("runner_proxy_type", "socks5")).strip() or "socks5"
+    runner_proxy_url = str(form.get("runner_proxy_url", "")).strip()
+    parser_proxy_pool = str(form.get("parser_proxy_pool", ""))
+    password = str(form.get("ow_password", "")).strip()
+    login = str(form.get("ow_login", "")).strip()
+    parser_storage_size = str(form.get("parser_storage_size", "")).strip()
+    runner_storage_size = str(form.get("runner_storage_size", "")).strip()
+    sync_json_patch = str(form.get("sync_json_patch", form.get("sync_json", ""))).strip()
+    steam_app_id = _int_from_form(form.get("steam_app_id"), 0)
+    errors = _validation_errors(
+        name=name,
+        steam_app_id=steam_app_id,
+        login=login,
+        password=password,
+        existing_password=existing_password,
+        runner_proxy_url=runner_proxy_url,
+        parser_proxy_pool=parser_proxy_pool,
+        parser_storage_size=parser_storage_size,
+        runner_storage_size=runner_storage_size,
+        sync_json_patch=sync_json_patch,
+    )
+    if "runner_proxy_url" not in errors:
+        try:
+            _validate_runner_proxy(runner_proxy_url, runner_proxy_type)
+        except Exception as exc:
+            errors["runner_proxy_url"] = str(exc)
+    if errors:
+        context = _editor_context(
+            settings,
+            instance,
+            form_data=submitted,
+            errors=errors,
+            sync_patch_value=sync_json_patch,
+        )
+        if _wants_json(request):
+            return _json_response("Please correct the highlighted fields", kind="error", status=400, errors=errors)
+        if instance is None:
+            body = _new_instance_page(settings, context, "", "info")
+        else:
+            summary = _load_instance_summary(settings, original_name or name)
+            body = _detail_page(
+                settings,
+                summary,
+                active_tab="settings",
+                settings_form=_settings_form(settings, context, return_path=return_path, embedded=True),
+                flash="",
+                flash_kind="info",
+            )
+        return web.Response(text=body, content_type="text/html", status=400)
+
+    normalized_instance = normalize_instance(instance) if instance is not None else {"spec": deep_merge(DEFAULT_SPEC, {})}
+    sync_spec = _build_sync_spec(dict(normalized_instance["spec"]["sync"]), submitted)
+    parser_proxy_pool_value = _validate_proxy_pool(parser_proxy_pool)
+    runner_proxy_url_value = _validate_runner_proxy(runner_proxy_url, runner_proxy_type)
+    credentials_secret = managed_credentials_secret_name(name)
+    parser_proxy_secret = managed_parser_proxy_secret_name(name)
+    runner_proxy_secret = managed_runner_proxy_secret_name(name)
+    final_password = password or existing_password
+
+    upsert_secret(
+        settings.namespace,
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": credentials_secret,
+                "namespace": settings.namespace,
+                "labels": {**common_labels(name, "credentials"), "auto-updater.miskler.ru/managed-secret": "true"},
+            },
+            "type": "Opaque",
+            "stringData": {
+                "login": login,
+                "password": final_password,
+            },
+        },
+    )
+    if parser_proxy_pool_value:
+        upsert_secret(
+            settings.namespace,
+            {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {
+                    "name": parser_proxy_secret,
+                    "namespace": settings.namespace,
+                    "labels": {**common_labels(name, "parser-proxies"), "auto-updater.miskler.ru/managed-secret": "true"},
+                },
+                "type": "Opaque",
+                "stringData": {
+                    "proxyPool": parser_proxy_pool_value,
+                },
+            },
+        )
+        parser_proxy_ref = parser_proxy_secret
+    else:
+        parser_proxy_ref = ""
+        delete_secret(settings.namespace, parser_proxy_secret)
+    upsert_secret(
+        settings.namespace,
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": runner_proxy_secret,
+                "namespace": settings.namespace,
+                "labels": {**common_labels(name, "runner-proxy"), "auto-updater.miskler.ru/managed-secret": "true"},
+            },
+            "type": "Opaque",
+            "stringData": {
+                "proxyUrl": runner_proxy_url_value,
+            },
+        },
+    )
+    body = {
+        "apiVersion": API_VERSION,
+        "kind": KIND,
+        "metadata": {
+            "name": name,
+            "namespace": settings.namespace,
+            "labels": common_labels(name, "instance"),
+        },
+        "spec": {
+            "enabled": _bool_from_form(form.get("enabled")),
+            "source": {
+                "steamAppId": steam_app_id,
+                "owGameId": _int_from_form(form.get("ow_game_id"), 0),
+                "language": str(form.get("language", "")).strip() or "english",
+            },
+            "sync": sync_spec,
+            "credentials": {"secretRef": credentials_secret},
+            "parser": {"proxyPoolSecretRef": parser_proxy_ref},
+            "steamcmd": {
+                "proxy": {
+                    "type": runner_proxy_type,
+                    "secretRef": runner_proxy_secret,
+                }
+            },
+            "storage": {
+                "parser": {
+                    "size": parser_storage_size or "20Gi",
+                    "storageClassName": "local-path",
+                },
+                "runner": {
+                    "size": runner_storage_size or "10Gi",
+                    "storageClassName": "local-path",
+                },
+            },
+        },
+    }
+    replace_or_create_instance(settings.namespace, name, body)
+    if original_name and original_name != name:
+        delete_instance(settings.namespace, original_name)
+        for secret_name in _managed_secret_names(original_name):
+            delete_secret(settings.namespace, secret_name)
+    return _action_response(
+        request,
+        settings,
+        message=f"Instance {name} saved",
+        redirect_path=f"/instances/{quote(name)}?tab=overview",
+        kind="success",
+    )
+
+
+async def sync_now(request: web.Request) -> web.StreamResponse:
+    settings: UISettings = request.app["settings"]
+    name = request.match_info["name"]
+    url = parser_service_url(name, settings.namespace) + "/api/v1/sync"
+    form = await request.post() if request.can_read_body else {}
+    return_path = str(form.get("return_path", "")).strip() if form else ""
+    redirect_path = return_path or f"/instances/{quote(name)}?tab=overview"
     try:
-        snapshot = _pod_log_snapshot(settings, name, target, tail_lines)
-        pod_name = str(snapshot.get("podName") or "")
-        container = str(snapshot.get("container") or "")
-        initial_log_text = str(snapshot.get("logText") or "")
-    except web.HTTPNotFound:
-        raise _flash_redirect(settings, "/", f"Pod для {name}/{target} пока не найден")
-    except Exception as exc:
-        component, container = _component_log_target(target)
-        pod_name = _latest_pod_name(settings.namespace, name, component)
-        initial_log_text = f"Failed to load logs: {exc}"
-    api_url = _url(settings, f"/api/instances/{quote(name)}/logs/{quote(target)}")
-    escape_instance = json.dumps(name, ensure_ascii=False)
-    escape_target = json.dumps(target, ensure_ascii=False)
-    body = f"""
-    <section class="top">
-      <div class="eyebrow">Live Pod Logs</div>
-      <h1>{_escape(name)} / {_escape(target)}</h1>
-      <div class="subtitle">Живая панель для pod <code id="pod-name">{_escape(pod_name or 'n/a')}</code>, контейнер <code id="container-name">{_escape(container)}</code>. Хвост лога обновляется каждые 2 секунды без ручного рефреша.</div>
-    </section>
-    <div class="actions">
-      <a class="button secondary" href="{_url(settings, '/')}">Назад</a>
-      <a class="button secondary" href="{_url(settings, f'/instances/{quote(name)}/resources')}">Ресурсы</a>
-      <button type="button" class="secondary" id="toggle-live">Pause</button>
-      <button type="button" class="secondary" id="refresh-now">Refresh now</button>
-    </div>
-    <section class="card">
-      <div class="meta" style="margin-top:0;">
-        <div>instance: <code>{_escape(name)}</code></div>
-        <div>target: <code>{_escape(target)}</code></div>
-        <div>tail lines: <strong id="tail-lines">{_escape(tail_lines)}</strong></div>
-        <div>last update: <strong id="log-updated">initial</strong></div>
-        <div>stream state: <strong id="log-stream-state">connecting</strong></div>
-      </div>
-      <pre id="log-output">{_escape(initial_log_text or '(empty)')}</pre>
-    </section>
-    <script>
-      (() => {{
-        const instanceName = {escape_instance};
-        const targetName = {escape_target};
-        const apiUrl = {json.dumps(api_url, ensure_ascii=False)};
-        const initialTailLines = {tail_lines};
-        const output = document.getElementById("log-output");
-        const podName = document.getElementById("pod-name");
-        const containerName = document.getElementById("container-name");
-        const updated = document.getElementById("log-updated");
-        const streamState = document.getElementById("log-stream-state");
-        const toggleButton = document.getElementById("toggle-live");
-        const refreshButton = document.getElementById("refresh-now");
-        const tailLines = document.getElementById("tail-lines");
-        let paused = false;
-        let inFlight = false;
-        let lastBody = output.textContent;
-
-        function updateState(text) {{
-          streamState.textContent = text;
-        }}
-
-        function nearBottom(element) {{
-          return element.scrollHeight - element.scrollTop - element.clientHeight < 48;
-        }}
-
-        async function refreshLogs(force = false) {{
-          if ((!force && paused) || inFlight) {{
-            return;
-          }}
-          inFlight = true;
-          updateState("updating");
-          const stickToBottom = nearBottom(output);
-          try {{
-            const response = await fetch(`${{apiUrl}}?tail=${{initialTailLines}}`, {{
-              headers: {{ "Accept": "application/json" }},
-              cache: "no-store",
-            }});
-            const payload = await response.json();
-            if (!response.ok) {{
-              throw new Error(payload.error || `HTTP ${{response.status}}`);
-            }}
-            podName.textContent = payload.podName || "n/a";
-            containerName.textContent = payload.container || "n/a";
-            tailLines.textContent = String(payload.tailLines || initialTailLines);
-            const text = payload.logText || "(empty)";
-            if (text !== lastBody) {{
-              output.textContent = text;
-              lastBody = text;
-              if (stickToBottom) {{
-                output.scrollTop = output.scrollHeight;
-              }}
-            }}
-            updated.textContent = new Date().toLocaleTimeString();
-            updateState("live");
-          }} catch (error) {{
-            output.textContent = `Failed to refresh logs for ${{instanceName}}/${{targetName}}: ${{error.message}}`;
-            lastBody = null;
-            updated.textContent = new Date().toLocaleTimeString();
-            updateState("error");
-          }} finally {{
-            inFlight = false;
-          }}
-        }}
-
-        toggleButton.addEventListener("click", () => {{
-          paused = !paused;
-          toggleButton.textContent = paused ? "Resume" : "Pause";
-          updateState(paused ? "paused" : "live");
-          if (!paused) {{
-            refreshLogs();
-          }}
-        }});
-        refreshButton.addEventListener("click", () => refreshLogs(true));
-        output.scrollTop = output.scrollHeight;
-        refreshLogs();
-        window.setInterval(refreshLogs, 2000);
-      }})();
-    </script>
-    """
-    return web.Response(text=_layout(settings, body), content_type="text/html")
+        response = requests.post(url, timeout=5)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        if _wants_json(request):
+            return _json_response(f"Sync now failed: {exc}", kind="error", status=502)
+        raise _flash_redirect(settings, redirect_path, f"Sync now failed: {exc}", "error")
+    return _action_response(
+        request,
+        settings,
+        message=f"Sync requested for {name}",
+        redirect_path=redirect_path,
+        kind="success",
+    )
 
 
 async def toggle_instance(request: web.Request) -> web.StreamResponse:
     settings: UISettings = request.app["settings"]
     name = request.match_info["name"]
+    form = await request.post()
+    return_path = str(form.get("return_path", "")).strip() or f"/instances/{quote(name)}?tab=overview"
     instance = normalize_instance(get_instance(settings.namespace, name))
     enabled = not bool(instance["spec"].get("enabled", True))
     patch_instance(settings.namespace, name, {"spec": {"enabled": enabled}})
-    raise _flash_redirect(settings, "/", f"{name}: enabled={enabled}")
+    return _action_response(
+        request,
+        settings,
+        message=f"{name} is now {'enabled' if enabled else 'paused'}",
+        redirect_path=return_path,
+        kind="success",
+    )
 
 
 async def delete_instance_route(request: web.Request) -> web.StreamResponse:
     settings: UISettings = request.app["settings"]
     name = request.match_info["name"]
+    await request.post()
     delete_instance(settings.namespace, name)
     for secret_name in _managed_secret_names(name):
         delete_secret(settings.namespace, secret_name)
-    raise _flash_redirect(settings, "/", f"{name} удалён")
+    return _action_response(
+        request,
+        settings,
+        message=f"{name} deleted",
+        redirect_path="/",
+        kind="warning",
+    )
 
 
 @web.middleware
@@ -882,7 +879,10 @@ def _create_app(settings: UISettings) -> web.Application:
 
     register("GET", "/healthz", healthz)
     register("GET", "/", dashboard)
+    register("GET", "/api/instances", instances_api)
+    register("GET", "/api/instances/{name}", instance_summary_api)
     register("GET", "/instances/new", new_instance_page)
+    register("GET", "/instances/{name}", instance_detail_page)
     register("GET", "/instances/{name}/edit", edit_instance_page)
     register("GET", "/instances/{name}/resources", resource_page)
     register("GET", "/api/instances/{name}/logs/{target}", pod_logs_api)
@@ -891,6 +891,9 @@ def _create_app(settings: UISettings) -> web.Application:
     register("POST", "/instances/{name}/sync", sync_now)
     register("POST", "/instances/{name}/toggle", toggle_instance)
     register("POST", "/instances/{name}/delete", delete_instance_route)
+    app.router.add_static("/assets", str(STATIC_DIR), show_index=False)
+    if settings.base_path:
+        app.router.add_static(f"{settings.base_path}/assets", str(STATIC_DIR), show_index=False)
     return app
 
 

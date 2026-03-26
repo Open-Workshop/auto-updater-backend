@@ -57,6 +57,39 @@ helm upgrade --install auto-updater ./charts/auto-updater \
   --set image.tag=latest
 ```
 
+## Production Release Flow
+
+Для k3s/buildah есть готовый release-скрипт: `scripts/release_k3s_buildah.sh`.
+
+Что он делает:
+
+- прогоняет `py_compile` по Python-модулям;
+- собирает образ через `buildah bud --layers`;
+- упаковывает образ в `docker-archive` и импортирует в `containerd`;
+- обновляет `image.tag` в values-файле;
+- делает `helm upgrade` и дожидается rollout.
+
+Пример для нашего k3s-сценария:
+
+```bash
+scripts/release_k3s_buildah.sh \
+  --tag prod-20260326-9 \
+  --values /root/auto-updater-values.yaml \
+  --kube-cli "k3s kubectl"
+```
+
+Если нужно только проверить build cache без деплоя:
+
+```bash
+scripts/release_k3s_buildah.sh \
+  --tag cache-smoke \
+  --values /root/auto-updater-values.yaml \
+  --skip-import \
+  --skip-deploy
+```
+
+`--layers` включён по умолчанию. Для образа также добавлен `.dockerignore`, чтобы не тащить в build context тесты, chart и служебные файлы.
+
 Chart ставит:
 
 - `MirrorInstance` CRD;

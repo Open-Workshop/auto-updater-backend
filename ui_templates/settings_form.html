@@ -1,0 +1,248 @@
+<section class="$shell_class">
+  <section class="page-top">
+    <div>
+      <div class="eyebrow">$eyebrow</div>
+      <h1>$heading</h1>
+      <div class="subtitle">$subtitle</div>
+    </div>
+  </section>
+  <form class="settings-form" method="post" action="$action_url">
+    <input type="hidden" name="original_name" value="$original_name">
+    <input type="hidden" name="return_path" value="$return_path">
+
+    <section class="panel-section">
+      <div class="section-title">Basics</div>
+      <div class="field-grid">
+        <label>
+          <span>Instance name</span>
+          <input class="input$name_invalid_class" type="text" name="name" value="$name_value" required>
+          $name_error
+        </label>
+        <label class="toggle-field">
+          <span class="toggle">
+            <input type="checkbox" name="enabled" $enabled_checked>
+            <span>Enabled</span>
+          </span>
+          $enabled_hint
+          $enabled_error
+        </label>
+        <label>
+          <span>Steam App ID</span>
+          <input class="input$steam_app_id_invalid_class" type="number" name="steam_app_id" value="$steam_app_id_value" required>
+          $steam_app_id_error
+        </label>
+        <label>
+          <span>OW Game ID</span>
+          <input class="input$ow_game_id_invalid_class" type="number" name="ow_game_id" value="$ow_game_id_value">
+          $ow_game_id_hint
+          $ow_game_id_error
+        </label>
+        <label>
+          <span>Language</span>
+          <input class="input$language_invalid_class" type="text" name="language" value="$language_value" list="language-options">
+          <datalist id="language-options">
+            <option value="english"></option>
+            <option value="russian"></option>
+          </datalist>
+          $language_hint
+          $language_error
+        </label>
+      </div>
+    </section>
+
+    <section class="panel-section">
+      <div class="section-title">Connectivity</div>
+      <div class="field-grid">
+        <label>
+          <span>Open Workshop login</span>
+          <input class="input$ow_login_invalid_class" type="text" name="ow_login" value="$ow_login_value" required>
+          $ow_login_error
+        </label>
+        <label>
+          <span>Open Workshop password</span>
+          <input class="input$ow_password_invalid_class" type="password" name="ow_password" value="">
+          $ow_password_hint
+          $ow_password_error
+        </label>
+        <label>
+          <span>Runner proxy type</span>
+          <select class="input$runner_proxy_type_invalid_class" name="runner_proxy_type">
+            <option value="socks5" $runner_proxy_type_socks5_selected>SOCKS5</option>
+            <option value="http" $runner_proxy_type_http_selected>HTTP</option>
+          </select>
+          $runner_proxy_type_error
+        </label>
+      </div>
+      <label>
+        <span>Runner proxy URL</span>
+        <textarea class="input$runner_proxy_url_invalid_class" name="runner_proxy_url" style="min-height:96px;">$runner_proxy_url_value</textarea>
+        $runner_proxy_url_hint
+        $runner_proxy_url_error
+      </label>
+      <label>
+        <span>Parser proxy pool</span>
+        <textarea class="input$parser_proxy_pool_invalid_class" name="parser_proxy_pool">$parser_proxy_pool_value</textarea>
+        $parser_proxy_pool_hint
+        $parser_proxy_pool_error
+      </label>
+    </section>
+
+    <section class="panel-section">
+      <div class="section-title">Storage</div>
+      <div class="field-grid">
+        <label>
+          <span>Parser PVC size</span>
+          <input class="input$parser_storage_size_invalid_class" type="text" name="parser_storage_size" value="$parser_storage_size_value">
+          $parser_storage_size_hint
+          $parser_storage_size_error
+        </label>
+        <label>
+          <span>Runner PVC size</span>
+          <input class="input$runner_storage_size_invalid_class" type="text" name="runner_storage_size" value="$runner_storage_size_value">
+          $runner_storage_size_hint
+          $runner_storage_size_error
+        </label>
+      </div>
+    </section>
+
+    <details class="panel-section expert-panel">
+      <summary>Expert mode</summary>
+      <div class="section-title">Structured runtime tuning</div>
+      <div class="field-grid">
+        <label>
+          <span>Poll interval (seconds)</span>
+          <input class="input$poll_interval_seconds_invalid_class" type="number" name="poll_interval_seconds" value="$poll_interval_seconds_value">
+          $poll_interval_seconds_error
+        </label>
+        <label>
+          <span>HTTP timeout (seconds)</span>
+          <input class="input$timeout_seconds_invalid_class" type="number" name="timeout_seconds" value="$timeout_seconds_value">
+          $timeout_seconds_error
+        </label>
+        <label>
+          <span>HTTP retries</span>
+          <input class="input$http_retries_invalid_class" type="number" name="http_retries" value="$http_retries_value">
+          $http_retries_error
+        </label>
+        <label>
+          <span>HTTP retry backoff</span>
+          <input class="input$http_retry_backoff_invalid_class" type="number" step="0.1" name="http_retry_backoff" value="$http_retry_backoff_value">
+          $http_retry_backoff_error
+        </label>
+        <label>
+          <span>Steam HTTP retries</span>
+          <input class="input$steam_http_retries_invalid_class" type="number" name="steam_http_retries" value="$steam_http_retries_value">
+          $steam_http_retries_error
+        </label>
+        <label>
+          <span>Steam HTTP backoff</span>
+          <input class="input$steam_http_backoff_invalid_class" type="number" step="0.1" name="steam_http_backoff" value="$steam_http_backoff_value">
+          $steam_http_backoff_error
+        </label>
+        <label>
+          <span>Steam request delay</span>
+          <input class="input$steam_request_delay_invalid_class" type="number" step="0.1" name="steam_request_delay" value="$steam_request_delay_value">
+          $steam_request_delay_error
+        </label>
+        <label>
+          <span>Log level</span>
+          <select class="input$log_level_invalid_class" name="log_level">
+            <option value="DEBUG" $log_level_debug_selected>DEBUG</option>
+            <option value="INFO" $log_level_info_selected>INFO</option>
+            <option value="WARNING" $log_level_warning_selected>WARNING</option>
+            <option value="ERROR" $log_level_error_selected>ERROR</option>
+          </select>
+          $log_level_error
+        </label>
+        <label>
+          <span>Max screenshots</span>
+          <input class="input$max_screenshots_invalid_class" type="number" name="max_screenshots" value="$max_screenshots_value">
+          $max_screenshots_error
+        </label>
+      </div>
+      <div class="toggle-grid">
+        <label class="toggle-field">
+          <span class="toggle">
+            <input type="checkbox" name="run_once" $run_once_checked>
+            <span>Run once</span>
+          </span>
+          $run_once_error
+        </label>
+        <label class="toggle-field">
+          <span class="toggle">
+            <input type="checkbox" name="sync_tags" $sync_tags_checked>
+            <span>Sync tags</span>
+          </span>
+          $sync_tags_error
+        </label>
+        <label class="toggle-field">
+          <span class="toggle">
+            <input type="checkbox" name="prune_tags" $prune_tags_checked>
+            <span>Prune tags</span>
+          </span>
+          $prune_tags_error
+        </label>
+        <label class="toggle-field">
+          <span class="toggle">
+            <input type="checkbox" name="sync_dependencies" $sync_dependencies_checked>
+            <span>Sync dependencies</span>
+          </span>
+          $sync_dependencies_error
+        </label>
+        <label class="toggle-field">
+          <span class="toggle">
+            <input type="checkbox" name="prune_dependencies" $prune_dependencies_checked>
+            <span>Prune dependencies</span>
+          </span>
+          $prune_dependencies_error
+        </label>
+        <label class="toggle-field">
+          <span class="toggle">
+            <input type="checkbox" name="sync_resources" $sync_resources_checked>
+            <span>Sync resources</span>
+          </span>
+          $sync_resources_error
+        </label>
+        <label class="toggle-field">
+          <span class="toggle">
+            <input type="checkbox" name="prune_resources" $prune_resources_checked>
+            <span>Prune resources</span>
+          </span>
+          $prune_resources_error
+        </label>
+        <label class="toggle-field">
+          <span class="toggle">
+            <input type="checkbox" name="upload_resource_files" $upload_resource_files_checked>
+            <span>Upload resource files</span>
+          </span>
+          $upload_resource_files_error
+        </label>
+        <label class="toggle-field">
+          <span class="toggle">
+            <input type="checkbox" name="scrape_preview_images" $scrape_preview_images_checked>
+            <span>Scrape preview images</span>
+          </span>
+          $scrape_preview_images_error
+        </label>
+        <label class="toggle-field">
+          <span class="toggle">
+            <input type="checkbox" name="scrape_required_items" $scrape_required_items_checked>
+            <span>Scrape required items</span>
+          </span>
+          $scrape_required_items_error
+        </label>
+      </div>
+      <label>
+        <span>Raw sync JSON merge</span>
+        <textarea class="input$sync_json_patch_invalid_class" name="sync_json_patch">$sync_json_patch_value</textarea>
+        $sync_json_patch_hint
+        $sync_json_patch_error
+      </label>
+    </details>
+
+    <div class="page-actions">
+      <button type="submit">Save instance</button>
+      <a class="button secondary" href="$back_url">$back_label</a>
+    </div>
+  </form>
+</section>

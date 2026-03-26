@@ -1,0 +1,36 @@
+<section class="panel-section">
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <div class="segmented" id="log-targets">
+        <button type="button" class="segmented-button" data-target="parser">Parser</button>
+        <button type="button" class="segmented-button" data-target="runner">Runner</button>
+        <button type="button" class="segmented-button" data-target="tun">TUN</button>
+      </div>
+      <label class="compact-field">
+        <span>Tail</span>
+        <select id="log-tail" class="input compact-select">
+          <option value="200" $tail_200_selected>200 lines</option>
+          <option value="400" $tail_400_selected>400 lines</option>
+          <option value="800" $tail_800_selected>800 lines</option>
+          <option value="1600" $tail_1600_selected>1600 lines</option>
+        </select>
+      </label>
+    </div>
+    <div class="toolbar-right">
+      <div class="toolbar-note" id="log-state">Connecting...</div>
+      <button type="button" class="button secondary" id="log-pause">Pause</button>
+      <button type="button" class="button secondary" id="log-refresh">Refresh</button>
+      <button type="button" class="button secondary" id="log-copy">Copy</button>
+    </div>
+  </div>
+  <div class="meta-grid compact">
+    <div><span class="meta-label">Instance</span><strong>$instance_name</strong></div>
+    <div><span class="meta-label">Target</span><strong id="log-target-label">$target_label</strong></div>
+    <div><span class="meta-label">Pod</span><strong id="log-pod-name">n/a</strong></div>
+    <div><span class="meta-label">Container</span><strong id="log-container-name">n/a</strong></div>
+    <div><span class="meta-label">Last update</span><strong id="log-updated">initial</strong></div>
+  </div>
+  <pre class="log-console" id="log-output">(loading)</pre>
+</section>
+<script id="logs-config" type="application/json">$logs_config_json</script>
+<script src="$logs_js_href"></script>
