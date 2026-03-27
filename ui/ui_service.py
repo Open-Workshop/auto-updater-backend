@@ -199,7 +199,6 @@ def _derive_health(
     *,
     enabled: bool,
     phase: str,
-    last_sync_result: str,
     last_error: str,
     parser_ready: bool,
     runner_ready: bool,
@@ -208,8 +207,6 @@ def _derive_health(
         return "Disabled"
     if phase == "Error" or last_error:
         return "Error"
-    if last_sync_result == "running":
-        return "Syncing"
     if phase == "Ready" and parser_ready and runner_ready:
         return "Healthy"
     return "Degraded"
@@ -263,11 +260,12 @@ def _error_summary(
     runner_snapshot: dict[str, Any],
 ) -> str:
     last_error = str(status.get("lastError") or "").strip()
+    sync_state = _sync_state_label(status)
     if last_error:
         return _truncate(last_error, 110)
     if health == "Disabled":
         return "Paused by operator"
-    if health == "Syncing":
+    if sync_state == "Running":
         return "Sync in progress"
     if not parser_snapshot.get("ready"):
         return "Parser pod is not ready"
@@ -316,7 +314,6 @@ def _instance_summary(
     health = _derive_health(
         enabled=enabled,
         phase=phase,
-        last_sync_result=last_sync_result,
         last_error=str(status.get("lastError") or "").strip(),
         parser_ready=bool(parser_snapshot.get("ready")),
         runner_ready=bool(runner_snapshot.get("ready")),

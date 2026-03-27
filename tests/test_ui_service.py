@@ -160,6 +160,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 text = await response.text()
                 self.assertIn("Operations Control Center", text)
                 self.assertIn("Search instances", text)
+                self.assertIn("Running sync", text)
                 self.assertIn("/auto-updater/assets/app.css", text)
                 self.assertIn("/auto-updater/assets/dashboard.js", text)
             finally:
@@ -209,6 +210,40 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("/auto-updater/api/instances/demo/logs", text)
                 self.assertIn('id="logs-config"', text)
                 self.assertIn("/auto-updater/assets/logs.js", text)
+            finally:
+                await client.close()
+
+    async def test_logs_asset_contains_status_highlighting(self) -> None:
+        app = _create_app(load_ui_settings())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.get("/auto-updater/assets/logs.js", headers=_auth_headers())
+            self.assertEqual(response.status, 200)
+            text = await response.text()
+            self.assertIn("STATUS_TONES", text)
+            self.assertIn("log-status", text)
+            self.assertIn("INFO", text)
+        finally:
+            await client.close()
+
+    async def test_instances_api_counts_running_sync_separately_from_health(self) -> None:
+        summary = _sample_summary()
+        summary["syncState"] = "Running"
+        summary["lastSyncResult"] = "running"
+        summary["lastSyncLabel"] = "Running since 2026-03-26 18:20 UTC"
+        with patch("ui.ui_service._load_instance_summaries", return_value=[summary]):
+            app = _create_app(load_ui_settings())
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                response = await client.get("/auto-updater/api/instances", headers=_auth_headers())
+                self.assertEqual(response.status, 200)
+                payload = await response.json()
+                self.assertEqual(payload["items"][0]["health"], "Healthy")
+                self.assertEqual(payload["items"][0]["syncState"], "Running")
+                self.assertEqual(payload["counts"]["Healthy"], 1)
+                self.assertEqual(payload["counts"]["Running"], 1)
             finally:
                 await client.close()
 
@@ -347,7 +382,6 @@ class UIHealthTests(unittest.TestCase):
             _derive_health(
                 enabled=False,
                 phase="Ready",
-                last_sync_result="success",
                 last_error="",
                 parser_ready=True,
                 runner_ready=True,
@@ -358,18 +392,16 @@ class UIHealthTests(unittest.TestCase):
             _derive_health(
                 enabled=True,
                 phase="Ready",
-                last_sync_result="running",
                 last_error="",
                 parser_ready=True,
                 runner_ready=True,
             ),
-            "Syncing",
+            "Healthy",
         )
         self.assertEqual(
             _derive_health(
                 enabled=True,
                 phase="Ready",
-                last_sync_result="success",
                 last_error="Connection refused",
                 parser_ready=True,
                 runner_ready=True,
@@ -380,7 +412,6 @@ class UIHealthTests(unittest.TestCase):
             _derive_health(
                 enabled=True,
                 phase="Ready",
-                last_sync_result="success",
                 last_error="",
                 parser_ready=True,
                 runner_ready=True,

@@ -121,7 +121,7 @@ if [[ $SKIP_DEPLOY -eq 0 ]]; then
   [[ -n "$VALUES_FILE" ]] || fail "--values is required unless --skip-deploy is used"
 fi
 
-ARCHIVE_PATH="${ARCHIVE_PATH:-$ROOT_DIR/${IMAGE_NAME}-${TAG}.tar}"
+ARCHIVE_PATH="${ARCHIVE_PATH:-${TMPDIR:-/tmp}/${IMAGE_NAME}-${TAG}.tar}"
 LOCAL_IMAGE_REF="localhost/${IMAGE_NAME}:${TAG}"
 REMOTE_IMAGE_REF="${IMAGE_REGISTRY}/${IMAGE_NAME}:${TAG}"
 read -r -a KUBE_CLI_ARR <<<"$KUBE_CLI"
@@ -163,6 +163,7 @@ buildah tag "$LOCAL_IMAGE_REF" "$REMOTE_IMAGE_REF"
 
 if [[ $SKIP_IMPORT -eq 0 ]]; then
   echo "==> Writing docker archive ${ARCHIVE_PATH}"
+  mkdir -p "$(dirname "$ARCHIVE_PATH")"
   rm -f "$ARCHIVE_PATH"
   buildah push "$REMOTE_IMAGE_REF" "docker-archive:${ARCHIVE_PATH}:${REMOTE_IMAGE_REF}"
 
@@ -197,6 +198,22 @@ helm upgrade "$RELEASE_NAME" "$CHART_PATH" -n "$NAMESPACE" -f "$VALUES_FILE"
 echo "==> Waiting for operator and UI rollouts"
 "${KUBE_CLI_ARR[@]}" -n "$NAMESPACE" rollout status "deployment/${RELEASE_NAME}-operator" --timeout=240s
 "${KUBE_CLI_ARR[@]}" -n "$NAMESPACE" rollout status "deployment/${RELEASE_NAME}-ui" --timeout=240s
+
+echo "==> Waiting for managed StatefulSet rollouts"
+mapfile -t MANAGED_STATEFULSETS < <(
+  "${KUBE_CLI_ARR[@]}" -n "$NAMESPACE" get statefulset \
+    -l app.kubernetes.io/part-of=auto-updater \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+)
+for statefulset in "${MANAGED_STATEFULSETS[@]}"; do
+  [[ -n "$statefulset" ]] || continue
+  replicas="$("${KUBE_CLI_ARR[@]}" -n "$NAMESPACE" get "statefulset/${statefulset}" -o jsonpath='{.spec.replicas}')"
+  if [[ "${replicas:-0}" == "0" ]]; then
+    echo "==> Skipping statefulset/${statefulset} rollout wait (replicas=0)"
+    continue
+  fi
+  "${KUBE_CLI_ARR[@]}" -n "$NAMESPACE" rollout status "statefulset/${statefulset}" --timeout=240s
+done
 
 echo "==> Current workload status"
 "${KUBE_CLI_ARR[@]}" -n "$NAMESPACE" get deploy,sts,pod -o wide

@@ -34,9 +34,10 @@
   }
 
   function countItems(list) {
-    const counts = { All: list.length, Healthy: 0, Syncing: 0, Degraded: 0, Error: 0, Disabled: 0 };
+    const counts = { All: list.length, Healthy: 0, Running: 0, Degraded: 0, Error: 0, Disabled: 0 };
     for (const item of list) {
       if (counts[item.health] !== undefined) counts[item.health] += 1;
+      if (item.syncState === "Running") counts.Running += 1;
     }
     return counts;
   }
@@ -97,7 +98,7 @@
     metricsRoot.innerHTML = [
       metricHtml("All instances", counts.All, "muted"),
       metricHtml("Healthy", counts.Healthy, "healthy"),
-      metricHtml("Syncing", counts.Syncing, "info"),
+      metricHtml("Running sync", counts.Running, "info"),
       metricHtml("Degraded", counts.Degraded, "warning"),
       metricHtml("Error", counts.Error, "error"),
       metricHtml("Paused", counts.Disabled, "muted"),
@@ -106,7 +107,8 @@
 
   function renderTable() {
     const filtered = items.filter((item) => {
-      const matchesFilter = activeFilter === "All" || item.health === activeFilter;
+      const matchesFilter = activeFilter === "All"
+        || (activeFilter === "Running" ? item.syncState === "Running" : item.health === activeFilter);
       const needle = searchTerm.trim().toLowerCase();
       if (!needle) return matchesFilter;
       const haystack = [

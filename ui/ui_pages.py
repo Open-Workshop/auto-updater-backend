@@ -87,7 +87,7 @@ def _dashboard_rows(settings: UISettings, items: list[dict[str, Any]]) -> str:
     for item in items:
         rows.append(
             f"""
-            <tr data-health="{_escape(item['health'])}" data-instance="{_escape(item['name'])}">
+            <tr data-health="{_escape(item['health'])}" data-sync-state="{_escape(item['syncState'])}" data-instance="{_escape(item['name'])}">
               <td>
                 <div class="primary-cell">
                   <a class="row-link" href="{_escape(item['urls']['detail'])}">{_escape(item['name'])}</a>
@@ -115,11 +115,13 @@ def _dashboard_rows(settings: UISettings, items: list[dict[str, Any]]) -> str:
 
 
 def _dashboard_counts(items: list[dict[str, Any]]) -> dict[str, int]:
-    counts = {"All": len(items), "Healthy": 0, "Syncing": 0, "Degraded": 0, "Error": 0, "Disabled": 0}
+    counts = {"All": len(items), "Healthy": 0, "Running": 0, "Degraded": 0, "Error": 0, "Disabled": 0}
     for item in items:
         health = str(item.get("health") or "")
         if health in counts:
             counts[health] += 1
+        if str(item.get("syncState") or "") == "Running":
+            counts["Running"] += 1
     return counts
 
 
@@ -146,7 +148,7 @@ def _dashboard(settings: UISettings, items: list[dict[str, Any]], flash: str, fl
             [
                 _summary_metric("All instances", counts["All"], "muted"),
                 _summary_metric("Healthy", counts["Healthy"], "healthy"),
-                _summary_metric("Syncing", counts["Syncing"], "info"),
+                _summary_metric("Running sync", counts["Running"], "info"),
                 _summary_metric("Degraded", counts["Degraded"], "warning"),
                 _summary_metric("Error", counts["Error"], "error"),
                 _summary_metric("Paused", counts["Disabled"], "muted"),

@@ -42,7 +42,8 @@
 8. В `/root/auto-updater-values.yaml` обновляется `image.tag`.
 9. Выполняется `helm upgrade`.
 10. Скрипт ждёт rollout `operator` и `ui`.
-11. После rollout проверяются pod'ы, statefulset'ы и UI.
+11. Затем скрипт ждёт rollout managed `StatefulSet` для parser/runner инстансов.
+12. После rollout проверяются pod'ы, statefulset'ы и UI.
 
 ## 3. Подготовка изменений
 
@@ -52,9 +53,9 @@
 cd /home/admin1/Documents/GitHub/auto-updater-backend
 ```
 
-После завершения изменений нужно, чтобы на сервере checkout в `/root/auto-updater-backend` содержал ту версию кода, которую нужно выкатывать.
+После завершения изменений нужно, чтобы рабочее дерево на сервере в `/root/auto-updater-backend` содержало ту версию кода, которую нужно выкатывать.
 
-Безопасный вариант обновления checkout на сервере:
+Если серверный каталог является git checkout, его можно обновить так:
 
 ```bash
 ssh root@<REDACTED_SERVER_IP>
@@ -64,7 +65,7 @@ git checkout <branch-or-tag>
 git pull --ff-only
 ```
 
-Если используется не git-pull, а другой способ синхронизации рабочего дерева, важно сохранить ту же структуру репозитория и актуальный `Dockerfile`.
+Если используется не `git pull`, а другой способ синхронизации рабочего дерева, это тоже штатный вариант. На практике релиз уже выполнялся через синхронизацию дерева на сервер и последующий локальный build/release. Важно только сохранить ту же структуру репозитория и актуальный `Dockerfile`.
 
 ## 4. Release-скрипт
 
@@ -138,12 +139,12 @@ buildah tag \
 
 ### 5.4 Экспорт образа в archive
 
-Потом образ упаковывается в tar-архив:
+Потом образ упаковывается в tar-архив. По умолчанию архив складывается вне репозитория, чтобы не попадать в следующий build context:
 
 ```bash
 buildah push \
   docker.io/library/auto-updater-backend:prod-20260327-1 \
-  docker-archive:/root/auto-updater-backend/auto-updater-backend-prod-20260327-1.tar:docker.io/library/auto-updater-backend:prod-20260327-1
+  docker-archive:/tmp/auto-updater-backend-prod-20260327-1.tar:docker.io/library/auto-updater-backend:prod-20260327-1
 ```
 
 ### 5.5 Импорт образа в k3s/containerd
@@ -151,7 +152,7 @@ buildah push \
 Далее архив импортируется в runtime кластера:
 
 ```bash
-ctr -n k8s.io images import /root/auto-updater-backend/auto-updater-backend-prod-20260327-1.tar
+ctr -n k8s.io images import /tmp/auto-updater-backend-prod-20260327-1.tar
 ```
 
 Это ключевой шаг. Именно он делает образ доступным для pod'ов в локальном `k3s` без внешнего registry push.
@@ -194,11 +195,19 @@ helm upgrade auto-updater /root/auto-updater-backend/charts/auto-updater \
 
 ### 5.8 Ожидание rollout
 
-Скрипт ждёт, пока ключевые deployment'ы станут готовы:
+Скрипт сначала ждёт, пока ключевые deployment'ы станут готовы:
 
 ```bash
 k3s kubectl -n auto-updater rollout status deployment/auto-updater-operator --timeout=240s
 k3s kubectl -n auto-updater rollout status deployment/auto-updater-ui --timeout=240s
+```
+
+После этого он отдельно дожидается rollout управляемых `StatefulSet`, которые используют тот же application image:
+
+```bash
+for sts in $(k3s kubectl -n auto-updater get statefulset -l app.kubernetes.io/part-of=auto-updater -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+  k3s kubectl -n auto-updater rollout status statefulset/"$sts" --timeout=240s
+done
 ```
 
 ### 5.9 Финальный статус ресурсов

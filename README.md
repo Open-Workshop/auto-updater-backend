@@ -79,9 +79,9 @@ helm upgrade --install auto-updater ./charts/auto-updater \
 
 - прогоняет `py_compile` по Python-модулям;
 - собирает образ через `buildah bud --layers`;
-- упаковывает образ в `docker-archive` и импортирует в `containerd`;
+- упаковывает образ в `docker-archive` вне build context и импортирует в `containerd`;
 - обновляет `image.tag` в values-файле;
-- делает `helm upgrade` и дожидается rollout.
+- делает `helm upgrade` и дожидается rollout у `operator`, `ui` и managed `StatefulSet`.
 
 Пример для нашего k3s-сценария:
 
@@ -102,7 +102,7 @@ scripts/release_k3s_buildah.sh \
   --skip-deploy
 ```
 
-`--layers` включён по умолчанию. Для образа также добавлен `.dockerignore`, чтобы не тащить в build context тесты, chart и служебные файлы.
+`--layers` включён по умолчанию. Для образа также добавлен `.dockerignore`, чтобы не тащить в build context тесты, chart, docs, архивы образов и служебные файлы.
 
 Chart ставит:
 

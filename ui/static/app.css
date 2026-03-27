@@ -377,6 +377,17 @@ textarea {
   min-height: 360px;
   max-height: 72vh;
 }
+.log-line {
+  display: block;
+}
+.log-status {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-weight: 700;
+  text-align: center;
+}
 .empty-state {
   padding: 24px;
   text-align: center;

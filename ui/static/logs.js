@@ -18,10 +18,51 @@
 
   const config = JSON.parse(configNode.textContent || "{}");
   const apiBase = config.apiBase || "";
+  const STATUS_TONES = {
+    TRACE: "muted",
+    DEBUG: "muted",
+    INFO: "info",
+    NOTICE: "info",
+    SUCCESS: "healthy",
+    WARN: "warning",
+    WARNING: "warning",
+    ERROR: "error",
+    ERR: "error",
+    CRITICAL: "error",
+    FATAL: "error",
+  };
   let currentTarget = config.target || "parser";
   let paused = false;
   let inFlight = false;
   let lastBody = "";
+
+  function escapeHtml(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function renderLogLine(line) {
+    const match = /^(\S+\s+\S+\s+)(\S+)(.*)$/.exec(line);
+    if (!match) {
+      return escapeHtml(line);
+    }
+    const [, prefix, token, suffix] = match;
+    const tone = STATUS_TONES[token.toUpperCase()];
+    if (!tone) {
+      return escapeHtml(line);
+    }
+    return `${escapeHtml(prefix)}<span class="log-status tone-${tone}">${escapeHtml(token)}</span>${escapeHtml(suffix)}`;
+  }
+
+  function renderLogBody(text) {
+    return String(text ?? "")
+      .split("\n")
+      .map((line) => `<span class="log-line">${renderLogLine(line)}</span>`)
+      .join("\n");
+  }
 
   function updateHistory() {
     const url = new URL(window.location.href);
@@ -60,7 +101,7 @@
       }
       const text = payload.logText || "(empty)";
       if (text !== lastBody) {
-        output.textContent = text;
+        output.innerHTML = renderLogBody(text);
         lastBody = text;
         if (stickToBottom) {
           output.scrollTop = output.scrollHeight;
@@ -72,7 +113,7 @@
       logState.textContent = paused ? "Paused" : "Live";
       updateHistory();
     } catch (error) {
-      output.textContent = `Failed to refresh logs: ${error.message}`;
+      output.innerHTML = renderLogBody(`Failed to refresh logs: ${error.message}`);
       updated.textContent = new Date().toLocaleTimeString();
       logState.textContent = "Error";
       window.autoUpdater.showToast(`Log refresh failed: ${error.message}`, "error");
