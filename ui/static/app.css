@@ -376,9 +376,63 @@ textarea {
 .log-console {
   min-height: 360px;
   max-height: 72vh;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .log-line {
   display: block;
+  white-space: pre-wrap;
+}
+.log-group {
+  display: block;
+  margin: 6px 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.log-group[open] {
+  background: rgba(255, 255, 255, 0.05);
+}
+.log-group-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  list-style: none;
+  padding: 8px 12px;
+}
+.log-group-summary::-webkit-details-marker {
+  display: none;
+}
+.log-group-summary::before {
+  content: "▸";
+  color: #a9c3d8;
+  flex: none;
+}
+.log-group[open] > .log-group-summary::before {
+  content: "▾";
+}
+.log-group-count {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(23, 105, 170, 0.18);
+  color: #8ec8ff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.log-group-message {
+  flex: 1 1 360px;
+  min-width: 0;
+}
+.log-group-range {
+  color: #9db0c1;
+  font-size: 12px;
+}
+.log-group-body {
+  padding: 0 12px 10px 28px;
 }
 .log-status {
   display: inline-block;

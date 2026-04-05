@@ -31,6 +31,10 @@
     CRITICAL: "error",
     FATAL: "error",
   };
+  const ANSI_ESCAPE_RE = /\u001B\[[0-?]*[ -/]*[@-~]/g;
+  const ANSI_C1_RE = /\u009B[0-?]*[ -/]*[@-~]/g;
+  const TIMESTAMP_PREFIX_RE = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:,\d+)?\s+)(.*)$/;
+  const ACCESS_LOG_TIMESTAMP_RE = /\[\d{2}\/[A-Za-z]{3}\/\d{4}:\d{2}:\d{2}:\d{2}\s+[+-]\d{4}\]/g;
   let currentTarget = config.target || "parser";
   let paused = false;
   let inFlight = false;
@@ -44,24 +48,116 @@
       .replace(/"/g, "&quot;");
   }
 
-  function renderLogLine(line) {
-    const match = /^(\S+\s+\S+\s+)(\S+)(.*)$/.exec(line);
+  function stripAnsi(value) {
+    return String(value ?? "")
+      .replace(ANSI_ESCAPE_RE, "")
+      .replace(ANSI_C1_RE, "");
+  }
+
+  function normalizeLogText(text) {
+    return stripAnsi(text)
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n");
+  }
+
+  function splitTimestamp(line) {
+    const match = TIMESTAMP_PREFIX_RE.exec(line);
     if (!match) {
-      return escapeHtml(line);
+      return { timestamp: "", body: line };
     }
-    const [, prefix, token, suffix] = match;
+    return {
+      timestamp: match[1].trim(),
+      body: match[2],
+    };
+  }
+
+  function canonicalLogLine(line) {
+    const { body } = splitTimestamp(line);
+    return (body || line)
+      .replace(ACCESS_LOG_TIMESTAMP_RE, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+  }
+
+  function renderLogLine(line) {
+    const sanitized = stripAnsi(line);
+    let prefix = "";
+    let token = "";
+    let suffix = "";
+    const { timestamp, body } = splitTimestamp(sanitized);
+    if (timestamp) {
+      const leveled = /^([A-Z]+)(.*)$/.exec(body);
+      if (!leveled) {
+        return escapeHtml(sanitized);
+      }
+      prefix = `${timestamp} `;
+      [, token, suffix] = leveled;
+    } else {
+      const leveled = /^([A-Z]+)(\[\d+\].*)$/.exec(sanitized)
+        || /^([A-Z]+)(\s+.*)$/.exec(sanitized);
+      if (!leveled) {
+        return escapeHtml(sanitized);
+      }
+      [, token, suffix] = leveled;
+    }
+    if (!token) {
+      return escapeHtml(sanitized);
+    }
     const tone = STATUS_TONES[token.toUpperCase()];
     if (!tone) {
-      return escapeHtml(line);
+      return escapeHtml(sanitized);
     }
     return `${escapeHtml(prefix)}<span class="log-status tone-${tone}">${escapeHtml(token)}</span>${escapeHtml(suffix)}`;
   }
 
+  function renderLogEntry(line) {
+    return `<span class="log-line">${renderLogLine(line)}</span>`;
+  }
+
+  function buildLogGroups(lines) {
+    const groups = [];
+    lines.forEach((line) => {
+      const { timestamp, body } = splitTimestamp(line);
+      const signature = canonicalLogLine(line);
+      const previous = groups[groups.length - 1];
+      if (previous && previous.signature === signature) {
+        previous.lines.push(line);
+        if (timestamp) {
+          previous.lastTimestamp = timestamp;
+        }
+        return;
+      }
+      groups.push({
+        signature,
+        summaryLine: signature || body || line,
+        lines: [line],
+        firstTimestamp: timestamp,
+        lastTimestamp: timestamp,
+      });
+    });
+    return groups;
+  }
+
+  function renderLogGroup(group) {
+    const countLabel = `${group.lines.length} repeated lines`;
+    const rangeText = group.firstTimestamp && group.lastTimestamp
+      ? group.firstTimestamp === group.lastTimestamp
+        ? group.firstTimestamp
+        : `${group.firstTimestamp} -> ${group.lastTimestamp}`
+      : "";
+    const summaryLine = group.summaryLine || "(blank line)";
+    return `<details class="log-group"><summary class="log-group-summary"><span class="log-group-count">${escapeHtml(countLabel)}</span><span class="log-group-message">${renderLogLine(summaryLine)}</span>${rangeText ? `<span class="log-group-range">${escapeHtml(rangeText)}</span>` : ""}</summary><div class="log-group-body">${group.lines.map((line) => renderLogEntry(line)).join("")}</div></details>`;
+  }
+
   function renderLogBody(text) {
-    return String(text ?? "")
-      .split("\n")
-      .map((line) => `<span class="log-line">${renderLogLine(line)}</span>`)
-      .join("\n");
+    const normalized = normalizeLogText(text);
+    const lines = normalized.split("\n");
+    if (lines.length > 1 && lines[lines.length - 1] === "") {
+      lines.pop();
+    }
+    return buildLogGroups(lines)
+      .map((group) => (group.lines.length > 1 ? renderLogGroup(group) : renderLogEntry(group.lines[0])))
+      .join("");
   }
 
   function updateHistory() {
@@ -99,7 +195,7 @@
       if (!response.ok) {
         throw new Error(payload.error || `HTTP ${response.status}`);
       }
-      const text = payload.logText || "(empty)";
+      const text = normalizeLogText(payload.logText || "(empty)");
       if (text !== lastBody) {
         output.innerHTML = renderLogBody(text);
         lastBody = text;
@@ -113,7 +209,8 @@
       logState.textContent = paused ? "Paused" : "Live";
       updateHistory();
     } catch (error) {
-      output.innerHTML = renderLogBody(`Failed to refresh logs: ${error.message}`);
+      lastBody = normalizeLogText(`Failed to refresh logs: ${error.message}`);
+      output.innerHTML = renderLogBody(lastBody);
       updated.textContent = new Date().toLocaleTimeString();
       logState.textContent = "Error";
       window.autoUpdater.showToast(`Log refresh failed: ${error.message}`, "error");
@@ -142,7 +239,7 @@
   refreshButton.addEventListener("click", () => refreshLogs(true));
   copyButton.addEventListener("click", async () => {
     try {
-      await navigator.clipboard.writeText(output.textContent || "");
+      await navigator.clipboard.writeText(lastBody || output.textContent || "");
       window.autoUpdater.showToast("Logs copied to clipboard", "success");
     } catch (error) {
       window.autoUpdater.showToast(`Copy failed: ${error.message}`, "error");
