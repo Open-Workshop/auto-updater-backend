@@ -797,6 +797,20 @@ def _get_cluster_cpu_capacity() -> int | None:
         return None
 
 
+def _get_cluster_memory_capacity() -> int | None:
+    try:
+        nodes = get_kube_clients().core.list_node().items or []
+        total_capacity = 0
+        for node in nodes:
+            capacity = dict(node.status or {}).get("capacity") or {}
+            memory_value = _parse_bytes(capacity.get("memory"))
+            if memory_value is not None:
+                total_capacity += memory_value
+        return total_capacity if total_capacity > 0 else None
+    except Exception:
+        return None
+
+
 def _dashboard_resource_totals(items: list[dict[str, Any]]) -> dict[str, Any]:
     cpu_millicores = _sum_values(
         [_int_value(dict(item.get("resources") or {}).get("cpuMilliCores")) for item in items]
@@ -811,12 +825,14 @@ def _dashboard_resource_totals(items: list[dict[str, Any]]) -> dict[str, Any]:
         [_int_value(dict(item.get("resources") or {}).get("diskRequestedBytes")) for item in items]
     )
     cluster_capacity_millicores = _get_cluster_cpu_capacity()
+    cluster_capacity_bytes = _get_cluster_memory_capacity()
     return _resource_usage(
         cpu_millicores=cpu_millicores,
         memory_bytes=memory_bytes,
         disk_used_bytes=disk_used_bytes,
         disk_requested_bytes=disk_requested_bytes,
         node_capacity_millicores=cluster_capacity_millicores,
+        node_capacity_bytes=cluster_capacity_bytes,
     )
 
 
