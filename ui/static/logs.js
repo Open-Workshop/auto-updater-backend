@@ -275,10 +275,24 @@
       const rxSpeed = calculateNetworkSpeed(payload.rxBytes, lastRxBytes, currentTime, lastMetricsTime);
       const txSpeed = calculateNetworkSpeed(payload.txBytes, lastTxBytes, currentTime, lastMetricsTime);
       if (networkRx) {
-        networkRx.textContent = rxSpeed !== null ? formatBytesToBits(rxSpeed) : "n/a";
+        if (rxSpeed !== null) {
+          networkRx.textContent = formatBytesToBits(rxSpeed);
+        } else if (payload.rxBytes !== null) {
+          // First request: show total bytes instead of speed
+          networkRx.textContent = `${(payload.rxBytes / 1024 / 1024).toFixed(2)} MB`;
+        } else {
+          networkRx.textContent = "n/a";
+        }
       }
       if (networkTx) {
-        networkTx.textContent = txSpeed !== null ? formatBytesToBits(txSpeed) : "n/a";
+        if (txSpeed !== null) {
+          networkTx.textContent = formatBytesToBits(txSpeed);
+        } else if (payload.txBytes !== null) {
+          // First request: show total bytes instead of speed
+          networkTx.textContent = `${(payload.txBytes / 1024 / 1024).toFixed(2)} MB`;
+        } else {
+          networkTx.textContent = "n/a";
+        }
       }
       lastRxBytes = payload.rxBytes;
       lastTxBytes = payload.txBytes;
