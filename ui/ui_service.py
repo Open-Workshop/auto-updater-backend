@@ -792,8 +792,10 @@ def _get_cluster_cpu_capacity() -> int | None:
             cpu_value = _parse_cpu_millicores(capacity.get("cpu"))
             if cpu_value is not None:
                 total_capacity += cpu_value
+        logging.debug("_get_cluster_cpu_capacity: total_capacity=%d", total_capacity)
         return total_capacity if total_capacity > 0 else None
-    except Exception:
+    except Exception as e:
+        logging.error("_get_cluster_cpu_capacity: exception=%s", e)
         return None
 
 
@@ -806,8 +808,10 @@ def _get_cluster_memory_capacity() -> int | None:
             memory_value = _parse_bytes(capacity.get("memory"))
             if memory_value is not None:
                 total_capacity += memory_value
+        logging.debug("_get_cluster_memory_capacity: total_capacity=%d", total_capacity)
         return total_capacity if total_capacity > 0 else None
-    except Exception:
+    except Exception as e:
+        logging.error("_get_cluster_memory_capacity: exception=%s", e)
         return None
 
 
