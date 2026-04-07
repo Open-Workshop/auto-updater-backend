@@ -46,6 +46,9 @@
   let lastMetricsTime = null;
   let lastRxSpeed = null;
   let lastTxSpeed = null;
+  let firstRxBytes = null;
+  let firstTxBytes = null;
+  let firstMetricsTime = null;
 
   function escapeHtml(value) {
     return String(value ?? "")
@@ -120,12 +123,12 @@
     }
   }
 
-  function calculateNetworkSpeed(currentBytes, lastBytes, currentTime, lastTime) {
-    if (currentBytes == null || lastBytes == null || currentTime == null || lastTime == null) {
+  function calculateNetworkSpeed(currentBytes, firstBytes, currentTime, firstTime) {
+    if (currentBytes == null || firstBytes == null || currentTime == null || firstTime == null) {
       return null;
     }
-    const deltaBytes = currentBytes - lastBytes;
-    const deltaTime = (currentTime - lastTime) / 1000; // Convert to seconds
+    const deltaBytes = currentBytes - firstBytes;
+    const deltaTime = (currentTime - firstTime) / 1000; // Convert to seconds
     if (deltaTime <= 0 || deltaBytes < 0) {
       return null;
     }
@@ -274,22 +277,46 @@
       podName.textContent = payload.podName || "n/a";
       containerName.textContent = payload.container || "n/a";
       const currentTime = Date.now();
-      const rxSpeed = calculateNetworkSpeed(payload.rxBytes, lastRxBytes, currentTime, lastMetricsTime);
-      const txSpeed = calculateNetworkSpeed(payload.txBytes, lastTxBytes, currentTime, lastMetricsTime);
       
-      // Update last known speed if we got a new valid value
-      if (rxSpeed !== null) {
-        lastRxSpeed = rxSpeed;
+      // Initialize first values if not set
+      if (firstRxBytes === null && payload.rxBytes !== null) {
+        firstRxBytes = payload.rxBytes;
+        firstMetricsTime = currentTime;
       }
-      if (txSpeed !== null) {
-        lastTxSpeed = txSpeed;
+      if (firstTxBytes === null && payload.txBytes !== null) {
+        firstTxBytes = payload.txBytes;
+        if (firstMetricsTime === null) {
+          firstMetricsTime = currentTime;
+        }
+      }
+      
+      // Calculate speed only when values change
+      let rxSpeed = null;
+      let txSpeed = null;
+      
+      if (payload.rxBytes !== null && firstRxBytes !== null && payload.rxBytes !== firstRxBytes) {
+        rxSpeed = calculateNetworkSpeed(payload.rxBytes, firstRxBytes, currentTime, firstMetricsTime);
+        if (rxSpeed !== null) {
+          lastRxSpeed = rxSpeed;
+          firstRxBytes = payload.rxBytes;
+          firstMetricsTime = currentTime;
+        }
+      }
+      
+      if (payload.txBytes !== null && firstTxBytes !== null && payload.txBytes !== firstTxBytes) {
+        txSpeed = calculateNetworkSpeed(payload.txBytes, firstTxBytes, currentTime, firstMetricsTime);
+        if (txSpeed !== null) {
+          lastTxSpeed = txSpeed;
+          firstTxBytes = payload.txBytes;
+          firstMetricsTime = currentTime;
+        }
       }
       
       if (networkRx) {
         if (rxSpeed !== null) {
           networkRx.textContent = formatBytesToBits(rxSpeed);
         } else if (lastRxSpeed !== null) {
-          // Metrics not updated yet, show last known speed
+          // Show last known speed while waiting for metrics to update
           networkRx.textContent = formatBytesToBits(lastRxSpeed);
         } else if (payload.rxBytes !== null) {
           // First request: show total bytes instead of speed
@@ -302,7 +329,7 @@
         if (txSpeed !== null) {
           networkTx.textContent = formatBytesToBits(txSpeed);
         } else if (lastTxSpeed !== null) {
-          // Metrics not updated yet, show last known speed
+          // Show last known speed while waiting for metrics to update
           networkTx.textContent = formatBytesToBits(lastTxSpeed);
         } else if (payload.txBytes !== null) {
           // First request: show total bytes instead of speed
@@ -311,6 +338,7 @@
           networkTx.textContent = "n/a";
         }
       }
+      
       lastRxBytes = payload.rxBytes;
       lastTxBytes = payload.txBytes;
       lastMetricsTime = currentTime;
