@@ -11,6 +11,8 @@
   const podName = document.getElementById("log-pod-name");
   const containerName = document.getElementById("log-container-name");
   const updated = document.getElementById("log-updated");
+  const networkRx = document.getElementById("log-network-rx");
+  const networkTx = document.getElementById("log-network-tx");
 
   if (!configNode || !tailSelect || !pauseButton || !refreshButton || !copyButton || !output || !logState || !logTargetLabel || !podName || !containerName || !updated) {
     return;
@@ -95,6 +97,22 @@
       return "";
     }
     return `${Math.round((lastMs - firstMs) / 1000)}s`;
+  }
+
+  function formatBytesToBits(bytes) {
+    if (bytes == null || bytes === 0) {
+      return "0 bps";
+    }
+    const bits = bytes * 8;
+    if (bits >= 1e9) {
+      return `${(bits / 1e9).toFixed(2)} Gbps`;
+    } else if (bits >= 1e6) {
+      return `${(bits / 1e6).toFixed(2)} Mbps`;
+    } else if (bits >= 1e3) {
+      return `${(bits / 1e3).toFixed(2)} Kbps`;
+    } else {
+      return `${bits} bps`;
+    }
   }
 
   function canonicalLogLine(line) {
@@ -238,6 +256,12 @@
       }
       podName.textContent = payload.podName || "n/a";
       containerName.textContent = payload.container || "n/a";
+      if (networkRx) {
+        networkRx.textContent = formatBytesToBits(payload.rxBytes);
+      }
+      if (networkTx) {
+        networkTx.textContent = formatBytesToBits(payload.txBytes);
+      }
       updated.textContent = new Date().toLocaleTimeString();
       logState.textContent = paused ? "Paused" : "Live";
       updateHistory();
