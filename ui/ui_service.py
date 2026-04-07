@@ -788,7 +788,7 @@ def _get_cluster_cpu_capacity() -> int | None:
         nodes = get_kube_clients().core.list_node().items or []
         total_capacity = 0
         for node in nodes:
-            capacity = dict(node.status or {}).get("capacity") or {}
+            capacity = dict(node.status.capacity or {}) if node.status else {}
             cpu_value = _parse_cpu_millicores(capacity.get("cpu"))
             if cpu_value is not None:
                 total_capacity += cpu_value
@@ -804,7 +804,7 @@ def _get_cluster_memory_capacity() -> int | None:
         nodes = get_kube_clients().core.list_node().items or []
         total_capacity = 0
         for node in nodes:
-            capacity = dict(node.status or {}).get("capacity") or {}
+            capacity = dict(node.status.capacity or {}) if node.status else {}
             memory_value = _parse_bytes(capacity.get("memory"))
             if memory_value is not None:
                 total_capacity += memory_value
