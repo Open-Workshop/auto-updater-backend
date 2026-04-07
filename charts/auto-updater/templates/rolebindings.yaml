@@ -39,3 +39,16 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: auto-updater-parser
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: auto-updater-ui-node-proxy
+subjects:
+  - kind: ServiceAccount
+    name: auto-updater-ui
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: auto-updater-ui-node-proxy

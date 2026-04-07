@@ -164,13 +164,19 @@
     return groups;
   }
 
+  function stripTimestampMillis(timestamp) {
+    return (timestamp || "").replace(/,\d{1,3}$/, "");
+  }
+
   function renderLogGroup(group) {
     const countLabel = `${group.lines.length} repeated lines`;
     const durationText = formatRangeDuration(group.firstTimestamp, group.lastTimestamp);
+    const firstTimestampClean = stripTimestampMillis(group.firstTimestamp);
+    const lastTimestampClean = stripTimestampMillis(group.lastTimestamp);
     const rangeText = group.firstTimestamp && group.lastTimestamp
       ? group.firstTimestamp === group.lastTimestamp
-        ? group.firstTimestamp
-        : `${group.firstTimestamp} -> ${group.lastTimestamp}${durationText ? ` (${durationText})` : ""}`
+        ? firstTimestampClean
+        : `${firstTimestampClean} -> ${lastTimestampClean}${durationText ? ` (${durationText})` : ""}`
       : "";
     const summaryLine = group.summaryLine || "(blank line)";
     return `<details class="log-group"><summary class="log-group-summary"><span class="log-group-count">${escapeHtml(countLabel)}</span><span class="log-group-message">${renderLogLine(summaryLine)}</span>${rangeText ? `<span class="log-group-range">${escapeHtml(rangeText)}</span>` : ""}</summary><div class="log-group-body">${group.lines.map((line) => renderLogEntry(line)).join("")}</div></details>`;

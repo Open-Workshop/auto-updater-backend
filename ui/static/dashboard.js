@@ -16,7 +16,9 @@
   const apiUrl = config.apiUrl || "";
   let activeFilter = "All";
   let searchTerm = "";
-  let items = JSON.parse(payloadNode.textContent || "{}").items || [];
+  let payload = JSON.parse(payloadNode.textContent || "{}");
+  let items = payload.items || [];
+  let resourceTotals = payload.resources || {};
 
   function escapeHtml(value) {
     return String(value ?? "")
@@ -51,8 +53,20 @@
     `;
   }
 
+  function resourceLabel(resources, key, fallback = "n/a") {
+    const value = resources && resources[key];
+    return value ? String(value) : fallback;
+  }
+
+  function resourceCellHtml(label, resources) {
+    return `${escapeHtml(label)} · ${escapeHtml(resourceLabel(resources, "cpuLabel"))} · ${escapeHtml(resourceLabel(resources, "memoryLabel"))} · ${escapeHtml(resourceLabel(resources, "diskLabel"))}`;
+  }
+
   function rowHtml(item) {
     const toggleLabel = item.enabled ? "Pause" : "Resume";
+    const totalResources = item.resources || {};
+    const parserResources = (item.parser && item.parser.resources) || {};
+    const runnerResources = (item.runner && item.runner.resources) || {};
     return `
       <tr data-health="${escapeHtml(item.health)}" data-instance="${escapeHtml(item.name)}">
         <td>
@@ -74,6 +88,17 @@
           <span class="pill tone-${escapeHtml(item.runner.tone)}">${escapeHtml(item.runner.state)}</span>
           <div class="cell-subtle">${escapeHtml(item.runner.podName || "n/a")}</div>
         </td>
+        <td>
+          <div class="resource-stack">
+            <div class="resource-summary">
+              <span class="resource-chip">CPU ${escapeHtml(resourceLabel(totalResources, "cpuLabel"))}</span>
+              <span class="resource-chip">RAM ${escapeHtml(resourceLabel(totalResources, "memoryLabel"))}</span>
+              <span class="resource-chip">Disk ${escapeHtml(resourceLabel(totalResources, "diskLabel"))}</span>
+            </div>
+            <div class="resource-detail">${resourceCellHtml("Parser", parserResources)}</div>
+            <div class="resource-detail">${resourceCellHtml("Runner", runnerResources)}</div>
+          </div>
+        </td>
         <td class="actions-cell">
           <a class="button secondary" href="${escapeHtml(item.urls.detail)}">Open</a>
           <a class="button secondary" href="${escapeHtml(item.urls.logs)}">Logs</a>
@@ -94,7 +119,7 @@
     `;
   }
 
-  function renderMetrics(counts) {
+  function renderMetrics(counts, resources) {
     metricsRoot.innerHTML = [
       metricHtml("All instances", counts.All, "muted"),
       metricHtml("Healthy", counts.Healthy, "healthy"),
@@ -102,6 +127,9 @@
       metricHtml("Degraded", counts.Degraded, "warning"),
       metricHtml("Error", counts.Error, "error"),
       metricHtml("Paused", counts.Disabled, "muted"),
+      metricHtml("CPU live", resourceLabel(resources, "cpuLabel"), "info"),
+      metricHtml("Memory live", resourceLabel(resources, "memoryLabel"), "info"),
+      metricHtml("Disk used / req", resourceLabel(resources, "diskLabel"), "muted"),
     ].join("");
   }
 
@@ -123,7 +151,7 @@
     });
     root.innerHTML = filtered.map(rowHtml).join("") || `
       <tr>
-        <td colspan="9">
+        <td colspan="10">
           <div class="empty-state">No instances match the current filters.</div>
         </td>
       </tr>
@@ -132,7 +160,7 @@
   }
 
   function renderAll() {
-    renderMetrics(countItems(items));
+    renderMetrics(countItems(items), resourceTotals);
     renderTable();
   }
 
@@ -145,6 +173,7 @@
         throw new Error(payload.error || `HTTP ${response.status}`);
       }
       items = payload.items || [];
+      resourceTotals = payload.resources || {};
       renderAll();
       syncState.textContent = `Auto-refresh every 10s · updated ${new Date().toLocaleTimeString()}`;
     } catch (error) {

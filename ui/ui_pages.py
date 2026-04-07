@@ -82,6 +82,28 @@ def _instance_actions(settings: UISettings, summary: dict[str, Any], *, return_p
     )
 
 
+def _resource_label(resources: dict[str, Any], key: str, fallback: str = "n/a") -> str:
+    value = str(resources.get(key) or "").strip()
+    return value or fallback
+
+
+def _resource_cell(item: dict[str, Any]) -> str:
+    total = dict(item.get("resources") or {})
+    parser = dict(item.get("parser", {}).get("resources") or {})
+    runner = dict(item.get("runner", {}).get("resources") or {})
+    return f"""
+    <div class="resource-stack">
+      <div class="resource-summary">
+        <span class="resource-chip">CPU {_escape(_resource_label(total, "cpuLabel"))}</span>
+        <span class="resource-chip">RAM {_escape(_resource_label(total, "memoryLabel"))}</span>
+        <span class="resource-chip">Disk {_escape(_resource_label(total, "diskLabel"))}</span>
+      </div>
+      <div class="resource-detail">Parser · {_escape(_resource_label(parser, "cpuLabel"))} · {_escape(_resource_label(parser, "memoryLabel"))} · {_escape(_resource_label(parser, "diskLabel"))}</div>
+      <div class="resource-detail">Runner · {_escape(_resource_label(runner, "cpuLabel"))} · {_escape(_resource_label(runner, "memoryLabel"))} · {_escape(_resource_label(runner, "diskLabel"))}</div>
+    </div>
+    """
+
+
 def _dashboard_rows(settings: UISettings, items: list[dict[str, Any]]) -> str:
     rows = []
     for item in items:
@@ -107,6 +129,7 @@ def _dashboard_rows(settings: UISettings, items: list[dict[str, Any]]) -> str:
                 <span class="pill tone-{_escape(item['runner']['tone'])}">{_escape(item['runner']['state'])}</span>
                 <div class="cell-subtle">{_escape(item['runner']['podName'] or 'n/a')}</div>
               </td>
+              <td>{_resource_cell(item)}</td>
               <td class="actions-cell">{_instance_actions(settings, item, return_path='/')}</td>
             </tr>
             """
@@ -135,7 +158,13 @@ def _sync_state_tone(sync_state: str) -> str:
     return "muted"
 
 
-def _dashboard(settings: UISettings, items: list[dict[str, Any]], flash: str, flash_kind: str) -> str:
+def _dashboard(
+    settings: UISettings,
+    items: list[dict[str, Any]],
+    flash: str,
+    flash_kind: str,
+    resource_totals: dict[str, Any],
+) -> str:
     counts = _dashboard_counts(items)
     body = render_template(
         "dashboard.html",
@@ -152,10 +181,13 @@ def _dashboard(settings: UISettings, items: list[dict[str, Any]], flash: str, fl
                 _summary_metric("Degraded", counts["Degraded"], "warning"),
                 _summary_metric("Error", counts["Error"], "error"),
                 _summary_metric("Paused", counts["Disabled"], "muted"),
+                _summary_metric("CPU live", _resource_label(resource_totals, "cpuLabel"), "info"),
+                _summary_metric("Memory live", _resource_label(resource_totals, "memoryLabel"), "info"),
+                _summary_metric("Disk used / req", _resource_label(resource_totals, "diskLabel"), "muted"),
             ]
         ),
         rows_html=_dashboard_rows(settings, items),
-        dashboard_payload_json=_json_script({"items": items, "counts": counts}),
+        dashboard_payload_json=_json_script({"items": items, "counts": counts, "resources": resource_totals}),
         dashboard_config_json=_json_script({"apiUrl": _url(settings, "/api/instances")}),
         dashboard_js_href=_escape(_url(settings, "/assets/dashboard.js")),
     )

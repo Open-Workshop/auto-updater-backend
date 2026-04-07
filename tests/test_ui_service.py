@@ -36,6 +36,15 @@ def _sample_summary() -> dict:
             "tone": "healthy",
             "ready": True,
             "image": "auto-updater-backend:prod",
+            "resources": {
+                "cpuMilliCores": 42,
+                "memoryBytes": 155189248,
+                "diskUsedBytes": 7516192768,
+                "diskRequestedBytes": 21474836480,
+                "cpuLabel": "42m",
+                "memoryLabel": "148Mi",
+                "diskLabel": "7Gi / 20Gi req",
+            },
         },
         "runner": {
             "podName": "demo-steamcmd-0",
@@ -45,6 +54,24 @@ def _sample_summary() -> dict:
             "image": "auto-updater-backend:prod",
             "tunImage": "ghcr.io/sagernet/sing-box:latest",
             "tunReady": True,
+            "resources": {
+                "cpuMilliCores": 88,
+                "memoryBytes": 127926272,
+                "diskUsedBytes": 536870912,
+                "diskRequestedBytes": 10737418240,
+                "cpuLabel": "88m",
+                "memoryLabel": "122Mi",
+                "diskLabel": "512Mi / 10Gi req",
+            },
+        },
+        "resources": {
+            "cpuMilliCores": 130,
+            "memoryBytes": 283115520,
+            "diskUsedBytes": 8053063680,
+            "diskRequestedBytes": 32212254720,
+            "cpuLabel": "130m",
+            "memoryLabel": "270Mi",
+            "diskLabel": "7.5Gi / 30Gi req",
         },
         "conditions": [{"type": "Ready", "status": "True"}],
         "urls": {
@@ -161,6 +188,9 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Operations Control Center", text)
                 self.assertIn("Search instances", text)
                 self.assertIn("Running sync", text)
+                self.assertIn("CPU live", text)
+                self.assertIn("Disk used / req", text)
+                self.assertIn("Resources", text)
                 self.assertIn("/auto-updater/assets/app.css", text)
                 self.assertIn("/auto-updater/assets/dashboard.js", text)
             finally:
@@ -190,6 +220,8 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(payload["items"][0]["name"], "demo")
                 self.assertEqual(payload["items"][0]["health"], "Healthy")
                 self.assertEqual(payload["counts"]["Healthy"], 1)
+                self.assertEqual(payload["resources"]["cpuLabel"], "130m")
+                self.assertEqual(payload["resources"]["diskLabel"], "7.5Gi / 30Gi req")
             finally:
                 await client.close()
 

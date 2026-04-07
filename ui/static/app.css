@@ -172,7 +172,7 @@ h1, h2, h3, p { margin: 0; }
 .ops-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 1180px;
+  min-width: 1380px;
 }
 .ops-table th {
   text-align: left;
@@ -208,6 +208,31 @@ h1, h2, h3, p { margin: 0; }
 }
 .actions-cell {
   min-width: 320px;
+}
+.resource-stack {
+  display: grid;
+  gap: 6px;
+  min-width: 240px;
+}
+.resource-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.resource-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(23, 105, 170, 0.1);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+.resource-detail {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
 }
 .pill {
   display: inline-flex;
