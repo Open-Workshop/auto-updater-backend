@@ -144,12 +144,12 @@ def _pod_log_snapshot(settings: UISettings, name: str, target: str, tail_lines: 
         raise web.HTTPNotFound(text=f"Pod for {name}/{target} is not available yet")
     network_metrics = _pod_network_metrics(settings.namespace, pod_name)
     
-    # For runner target, merge logs from runner and steamcmd containers
+    # For runner target, merge logs from runner and tun-proxy containers
     if component == "runner":
         log_text = read_pod_log_merged(
             settings.namespace,
             pod_name,
-            containers=["runner", "steamcmd"],
+            containers=["runner", "tun-proxy"],
             tail_lines=tail_lines,
         )
     else:
