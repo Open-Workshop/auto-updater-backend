@@ -285,6 +285,18 @@ def _format_bytes(value: int | None) -> str:
     return f"{value}B"
 
 
+def _format_memory_percent(memory_bytes: int | None, node_capacity_bytes: int | None) -> str:
+    logging.debug("_format_memory_percent: memory_bytes=%r, node_capacity_bytes=%r", memory_bytes, node_capacity_bytes)
+    if memory_bytes is None:
+        return "n/a"
+    if node_capacity_bytes is None or node_capacity_bytes <= 0:
+        logging.debug("_format_memory_percent: returning bytes because node_capacity is None or <= 0")
+        return _format_bytes(memory_bytes)
+    percent = (memory_bytes / node_capacity_bytes) * 100
+    logging.debug("_format_memory_percent: returning percent=%s", f"{_format_decimal(percent, 1)}%")
+    return f"{_format_bytes(memory_bytes)} ({_format_decimal(percent, 1)}%)"
+
+
 def _format_disk_usage(used_bytes: int | None, requested_bytes: int | None) -> str:
     if used_bytes is not None and requested_bytes is not None:
         return f"{_format_bytes(used_bytes)} / {_format_bytes(requested_bytes)} req"
@@ -302,6 +314,7 @@ def _resource_usage(
     disk_used_bytes: int | None,
     disk_requested_bytes: int | None,
     node_capacity_millicores: int | None = None,
+    node_capacity_bytes: int | None = None,
 ) -> dict[str, Any]:
     return {
         "cpuMilliCores": cpu_millicores,
@@ -309,7 +322,7 @@ def _resource_usage(
         "diskUsedBytes": disk_used_bytes,
         "diskRequestedBytes": disk_requested_bytes,
         "cpuLabel": _format_cpu_percent(cpu_millicores, node_capacity_millicores),
-        "memoryLabel": _format_bytes(memory_bytes),
+        "memoryLabel": _format_memory_percent(memory_bytes, node_capacity_bytes),
         "diskLabel": _format_disk_usage(disk_used_bytes, disk_requested_bytes),
     }
 
@@ -399,6 +412,25 @@ def _get_node_cpu_capacity(node_name: str) -> int | None:
         return cpu_value
     except Exception as exc:
         logging.warning("Failed to get node CPU capacity for %s: %s", node_name, exc)
+        return None
+
+
+def _get_node_memory_capacity(node_name: str) -> int | None:
+    try:
+        node = get_kube_clients().core.read_node(node_name)
+        if node.status is None or node.status.capacity is None:
+            logging.warning("Node %s has no status or capacity", node_name)
+            return None
+        memory_raw = node.status.capacity.get("memory")
+        logging.debug("Node %s memory capacity raw: %r (type: %s)", node_name, memory_raw, type(memory_raw))
+        memory_value = _parse_bytes(memory_raw)
+        if memory_value is None:
+            logging.warning("Could not parse memory capacity for node %s, raw value: %r", node_name, memory_raw)
+        else:
+            logging.debug("Node %s memory capacity parsed: %d bytes", node_name, memory_value)
+        return memory_value
+    except Exception as exc:
+        logging.warning("Failed to get node memory capacity for %s: %s", node_name, exc)
         return None
 
 
@@ -634,12 +666,13 @@ def _instance_summary(
     parser_state = _component_state(parser_snapshot, parser_pod_name)
     runner_state = _component_state(runner_snapshot, runner_pod_name)
     
-    # Get node CPU capacity for percentage calculation
+    # Get node CPU and memory capacity for percentage calculation
     node_name = str(parser_snapshot.get("nodeName") or runner_snapshot.get("nodeName") or "")
     logging.debug("Instance %s: node_name=%r, parser_nodeName=%r, runner_nodeName=%r",
                   name, node_name, parser_snapshot.get("nodeName"), runner_snapshot.get("nodeName"))
     node_capacity_millicores = _get_node_cpu_capacity(node_name) if node_name else None
-    logging.debug("Instance %s: node_capacity_millicores=%r", name, node_capacity_millicores)
+    node_capacity_bytes = _get_node_memory_capacity(node_name) if node_name else None
+    logging.debug("Instance %s: node_capacity_millicores=%r, node_capacity_bytes=%r", name, node_capacity_millicores, node_capacity_bytes)
     
     parser_resources = _resource_usage(
         cpu_millicores=_int_value(parser_resource_snapshot.get("cpuMilliCores")),
@@ -647,6 +680,7 @@ def _instance_summary(
         disk_used_bytes=_int_value(parser_resource_snapshot.get("diskUsedBytes")),
         disk_requested_bytes=_storage_request_bytes(normalized, "parser"),
         node_capacity_millicores=node_capacity_millicores,
+        node_capacity_bytes=node_capacity_bytes,
     )
     runner_resources = _resource_usage(
         cpu_millicores=_int_value(runner_resource_snapshot.get("cpuMilliCores")),
@@ -654,6 +688,7 @@ def _instance_summary(
         disk_used_bytes=_int_value(runner_resource_snapshot.get("diskUsedBytes")),
         disk_requested_bytes=_storage_request_bytes(normalized, "runner"),
         node_capacity_millicores=node_capacity_millicores,
+        node_capacity_bytes=node_capacity_bytes,
     )
     total_resources = _resource_usage(
         cpu_millicores=_sum_values(
@@ -669,6 +704,7 @@ def _instance_summary(
             [parser_resources["diskRequestedBytes"], runner_resources["diskRequestedBytes"]]
         ),
         node_capacity_millicores=node_capacity_millicores,
+        node_capacity_bytes=node_capacity_bytes,
     )
     phase = str(status.get("phase") or "Unknown")
     last_sync_result = str(status.get("lastSyncResult") or "").strip().lower()
