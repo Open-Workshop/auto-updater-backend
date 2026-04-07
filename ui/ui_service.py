@@ -171,6 +171,9 @@ def _pod_snapshot(pod: Any | None) -> dict[str, Any]:
     container_ready = {status.name: bool(status.ready) for status in container_statuses}
     images = {container.name: container.image for container in list(getattr(pod.spec, "containers", None) or [])}
     conditions = {condition.type: condition.status for condition in list(getattr(pod.status, "conditions", None) or [])}
+    # Try both node_name (snake_case) and nodeName (camelCase) for compatibility
+    node_name = getattr(pod.spec, "node_name", None) or getattr(pod.spec, "nodeName", None) or ""
+    logging.debug("_pod_snapshot: pod=%s, nodeName=%r", pod.metadata.name, node_name)
     return {
         "podName": str(pod.metadata.name or ""),
         "phase": str(getattr(pod.status, "phase", "") or "Unknown"),
@@ -178,7 +181,7 @@ def _pod_snapshot(pod: Any | None) -> dict[str, Any]:
         "deleting": getattr(pod.metadata, "deletion_timestamp", None) is not None,
         "images": images,
         "containerReady": container_ready,
-        "nodeName": str(getattr(pod.spec, "node_name", "") or ""),
+        "nodeName": str(node_name),
     }
 
 
