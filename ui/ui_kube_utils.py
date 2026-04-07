@@ -76,6 +76,55 @@ def _read_node_stats_summary(node_name: str) -> dict[str, Any]:
     return dict(raw or {})
 
 
+def _read_cadvisor_metrics(node_name: str, pod_uid: str) -> dict[str, int | None]:
+    """Read cAdvisor metrics for a specific pod via kubelet proxy.
+    
+    cAdvisor provides more frequent updates than stats/summary.
+    """
+    proxy = getattr(get_kube_clients().core, "connect_get_node_proxy_with_path", None)
+    if proxy is None:
+        return {}
+    try:
+        # cAdvisor API endpoint for pod stats
+        raw = proxy(node_name, f"metrics/cadvisor")
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8", errors="ignore")
+        if isinstance(raw, str):
+            data = json.loads(raw)
+            
+            # Find the pod by UID
+            for pod_stat in list(data.get("/") or []):
+                pod_info = dict(pod_stat.get("pod") or {})
+                if str(pod_info.get("uid") or "") != pod_uid:
+                    continue
+                
+                # Sum network stats from all containers
+                total_rx = 0
+                total_tx = 0
+                for container in list(pod_stat.get("containers") or []):
+                    for interface in list(container.get("network") or []):
+                        rx = _int_value(interface.get("rx_bytes"))
+                        tx = _int_value(interface.get("tx_bytes"))
+                        if rx is not None:
+                            total_rx += rx
+                        if tx is not None:
+                            total_tx += tx
+                
+                if total_rx > 0 or total_tx > 0:
+                    logging.debug("_read_cadvisor_metrics: pod %s: rxBytes=%d, txBytes=%d", pod_uid, total_rx, total_tx)
+                    return {
+                        "rxBytes": total_rx,
+                        "txBytes": total_tx,
+                    }
+            
+            logging.warning("_read_cadvisor_metrics: pod %s not found in cAdvisor metrics", pod_uid)
+            return {}
+    except Exception as exc:
+        logging.warning("_read_cadvisor_metrics: exception=%s", exc)
+        return {}
+    return {}
+
+
 def _get_node_cpu_capacity(node_name: str) -> int | None:
     """Get CPU capacity of a node in millicores."""
     try:
@@ -209,19 +258,30 @@ def _pod_usage_metrics(namespace: str, pod_names: set[str]) -> dict[str, dict[st
 
 
 def _pod_network_metrics(namespace: str, pod_name: str) -> dict[str, int | None]:
-    """Get network metrics for a specific pod from kubelet stats/summary."""
+    """Get network metrics for a specific pod using cAdvisor (more frequent updates)."""
     logging.debug("_pod_network_metrics: namespace=%s, pod_name=%s", namespace, pod_name)
     if not pod_name:
         return {}
     try:
-        # Get the pod to find its node
+        # Get the pod to find its node and UID
         pod = get_kube_clients().core.read_namespaced_pod(pod_name, namespace)
         node_name = pod.spec.node_name
+        pod_uid = str(pod.metadata.uid or "")
+        
         if not node_name:
             logging.warning("_pod_network_metrics: pod %s has no node_name", pod_name)
             return {}
+        if not pod_uid:
+            logging.warning("_pod_network_metrics: pod %s has no uid", pod_name)
+            return {}
         
-        # Get stats summary from kubelet proxy
+        # Try cAdvisor first (more frequent updates)
+        cadvisor_metrics = _read_cadvisor_metrics(node_name, pod_uid)
+        if cadvisor_metrics:
+            return cadvisor_metrics
+        
+        # Fallback to stats/summary
+        logging.debug("_pod_network_metrics: cAdvisor failed, trying stats/summary")
         summary = _read_node_stats_summary(node_name)
         logging.debug("_pod_network_metrics: summary keys=%r", list(summary.keys()) if summary else [])
         
@@ -233,17 +293,16 @@ def _pod_network_metrics(namespace: str, pod_name: str) -> dict[str, int | None]
             if str(pod_ref.get("name") or "") != pod_name:
                 continue
             
-            logging.debug("_pod_network_metrics: found pod %s, pod_data keys=%r", pod_name, list(pod_data.keys()))
+            logging.debug("_pod_network_metrics: found pod %s in stats/summary", pod_name)
             
             # Network is a single object, not a list
             network = dict(pod_data.get("network") or {})
-            logging.debug("_pod_network_metrics: network keys=%r", list(network.keys()))
             
             rx_value = _int_value(network.get("rxBytes"))
             tx_value = _int_value(network.get("txBytes"))
             
             if rx_value is not None or tx_value is not None:
-                logging.debug("_pod_network_metrics: pod %s: rxBytes=%d, txBytes=%d", pod_name, rx_value or 0, tx_value or 0)
+                logging.debug("_pod_network_metrics: pod %s (stats/summary): rxBytes=%d, txBytes=%d", pod_name, rx_value or 0, tx_value or 0)
                 return {
                     "rxBytes": rx_value,
                     "txBytes": tx_value,
