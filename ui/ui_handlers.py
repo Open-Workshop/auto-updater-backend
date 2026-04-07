@@ -136,7 +136,6 @@ def _latest_pod_name(namespace: str, name: str, component: str) -> str:
 def _pod_log_snapshot(settings: UISettings, name: str, target: str, tail_lines: int) -> dict[str, Any]:
     """Get pod log snapshot."""
     from ui.ui_kube_utils import _pod_network_metrics
-    from kube.kube_client import read_pod_log_merged
     
     component, container = _component_log_target(target)
     pod_name = _latest_pod_name(settings.namespace, name, component)
@@ -144,21 +143,14 @@ def _pod_log_snapshot(settings: UISettings, name: str, target: str, tail_lines: 
         raise web.HTTPNotFound(text=f"Pod for {name}/{target} is not available yet")
     network_metrics = _pod_network_metrics(settings.namespace, pod_name)
     
-    # For runner target, merge logs from runner and tun-proxy containers
-    if component == "runner":
-        log_text = read_pod_log_merged(
-            settings.namespace,
-            pod_name,
-            containers=["runner", "tun-proxy"],
-            tail_lines=tail_lines,
-        )
-    else:
-        log_text = read_pod_log(
-            settings.namespace,
-            pod_name,
-            container=container,
-            tail_lines=tail_lines,
-        )
+    # Read logs from the specified container only
+    # Note: steamcmd logs are already in the runner container (same container, separate process)
+    log_text = read_pod_log(
+        settings.namespace,
+        pod_name,
+        container=container,
+        tail_lines=tail_lines,
+    )
     
     return {
         "instance": name,

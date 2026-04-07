@@ -195,6 +195,11 @@ def download_steam_mod(
     output = result.stdout or ""
     output_tail = _strip_ansi(output[-4000:])
     parsed_error = _extract_steamcmd_error(output)
+    
+    # Log SteamCMD output for both success and failure cases
+    if output_tail:
+        logging.info("SteamCMD output for workshop %s:\n%s", workshop_id, output_tail)
+    
     if result.returncode != 0:
         diagnostics = _collect_steam_diagnostics(workshop_id)
         reason = parsed_error or f"steamcmd exit code {result.returncode}"
@@ -206,8 +211,6 @@ def download_steam_mod(
         )
         if diagnostics:
             logging.error("SteamCMD diagnostics for workshop %s: %s", workshop_id, diagnostics)
-        if output_tail:
-            logging.error("SteamCMD output tail for %s:\n%s", workshop_id, output_tail)
         if retryable:
             _clear_steam_workshop_cache(steam_root, app_id, workshop_id, reason)
         return SteamDownloadResult(
