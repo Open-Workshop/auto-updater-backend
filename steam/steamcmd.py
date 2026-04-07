@@ -191,6 +191,7 @@ def download_steam_mod(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        timeout=3600,  # 1 hour timeout for workshop downloads
     )
     output = result.stdout or ""
     output_tail = _strip_ansi(output[-4000:])
