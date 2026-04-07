@@ -270,12 +270,12 @@ def _format_bytes(value: int | None) -> str:
     if value < 1024:
         return f"{value}B"
     units = [
-        ("Ei", 2**60),
-        ("Pi", 2**50),
-        ("Ti", 2**40),
-        ("Gi", 2**30),
-        ("Mi", 2**20),
-        ("Ki", 2**10),
+        ("EB", 2**60),
+        ("PB", 2**50),
+        ("TB", 2**40),
+        ("GB", 2**30),
+        ("MB", 2**20),
+        ("KB", 2**10),
     ]
     for suffix, factor in units:
         if value >= factor:
