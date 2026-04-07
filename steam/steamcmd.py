@@ -1,5 +1,6 @@
 import logging
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -142,6 +143,22 @@ def _collect_steam_diagnostics(workshop_id: int) -> str | None:
     return " | ".join(details)
 
 
+def _remove_cache_path(path: Path, reason: str) -> bool:
+    try:
+        if not path.exists():
+            return False
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        logging.warning("Failed to remove Steam cache path %s (%s): %s", path, reason, exc)
+        return False
+
+
 def download_steam_mod(
     steamcmd_path: Path,
     steam_root: Path,
@@ -181,6 +198,7 @@ def download_steam_mod(
     if result.returncode != 0:
         diagnostics = _collect_steam_diagnostics(workshop_id)
         reason = parsed_error or f"steamcmd exit code {result.returncode}"
+        retryable = _is_retryable_reason(reason, result.returncode)
         logging.error(
             "SteamCMD failed for workshop %s: %s",
             workshop_id,
@@ -190,20 +208,25 @@ def download_steam_mod(
             logging.error("SteamCMD diagnostics for workshop %s: %s", workshop_id, diagnostics)
         if output_tail:
             logging.error("SteamCMD output tail for %s:\n%s", workshop_id, output_tail)
+        if retryable:
+            _clear_steam_workshop_cache(steam_root, app_id, workshop_id, reason)
         return SteamDownloadResult(
             False,
             reason,
-            retryable=_is_retryable_reason(reason, result.returncode),
+            retryable=retryable,
             diagnostics=diagnostics,
         )
     if parsed_error:
         diagnostics = _collect_steam_diagnostics(workshop_id)
+        retryable = _is_retryable_reason(parsed_error, result.returncode)
         if diagnostics:
             logging.error("SteamCMD diagnostics for workshop %s: %s", workshop_id, diagnostics)
+        if retryable:
+            _clear_steam_workshop_cache(steam_root, app_id, workshop_id, parsed_error)
         return SteamDownloadResult(
             False,
             parsed_error,
-            retryable=_is_retryable_reason(parsed_error, result.returncode),
+            retryable=retryable,
             diagnostics=diagnostics,
         )
     return SteamDownloadResult(True)
@@ -218,6 +241,32 @@ def _workshop_path(steam_root: Path, app_id: int, workshop_id: int) -> Path:
         / str(app_id)
         / str(workshop_id)
     )
+
+
+def _clear_steam_workshop_cache(
+    steam_root: Path,
+    app_id: int,
+    workshop_id: int,
+    reason: str,
+) -> None:
+    workshop_root = steam_root / "steamapps" / "workshop"
+    targets = (
+        workshop_root / f"appworkshop_{app_id}.acf",
+        workshop_root / "downloads" / str(app_id),
+        workshop_root / "temp" / str(app_id),
+        _workshop_path(steam_root, app_id, workshop_id),
+    )
+    removed: list[str] = []
+    for target in targets:
+        if _remove_cache_path(target, reason):
+            removed.append(str(target))
+    if removed:
+        logging.info(
+            "Steam cache cleanup for workshop %s (%s): removed=%s",
+            workshop_id,
+            reason,
+            ", ".join(removed),
+        )
 
 
 def _download_remote_archive(

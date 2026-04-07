@@ -71,6 +71,32 @@
     };
   }
 
+  function parseTimestampMs(timestamp) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})(?:,(\d{1,3}))?$/.exec(timestamp || "");
+    if (!match) {
+      return null;
+    }
+    const [, year, month, day, hour, minute, second, millis = "0"] = match;
+    return Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+      Number(millis.padEnd(3, "0")),
+    );
+  }
+
+  function formatRangeDuration(firstTimestamp, lastTimestamp) {
+    const firstMs = parseTimestampMs(firstTimestamp);
+    const lastMs = parseTimestampMs(lastTimestamp);
+    if (firstMs == null || lastMs == null || lastMs <= firstMs) {
+      return "";
+    }
+    return `${Math.round((lastMs - firstMs) / 1000)}s`;
+  }
+
   function canonicalLogLine(line) {
     const { body } = splitTimestamp(line);
     return (body || line)
@@ -140,10 +166,11 @@
 
   function renderLogGroup(group) {
     const countLabel = `${group.lines.length} repeated lines`;
+    const durationText = formatRangeDuration(group.firstTimestamp, group.lastTimestamp);
     const rangeText = group.firstTimestamp && group.lastTimestamp
       ? group.firstTimestamp === group.lastTimestamp
         ? group.firstTimestamp
-        : `${group.firstTimestamp} -> ${group.lastTimestamp}`
+        : `${group.firstTimestamp} -> ${group.lastTimestamp}${durationText ? ` (${durationText})` : ""}`
       : "";
     const summaryLine = group.summaryLine || "(blank line)";
     return `<details class="log-group"><summary class="log-group-summary"><span class="log-group-count">${escapeHtml(countLabel)}</span><span class="log-group-message">${renderLogLine(summaryLine)}</span>${rangeText ? `<span class="log-group-range">${escapeHtml(rangeText)}</span>` : ""}</summary><div class="log-group-body">${group.lines.map((line) => renderLogEntry(line)).join("")}</div></details>`;

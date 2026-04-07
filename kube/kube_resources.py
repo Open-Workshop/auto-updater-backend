@@ -135,7 +135,7 @@ def build_parser_env(instance: dict[str, Any]) -> list[dict[str, Any]]:
         _env("OW_STEAM_HTTP_RETRIES", _sync_value(spec, "steamHttpRetries")),
         _env("OW_STEAM_HTTP_BACKOFF", _sync_value(spec, "steamHttpBackoff")),
         _env("OW_STEAM_REQUEST_DELAY", _sync_value(spec, "steamRequestDelay")),
-        _env("OW_STEAM_PROXY_SCOPE", "all" if parser_proxy_secret else "none"),
+        _env("OW_STEAM_PROXY_SCOPE", "mod_pages" if parser_proxy_secret else "none"),
         _env("OW_STEAM_MAX_PAGES", _sync_value(spec, "steamMaxPages")),
         _env("OW_STEAM_START_PAGE", _sync_value(spec, "steamStartPage")),
         _env("OW_STEAM_MAX_ITEMS", _sync_value(spec, "steamMaxItems")),
