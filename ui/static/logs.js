@@ -44,6 +44,8 @@
   let lastRxBytes = null;
   let lastTxBytes = null;
   let lastMetricsTime = null;
+  let lastRxSpeed = null;
+  let lastTxSpeed = null;
 
   function escapeHtml(value) {
     return String(value ?? "")
@@ -274,9 +276,21 @@
       const currentTime = Date.now();
       const rxSpeed = calculateNetworkSpeed(payload.rxBytes, lastRxBytes, currentTime, lastMetricsTime);
       const txSpeed = calculateNetworkSpeed(payload.txBytes, lastTxBytes, currentTime, lastMetricsTime);
+      
+      // Update last known speed if we got a new valid value
+      if (rxSpeed !== null) {
+        lastRxSpeed = rxSpeed;
+      }
+      if (txSpeed !== null) {
+        lastTxSpeed = txSpeed;
+      }
+      
       if (networkRx) {
         if (rxSpeed !== null) {
           networkRx.textContent = formatBytesToBits(rxSpeed);
+        } else if (lastRxSpeed !== null) {
+          // Metrics not updated yet, show last known speed
+          networkRx.textContent = formatBytesToBits(lastRxSpeed);
         } else if (payload.rxBytes !== null) {
           // First request: show total bytes instead of speed
           networkRx.textContent = `${(payload.rxBytes / 1024 / 1024).toFixed(2)} MB`;
@@ -287,6 +301,9 @@
       if (networkTx) {
         if (txSpeed !== null) {
           networkTx.textContent = formatBytesToBits(txSpeed);
+        } else if (lastTxSpeed !== null) {
+          // Metrics not updated yet, show last known speed
+          networkTx.textContent = formatBytesToBits(lastTxSpeed);
         } else if (payload.txBytes !== null) {
           // First request: show total bytes instead of speed
           networkTx.textContent = `${(payload.txBytes / 1024 / 1024).toFixed(2)} MB`;
