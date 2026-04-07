@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import ast
 import base64
 import hmac
+import json
 import logging
+import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 from urllib.parse import quote, urlencode
 
 import requests
 from aiohttp import web
+from kubernetes.client.rest import ApiException
 
 from kube.kube_client import (
     delete_instance,
@@ -49,6 +54,27 @@ from ui.ui_forms import (
     _validate_runner_proxy,
 )
 from ui.ui_pages import _dashboard, _dashboard_counts, _detail_page, _new_instance_page
+
+
+_QUANTITY_RE = re.compile(r"^([+-]?(?:\d+(?:\.\d+)?|\.\d+))(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|k|m|u|n)?$")
+_QUANTITY_FACTORS: dict[str, Decimal] = {
+    "": Decimal("1"),
+    "n": Decimal("1e-9"),
+    "u": Decimal("1e-6"),
+    "m": Decimal("1e-3"),
+    "k": Decimal("1e3"),
+    "M": Decimal("1e6"),
+    "G": Decimal("1e9"),
+    "T": Decimal("1e12"),
+    "P": Decimal("1e15"),
+    "E": Decimal("1e18"),
+    "Ki": Decimal(2**10),
+    "Mi": Decimal(2**20),
+    "Gi": Decimal(2**30),
+    "Ti": Decimal(2**40),
+    "Pi": Decimal(2**50),
+    "Ei": Decimal(2**60),
+}
 
 
 def _flash_redirect(settings: UISettings, path: str, message: str, kind: str = "info") -> web.HTTPFound:
@@ -139,6 +165,7 @@ def _pod_snapshot(pod: Any | None) -> dict[str, Any]:
             "deleting": False,
             "images": {},
             "containerReady": {},
+            "nodeName": "",
         }
     container_statuses = list(getattr(pod.status, "container_statuses", None) or [])
     container_ready = {status.name: bool(status.ready) for status in container_statuses}
@@ -151,7 +178,291 @@ def _pod_snapshot(pod: Any | None) -> dict[str, Any]:
         "deleting": getattr(pod.metadata, "deletion_timestamp", None) is not None,
         "images": images,
         "containerReady": container_ready,
+        "nodeName": str(getattr(pod.spec, "node_name", "") or ""),
     }
+
+
+def _parse_quantity_decimal(value: Any) -> Decimal | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = _QUANTITY_RE.fullmatch(text)
+    if not match:
+        return None
+    amount_text, suffix = match.groups()
+    factor = _QUANTITY_FACTORS.get(suffix or "")
+    if factor is None:
+        return None
+    try:
+        return Decimal(amount_text) * factor
+    except InvalidOperation:
+        return None
+
+
+def _parse_cpu_millicores(value: Any) -> int | None:
+    parsed = _parse_quantity_decimal(value)
+    if parsed is None:
+        return None
+    return int((parsed * Decimal("1000")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _parse_bytes(value: Any) -> int | None:
+    parsed = _parse_quantity_decimal(value)
+    if parsed is None:
+        return None
+    return int(parsed.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _int_value(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    try:
+        return int(str(value).strip())
+    except ValueError:
+        return None
+
+
+def _sum_values(values: list[int | None]) -> int | None:
+    defined = [value for value in values if value is not None]
+    if not defined:
+        return None
+    return sum(defined)
+
+
+def _format_decimal(value: float, digits: int) -> str:
+    return f"{value:.{digits}f}".rstrip("0").rstrip(".")
+
+
+def _format_cpu_millicores(value: int | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value}m"
+
+
+def _format_cpu_percent(cpu_millicores: int | None, node_capacity_millicores: int | None) -> str:
+    logging.debug("_format_cpu_percent: cpu_millicores=%r, node_capacity_millicores=%r", cpu_millicores, node_capacity_millicores)
+    if cpu_millicores is None:
+        return "n/a"
+    if node_capacity_millicores is None or node_capacity_millicores <= 0:
+        logging.debug("_format_cpu_percent: returning millicores because node_capacity is None or <= 0")
+        return f"{cpu_millicores}m"
+    percent = (cpu_millicores / node_capacity_millicores) * 100
+    logging.debug("_format_cpu_percent: returning percent=%s", f"{_format_decimal(percent, 1)}%")
+    return f"{_format_decimal(percent, 1)}%"
+
+
+def _format_bytes(value: int | None) -> str:
+    if value is None:
+        return "n/a"
+    if value < 1024:
+        return f"{value}B"
+    units = [
+        ("Ei", 2**60),
+        ("Pi", 2**50),
+        ("Ti", 2**40),
+        ("Gi", 2**30),
+        ("Mi", 2**20),
+        ("Ki", 2**10),
+    ]
+    for suffix, factor in units:
+        if value >= factor:
+            amount = value / factor
+            digits = 0 if amount >= 100 else 1
+            return f"{_format_decimal(amount, digits)}{suffix}"
+    return f"{value}B"
+
+
+def _format_disk_usage(used_bytes: int | None, requested_bytes: int | None) -> str:
+    if used_bytes is not None and requested_bytes is not None:
+        return f"{_format_bytes(used_bytes)} / {_format_bytes(requested_bytes)} req"
+    if used_bytes is not None:
+        return f"{_format_bytes(used_bytes)} used"
+    if requested_bytes is not None:
+        return f"{_format_bytes(requested_bytes)} req"
+    return "n/a"
+
+
+def _resource_usage(
+    *,
+    cpu_millicores: int | None,
+    memory_bytes: int | None,
+    disk_used_bytes: int | None,
+    disk_requested_bytes: int | None,
+    node_capacity_millicores: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "cpuMilliCores": cpu_millicores,
+        "memoryBytes": memory_bytes,
+        "diskUsedBytes": disk_used_bytes,
+        "diskRequestedBytes": disk_requested_bytes,
+        "cpuLabel": _format_cpu_percent(cpu_millicores, node_capacity_millicores),
+        "memoryLabel": _format_bytes(memory_bytes),
+        "diskLabel": _format_disk_usage(disk_used_bytes, disk_requested_bytes),
+    }
+
+
+def _storage_request_bytes(instance: dict[str, Any], component: str) -> int | None:
+    spec = dict(instance.get("spec") or {})
+    storage = dict(spec.get("storage") or {})
+    component_storage = dict(storage.get(component) or {})
+    return _parse_bytes(component_storage.get("size"))
+
+
+def _pod_usage_metrics(namespace: str, pod_names: set[str]) -> dict[str, dict[str, int | None]]:
+    if not pod_names:
+        return {}
+    try:
+        response = get_kube_clients().custom.list_namespaced_custom_object(
+            "metrics.k8s.io",
+            "v1beta1",
+            namespace,
+            "pods",
+        )
+    except ApiException as exc:
+        if exc.status in {403, 404, 503}:
+            return {}
+        raise
+    metrics: dict[str, dict[str, int | None]] = {}
+    for item in list(response.get("items") or []):
+        metadata = dict(item.get("metadata") or {})
+        pod_name = str(metadata.get("name") or "")
+        if pod_name not in pod_names:
+            continue
+        total_cpu = 0
+        total_memory = 0
+        cpu_seen = False
+        memory_seen = False
+        for container in list(item.get("containers") or []):
+            usage = dict(container.get("usage") or {})
+            cpu_value = _parse_cpu_millicores(usage.get("cpu"))
+            memory_value = _parse_bytes(usage.get("memory"))
+            if cpu_value is not None:
+                total_cpu += cpu_value
+                cpu_seen = True
+            if memory_value is not None:
+                total_memory += memory_value
+                memory_seen = True
+        metrics[pod_name] = {
+            "cpuMilliCores": total_cpu if cpu_seen else None,
+            "memoryBytes": total_memory if memory_seen else None,
+        }
+    return metrics
+
+
+def _read_node_stats_summary(node_name: str) -> dict[str, Any]:
+    proxy = getattr(get_kube_clients().core, "connect_get_node_proxy_with_path", None)
+    if proxy is None:
+        return {}
+    raw = proxy(node_name, "stats/summary")
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", errors="ignore")
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = ast.literal_eval(raw)
+            if isinstance(parsed, dict):
+                return parsed
+            return {}
+    return dict(raw or {})
+
+
+def _get_node_cpu_capacity(node_name: str) -> int | None:
+    try:
+        node = get_kube_clients().core.read_node(node_name)
+        if node.status is None or node.status.capacity is None:
+            logging.warning("Node %s has no status or capacity", node_name)
+            return None
+        cpu_raw = node.status.capacity.get("cpu")
+        logging.debug("Node %s CPU capacity raw: %r (type: %s)", node_name, cpu_raw, type(cpu_raw))
+        cpu_value = _parse_cpu_millicores(cpu_raw)
+        if cpu_value is None:
+            logging.warning("Could not parse CPU capacity for node %s, raw value: %r", node_name, cpu_raw)
+        else:
+            logging.debug("Node %s CPU capacity parsed: %d millicores", node_name, cpu_value)
+        return cpu_value
+    except Exception as exc:
+        logging.warning("Failed to get node CPU capacity for %s: %s", node_name, exc)
+        return None
+
+
+def _pod_disk_usage(
+    namespace: str,
+    component_snapshots: dict[str, dict[str, Any]],
+) -> dict[str, int | None]:
+    pods_by_node: dict[str, set[str]] = {}
+    for components in component_snapshots.values():
+        for component in ("parser", "runner"):
+            snapshot = dict(components.get(component) or {})
+            pod_name = str(snapshot.get("podName") or "")
+            node_name = str(snapshot.get("nodeName") or "")
+            if pod_name and node_name:
+                pods_by_node.setdefault(node_name, set()).add(pod_name)
+    disk_usage: dict[str, int | None] = {}
+    for node_name, pod_names in pods_by_node.items():
+        try:
+            summary = _read_node_stats_summary(node_name)
+        except ApiException as exc:
+            if exc.status in {403, 404, 503}:
+                continue
+            raise
+        except json.JSONDecodeError:
+            logging.warning("Failed to decode node stats summary for %s", node_name)
+            continue
+        for pod in list(summary.get("pods") or []):
+            pod_ref = dict(pod.get("podRef") or {})
+            if str(pod_ref.get("namespace") or "") != namespace:
+                continue
+            pod_name = str(pod_ref.get("name") or "")
+            if pod_name not in pod_names:
+                continue
+            total_used = 0
+            found_usage = False
+            for volume in list(pod.get("volume") or []):
+                pvc_ref = dict(volume.get("pvcRef") or {})
+                if not pvc_ref:
+                    continue
+                used_bytes = _int_value(volume.get("usedBytes"))
+                if used_bytes is None:
+                    continue
+                total_used += used_bytes
+                found_usage = True
+            if found_usage:
+                disk_usage[pod_name] = total_used
+    return disk_usage
+
+
+def _component_resource_metrics_for_names(
+    namespace: str,
+    component_snapshots: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, dict[str, int | None]]]:
+    pod_names = {
+        str(snapshot.get("podName") or "")
+        for components in component_snapshots.values()
+        for snapshot in components.values()
+        if str(snapshot.get("podName") or "")
+    }
+    usage_metrics = _pod_usage_metrics(namespace, pod_names)
+    disk_usage = _pod_disk_usage(namespace, component_snapshots)
+    resources: dict[str, dict[str, dict[str, int | None]]] = {}
+    for name, components in component_snapshots.items():
+        resources[name] = {}
+        for component in ("parser", "runner"):
+            snapshot = dict(components.get(component) or {})
+            pod_name = str(snapshot.get("podName") or "")
+            usage = dict(usage_metrics.get(pod_name) or {})
+            resources[name][component] = {
+                "cpuMilliCores": _int_value(usage.get("cpuMilliCores")),
+                "memoryBytes": _int_value(usage.get("memoryBytes")),
+                "diskUsedBytes": _int_value(disk_usage.get(pod_name)),
+            }
+    return resources
 
 
 def _component_state(snapshot: dict[str, Any], fallback_pod_name: str = "") -> dict[str, str]:
@@ -297,17 +608,58 @@ def _instance_summary(
     settings: UISettings,
     instance: dict[str, Any],
     component_snapshots: dict[str, Any] | None = None,
+    component_resources: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_instance(instance)
     status = dict(normalized.get("status") or {})
     name = instance_name(normalized)
     component_snapshots = component_snapshots or {}
+    component_resources = component_resources or {}
     parser_snapshot = dict(component_snapshots.get("parser") or {})
     runner_snapshot = dict(component_snapshots.get("runner") or {})
+    parser_resource_snapshot = dict(component_resources.get("parser") or {})
+    runner_resource_snapshot = dict(component_resources.get("runner") or {})
     parser_pod_name = str(status.get("parserPod") or "") or str(parser_snapshot.get("podName") or "")
     runner_pod_name = str(status.get("runnerPod") or "") or str(runner_snapshot.get("podName") or "")
     parser_state = _component_state(parser_snapshot, parser_pod_name)
     runner_state = _component_state(runner_snapshot, runner_pod_name)
+    
+    # Get node CPU capacity for percentage calculation
+    node_name = str(parser_snapshot.get("nodeName") or runner_snapshot.get("nodeName") or "")
+    logging.debug("Instance %s: node_name=%r, parser_nodeName=%r, runner_nodeName=%r",
+                  name, node_name, parser_snapshot.get("nodeName"), runner_snapshot.get("nodeName"))
+    node_capacity_millicores = _get_node_cpu_capacity(node_name) if node_name else None
+    logging.debug("Instance %s: node_capacity_millicores=%r", name, node_capacity_millicores)
+    
+    parser_resources = _resource_usage(
+        cpu_millicores=_int_value(parser_resource_snapshot.get("cpuMilliCores")),
+        memory_bytes=_int_value(parser_resource_snapshot.get("memoryBytes")),
+        disk_used_bytes=_int_value(parser_resource_snapshot.get("diskUsedBytes")),
+        disk_requested_bytes=_storage_request_bytes(normalized, "parser"),
+        node_capacity_millicores=node_capacity_millicores,
+    )
+    runner_resources = _resource_usage(
+        cpu_millicores=_int_value(runner_resource_snapshot.get("cpuMilliCores")),
+        memory_bytes=_int_value(runner_resource_snapshot.get("memoryBytes")),
+        disk_used_bytes=_int_value(runner_resource_snapshot.get("diskUsedBytes")),
+        disk_requested_bytes=_storage_request_bytes(normalized, "runner"),
+        node_capacity_millicores=node_capacity_millicores,
+    )
+    total_resources = _resource_usage(
+        cpu_millicores=_sum_values(
+            [parser_resources["cpuMilliCores"], runner_resources["cpuMilliCores"]]
+        ),
+        memory_bytes=_sum_values(
+            [parser_resources["memoryBytes"], runner_resources["memoryBytes"]]
+        ),
+        disk_used_bytes=_sum_values(
+            [parser_resources["diskUsedBytes"], runner_resources["diskUsedBytes"]]
+        ),
+        disk_requested_bytes=_sum_values(
+            [parser_resources["diskRequestedBytes"], runner_resources["diskRequestedBytes"]]
+        ),
+        node_capacity_millicores=node_capacity_millicores,
+    )
     phase = str(status.get("phase") or "Unknown")
     last_sync_result = str(status.get("lastSyncResult") or "").strip().lower()
     enabled = bool(normalized["spec"].get("enabled", True))
@@ -342,6 +694,7 @@ def _instance_summary(
             "tone": parser_state["tone"],
             "ready": bool(parser_snapshot.get("ready")),
             "image": str(parser_snapshot.get("images", {}).get("parser") or ""),
+            "resources": parser_resources,
         },
         "runner": {
             "podName": runner_pod_name,
@@ -351,7 +704,9 @@ def _instance_summary(
             "image": str(runner_snapshot.get("images", {}).get("runner") or ""),
             "tunImage": str(runner_snapshot.get("images", {}).get("tun-proxy") or ""),
             "tunReady": bool(runner_snapshot.get("containerReady", {}).get("tun-proxy", False)),
+            "resources": runner_resources,
         },
+        "resources": total_resources,
         "conditions": list(status.get("conditions") or []),
         "urls": _instance_urls(settings, name),
     }
@@ -361,8 +716,14 @@ def _load_instance_summaries(settings: UISettings) -> list[dict[str, Any]]:
     instances = list_instances(settings.namespace)
     names = {instance_name(item) for item in instances if instance_name(item)}
     snapshots = _component_snapshots_for_names(settings.namespace, names)
+    resources = _component_resource_metrics_for_names(settings.namespace, snapshots)
     summaries = [
-        _instance_summary(settings, item, snapshots.get(instance_name(item), {}))
+        _instance_summary(
+            settings,
+            item,
+            snapshots.get(instance_name(item), {}),
+            resources.get(instance_name(item), {}),
+        )
         for item in instances
     ]
     summaries.sort(key=lambda item: item["name"].lower())
@@ -372,7 +733,45 @@ def _load_instance_summaries(settings: UISettings) -> list[dict[str, Any]]:
 def _load_instance_summary(settings: UISettings, name: str) -> dict[str, Any]:
     instance = get_instance(settings.namespace, name)
     snapshots = _component_snapshots_for_names(settings.namespace, {name})
-    return _instance_summary(settings, instance, snapshots.get(name, {}))
+    resources = _component_resource_metrics_for_names(settings.namespace, snapshots)
+    return _instance_summary(settings, instance, snapshots.get(name, {}), resources.get(name, {}))
+
+
+def _get_cluster_cpu_capacity() -> int | None:
+    try:
+        nodes = get_kube_clients().core.list_node().items or []
+        total_capacity = 0
+        for node in nodes:
+            capacity = dict(node.status or {}).get("capacity") or {}
+            cpu_value = _parse_cpu_millicores(capacity.get("cpu"))
+            if cpu_value is not None:
+                total_capacity += cpu_value
+        return total_capacity if total_capacity > 0 else None
+    except Exception:
+        return None
+
+
+def _dashboard_resource_totals(items: list[dict[str, Any]]) -> dict[str, Any]:
+    cpu_millicores = _sum_values(
+        [_int_value(dict(item.get("resources") or {}).get("cpuMilliCores")) for item in items]
+    )
+    memory_bytes = _sum_values(
+        [_int_value(dict(item.get("resources") or {}).get("memoryBytes")) for item in items]
+    )
+    disk_used_bytes = _sum_values(
+        [_int_value(dict(item.get("resources") or {}).get("diskUsedBytes")) for item in items]
+    )
+    disk_requested_bytes = _sum_values(
+        [_int_value(dict(item.get("resources") or {}).get("diskRequestedBytes")) for item in items]
+    )
+    cluster_capacity_millicores = _get_cluster_cpu_capacity()
+    return _resource_usage(
+        cpu_millicores=cpu_millicores,
+        memory_bytes=memory_bytes,
+        disk_used_bytes=disk_used_bytes,
+        disk_requested_bytes=disk_requested_bytes,
+        node_capacity_millicores=cluster_capacity_millicores,
+    )
 
 
 def _latest_pod_name(namespace: str, name: str, component: str) -> str:
@@ -484,13 +883,23 @@ async def dashboard(request: web.Request) -> web.Response:
     settings: UISettings = request.app["settings"]
     flash, flash_kind = _flash_from_request(request)
     items = _load_instance_summaries(settings)
-    return web.Response(text=_dashboard(settings, items, flash, flash_kind), content_type="text/html")
+    resource_totals = _dashboard_resource_totals(items)
+    return web.Response(
+        text=_dashboard(settings, items, flash, flash_kind, resource_totals),
+        content_type="text/html",
+    )
 
 
 async def instances_api(request: web.Request) -> web.Response:
     settings: UISettings = request.app["settings"]
     items = _load_instance_summaries(settings)
-    return web.json_response({"items": items, "counts": _dashboard_counts(items)})
+    return web.json_response(
+        {
+            "items": items,
+            "counts": _dashboard_counts(items),
+            "resources": _dashboard_resource_totals(items),
+        }
+    )
 
 
 async def instance_summary_api(request: web.Request) -> web.Response:
