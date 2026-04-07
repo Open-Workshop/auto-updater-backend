@@ -223,6 +223,7 @@ def _pod_network_metrics(namespace: str, pod_name: str) -> dict[str, int | None]
         
         # Get stats summary from kubelet proxy
         summary = _read_node_stats_summary(node_name)
+        logging.debug("_pod_network_metrics: summary keys=%r", list(summary.keys()) if summary else [])
         
         # Find the pod in the summary
         for pod_data in list(summary.get("pods") or []):
@@ -232,26 +233,20 @@ def _pod_network_metrics(namespace: str, pod_name: str) -> dict[str, int | None]
             if str(pod_ref.get("name") or "") != pod_name:
                 continue
             
-            # Sum network metrics from all containers
-            total_rx_bytes = 0
-            total_tx_bytes = 0
-            network_seen = False
+            logging.debug("_pod_network_metrics: found pod %s, pod_data keys=%r", pod_name, list(pod_data.keys()))
             
-            for network in list(pod_data.get("network") or []):
-                rx_value = _int_value(network.get("rxBytes"))
-                tx_value = _int_value(network.get("txBytes"))
-                if rx_value is not None:
-                    total_rx_bytes += rx_value
-                    network_seen = True
-                if tx_value is not None:
-                    total_tx_bytes += tx_value
-                    network_seen = True
+            # Network is a single object, not a list
+            network = dict(pod_data.get("network") or {})
+            logging.debug("_pod_network_metrics: network keys=%r", list(network.keys()))
             
-            if network_seen:
-                logging.debug("_pod_network_metrics: pod %s: rxBytes=%d, txBytes=%d", pod_name, total_rx_bytes, total_tx_bytes)
+            rx_value = _int_value(network.get("rxBytes"))
+            tx_value = _int_value(network.get("txBytes"))
+            
+            if rx_value is not None or tx_value is not None:
+                logging.debug("_pod_network_metrics: pod %s: rxBytes=%d, txBytes=%d", pod_name, rx_value or 0, tx_value or 0)
                 return {
-                    "rxBytes": total_rx_bytes,
-                    "txBytes": total_tx_bytes,
+                    "rxBytes": rx_value,
+                    "txBytes": tx_value,
                 }
         
         logging.warning("_pod_network_metrics: pod %s not found in node %s stats summary", pod_name, node_name)
