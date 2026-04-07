@@ -41,6 +41,9 @@
   let paused = false;
   let inFlight = false;
   let lastBody = "";
+  let lastRxBytes = null;
+  let lastTxBytes = null;
+  let lastMetricsTime = null;
 
   function escapeHtml(value) {
     return String(value ?? "")
@@ -99,20 +102,32 @@
     return `${Math.round((lastMs - firstMs) / 1000)}s`;
   }
 
-  function formatBytesToBits(bytes) {
-    if (bytes == null || bytes === 0) {
+  function formatBytesToBits(bytesPerSecond) {
+    if (bytesPerSecond == null || bytesPerSecond === 0) {
       return "0 bps";
     }
-    const bits = bytes * 8;
-    if (bits >= 1e9) {
-      return `${(bits / 1e9).toFixed(2)} Gbps`;
-    } else if (bits >= 1e6) {
-      return `${(bits / 1e6).toFixed(2)} Mbps`;
-    } else if (bits >= 1e3) {
-      return `${(bits / 1e3).toFixed(2)} Kbps`;
+    const bitsPerSecond = bytesPerSecond * 8;
+    if (bitsPerSecond >= 1e9) {
+      return `${(bitsPerSecond / 1e9).toFixed(2)} Gbps`;
+    } else if (bitsPerSecond >= 1e6) {
+      return `${(bitsPerSecond / 1e6).toFixed(2)} Mbps`;
+    } else if (bitsPerSecond >= 1e3) {
+      return `${(bitsPerSecond / 1e3).toFixed(2)} Kbps`;
     } else {
-      return `${bits} bps`;
+      return `${bitsPerSecond} bps`;
     }
+  }
+
+  function calculateNetworkSpeed(currentBytes, lastBytes, currentTime, lastTime) {
+    if (currentBytes == null || lastBytes == null || currentTime == null || lastTime == null) {
+      return null;
+    }
+    const deltaBytes = currentBytes - lastBytes;
+    const deltaTime = (currentTime - lastTime) / 1000; // Convert to seconds
+    if (deltaTime <= 0 || deltaBytes < 0) {
+      return null;
+    }
+    return deltaBytes / deltaTime;
   }
 
   function canonicalLogLine(line) {
@@ -256,12 +271,18 @@
       }
       podName.textContent = payload.podName || "n/a";
       containerName.textContent = payload.container || "n/a";
+      const currentTime = Date.now();
+      const rxSpeed = calculateNetworkSpeed(payload.rxBytes, lastRxBytes, currentTime, lastMetricsTime);
+      const txSpeed = calculateNetworkSpeed(payload.txBytes, lastTxBytes, currentTime, lastMetricsTime);
       if (networkRx) {
-        networkRx.textContent = formatBytesToBits(payload.rxBytes);
+        networkRx.textContent = rxSpeed !== null ? formatBytesToBits(rxSpeed) : "n/a";
       }
       if (networkTx) {
-        networkTx.textContent = formatBytesToBits(payload.txBytes);
+        networkTx.textContent = txSpeed !== null ? formatBytesToBits(txSpeed) : "n/a";
       }
+      lastRxBytes = payload.rxBytes;
+      lastTxBytes = payload.txBytes;
+      lastMetricsTime = currentTime;
       updated.textContent = new Date().toLocaleTimeString();
       logState.textContent = paused ? "Paused" : "Live";
       updateHistory();
