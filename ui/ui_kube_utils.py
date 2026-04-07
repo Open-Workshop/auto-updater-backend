@@ -209,42 +209,58 @@ def _pod_usage_metrics(namespace: str, pod_names: set[str]) -> dict[str, dict[st
 
 
 def _pod_network_metrics(namespace: str, pod_name: str) -> dict[str, int | None]:
-    """Get network metrics for a specific pod."""
+    """Get network metrics for a specific pod from kubelet stats/summary."""
     logging.debug("_pod_network_metrics: namespace=%s, pod_name=%s", namespace, pod_name)
     if not pod_name:
         return {}
     try:
-        response = get_kube_clients().custom.list_namespaced_custom_object(
-            "metrics.k8s.io",
-            "v1beta1",
-            namespace,
-            "pods",
-        )
+        # Get the pod to find its node
+        pod = get_kube_clients().core.read_namespaced_pod(pod_name, namespace)
+        node_name = pod.spec.node_name
+        if not node_name:
+            logging.warning("_pod_network_metrics: pod %s has no node_name", pod_name)
+            return {}
+        
+        # Get stats summary from kubelet proxy
+        summary = _read_node_stats_summary(node_name)
+        
+        # Find the pod in the summary
+        for pod_data in list(summary.get("pods") or []):
+            pod_ref = dict(pod_data.get("podRef") or {})
+            if str(pod_ref.get("namespace") or "") != namespace:
+                continue
+            if str(pod_ref.get("name") or "") != pod_name:
+                continue
+            
+            # Sum network metrics from all containers
+            total_rx_bytes = 0
+            total_tx_bytes = 0
+            network_seen = False
+            
+            for network in list(pod_data.get("network") or []):
+                rx_value = _int_value(network.get("rxBytes"))
+                tx_value = _int_value(network.get("txBytes"))
+                if rx_value is not None:
+                    total_rx_bytes += rx_value
+                    network_seen = True
+                if tx_value is not None:
+                    total_tx_bytes += tx_value
+                    network_seen = True
+            
+            if network_seen:
+                logging.debug("_pod_network_metrics: pod %s: rxBytes=%d, txBytes=%d", pod_name, total_rx_bytes, total_tx_bytes)
+                return {
+                    "rxBytes": total_rx_bytes,
+                    "txBytes": total_tx_bytes,
+                }
+        
+        logging.warning("_pod_network_metrics: pod %s not found in node %s stats summary", pod_name, node_name)
+        return {}
     except ApiException as exc:
         logging.warning("_pod_network_metrics: ApiException status=%d, body=%r", exc.status, exc.body)
         if exc.status in {403, 404, 503}:
             return {}
         raise
-    for item in list(response.get("items") or []):
-        metadata = dict(item.get("metadata") or {})
-        if str(metadata.get("name") or "") != pod_name:
-            continue
-        total_rx_bytes = 0
-        total_tx_bytes = 0
-        network_seen = False
-        for container in list(item.get("containers") or []):
-            usage = dict(container.get("usage") or {})
-            rx_value = _parse_bytes(usage.get("rx_bytes"))
-            tx_value = _parse_bytes(usage.get("tx_bytes"))
-            if rx_value is not None:
-                total_rx_bytes += rx_value
-                network_seen = True
-            if tx_value is not None:
-                total_tx_bytes += tx_value
-                network_seen = True
-        if network_seen:
-            return {
-                "rxBytes": total_rx_bytes,
-                "txBytes": total_tx_bytes,
-            }
-    return {}
+    except Exception as exc:
+        logging.error("_pod_network_metrics: exception=%s", exc)
+        return {}
