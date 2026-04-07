@@ -830,6 +830,8 @@ def _dashboard_resource_totals(items: list[dict[str, Any]]) -> dict[str, Any]:
     )
     cluster_capacity_millicores = _get_cluster_cpu_capacity()
     cluster_capacity_bytes = _get_cluster_memory_capacity()
+    logging.debug("_dashboard_resource_totals: cpu_millicores=%r, memory_bytes=%r, cluster_capacity_millicores=%r, cluster_capacity_bytes=%r",
+                  cpu_millicores, memory_bytes, cluster_capacity_millicores, cluster_capacity_bytes)
     return _resource_usage(
         cpu_millicores=cpu_millicores,
         memory_bytes=memory_bytes,
