@@ -200,10 +200,14 @@ def _parse_quantity_decimal(value: Any) -> Decimal | None:
 
 
 def _parse_cpu_millicores(value: Any) -> int | None:
+    logging.debug("_parse_cpu_millicores: value=%r (type: %s)", value, type(value))
     parsed = _parse_quantity_decimal(value)
     if parsed is None:
+        logging.debug("_parse_cpu_millicores: parsed is None")
         return None
-    return int((parsed * Decimal("1000")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    result = int((parsed * Decimal("1000")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    logging.debug("_parse_cpu_millicores: result=%d", result)
+    return result
 
 
 def _parse_bytes(value: Any) -> int | None:
@@ -315,6 +319,7 @@ def _storage_request_bytes(instance: dict[str, Any], component: str) -> int | No
 
 
 def _pod_usage_metrics(namespace: str, pod_names: set[str]) -> dict[str, dict[str, int | None]]:
+    logging.debug("_pod_usage_metrics: namespace=%s, pod_names=%r", namespace, pod_names)
     if not pod_names:
         return {}
     try:
@@ -324,7 +329,9 @@ def _pod_usage_metrics(namespace: str, pod_names: set[str]) -> dict[str, dict[st
             namespace,
             "pods",
         )
+        logging.debug("_pod_usage_metrics: response items count=%d", len(response.get("items", [])))
     except ApiException as exc:
+        logging.warning("_pod_usage_metrics: ApiException status=%d, body=%r", exc.status, exc.body)
         if exc.status in {403, 404, 503}:
             return {}
         raise
