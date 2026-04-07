@@ -11,7 +11,13 @@ RUN dpkg --add-architecture i386 \
         lib32gcc-s1 \
         lib32stdc++6 \
         lib32z1 \
+        locales \
+    && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
+    && locale-gen en_US.UTF-8 \
     && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8
 
 RUN useradd -m -u 1000 steam
 
