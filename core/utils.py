@@ -5,8 +5,8 @@ import mimetypes
 import os
 import random
 import re
+import subprocess
 import time
-import zipfile
 from pathlib import Path
 from typing import Dict, List
 from urllib.parse import urlparse
@@ -117,12 +117,12 @@ def zip_directory(source_dir: Path, dest_zip: Path) -> Path:
     ensure_dir(dest_zip.parent)
     if dest_zip.exists():
         dest_zip.unlink()
-    with zipfile.ZipFile(dest_zip, "w", zipfile.ZIP_DEFLATED) as archive:
-        for root, _, files in os.walk(source_dir):
-            for name in files:
-                full_path = Path(root) / name
-                rel_path = full_path.relative_to(source_dir)
-                archive.write(full_path, rel_path)
+    subprocess.run(
+        ["7z", "a", "-tzip", "-mx=6", "-r", str(dest_zip), "."],
+        cwd=source_dir,
+        check=True,
+        capture_output=True,
+    )
     return dest_zip
 
 

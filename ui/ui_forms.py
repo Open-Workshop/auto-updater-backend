@@ -227,8 +227,6 @@ def _validation_errors(
         errors["ow_login"] = "Open Workshop login is required"
     if not password and not existing_password:
         errors["ow_password"] = "Password is required for a new instance"
-    if not runner_proxy_url:
-        errors["runner_proxy_url"] = "Runner proxy URL is required"
     if not parser_storage_size:
         errors["parser_storage_size"] = "Parser PVC size is required"
     if not runner_storage_size:
