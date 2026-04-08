@@ -144,6 +144,7 @@ def download_steam_mod(
         "-pubfile", str(workshop_id),
         "-dir", str(workshop_path),
         "-validate",
+        "-max-downloads", "24",
     ]
     
     logging.info("DepotDownloader download: app_id=%s workshop_id=%s", app_id, workshop_id)

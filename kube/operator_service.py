@@ -122,12 +122,14 @@ class MirrorInstanceOperator:
         parser_proxy_secret = str(spec["parser"].get("proxyPoolSecretRef") or "").strip()
         if parser_proxy_secret:
             read_secret_value(self.settings.namespace, parser_proxy_secret, "proxyPool")
-        runner_proxy_url = read_secret_value(self.settings.namespace, runner_proxy_secret, "proxyUrl")
+        runner_proxy_url = read_secret_value(self.settings.namespace, runner_proxy_secret, "proxyUrl") or ""
 
-        upsert_secret(
-            self.settings.namespace,
-            build_runner_config_secret(normalized, runner_proxy_url),
-        )
+        if runner_proxy_url:
+            upsert_secret(
+                self.settings.namespace,
+                build_runner_config_secret(normalized, runner_proxy_url),
+            )
+        
         upsert_service(self.settings.namespace, build_parser_service(normalized))
         upsert_service(self.settings.namespace, build_runner_service(normalized))
         upsert_statefulset(
@@ -140,6 +142,7 @@ class MirrorInstanceOperator:
                 normalized,
                 self.settings.app_image,
                 self.settings.singbox_image,
+                runner_proxy_url,
             ),
         )
         self._sync_status(normalized)
