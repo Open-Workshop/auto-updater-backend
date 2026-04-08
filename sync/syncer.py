@@ -1314,6 +1314,7 @@ class ModSyncer:
             )
             self.dependency_manager.retry_pending()
         finally:
+            self._notify_archive_done(item_id)
             self._safe_unlink(archive_path)
 
     def _clear_local_caches(self, reason: str) -> None:
@@ -1510,6 +1511,20 @@ class ModSyncer:
                 )
                 time.sleep(delay)
         return None
+    
+    def _notify_archive_done(self, item_id: str) -> None:
+        if not self.steamcmd_runner_url:
+            return
+        try:
+            import requests
+            endpoint = self.steamcmd_runner_url.rstrip("/") + "/api/v1/archive/done"
+            requests.post(
+                endpoint,
+                json={"appId": self.steam_app_id, "workshopId": int(item_id)},
+                timeout=10,
+            )
+        except Exception as exc:
+            logging.warning("Failed to notify archive done: %s", exc)
 
 
 def ensure_game(
