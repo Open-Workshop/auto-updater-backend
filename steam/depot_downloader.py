@@ -130,20 +130,14 @@ def download_steam_mod(
             retryable=False,
         )
     
-    workshop_content_dir = (
-        steam_root
-        / "steamapps"
-        / "workshop"
-        / "content"
-        / str(app_id)
-    )
-    ensure_dir(workshop_content_dir)
+    workshop_path = _workshop_path(steam_root, app_id, workshop_id)
+    ensure_dir(workshop_path)
     
     cmd = [
         str(depotdownloader_path),
         "-app", str(app_id),
         "-pubfile", str(workshop_id),
-        "-dir", str(workshop_content_dir),
+        "-dir", str(workshop_path),
         "-validate",
     ]
     
@@ -285,6 +279,9 @@ def download_mod_archive(
         reason = f"DepotDownloader finished but no files found at {workshop_path}"
         logging.error(reason)
         return SteamDownloadResult(False, reason=reason, retryable=False)
+    
+    archive_path = zip_directory(workshop_path, dest_zip)
+    return SteamDownloadResult(True, archive_path=archive_path)
     
     archive_path = zip_directory(workshop_path, dest_zip)
     return SteamDownloadResult(True, archive_path=archive_path)
