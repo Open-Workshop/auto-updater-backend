@@ -620,6 +620,11 @@ def _clean_text(value: str | None) -> str:
 def _clean_description(value: str | None) -> str:
     if not value:
         return ""
+    value = re.sub(
+        r"https://steamcommunity\.com/linkfilter/\?u=",
+        "",
+        value,
+    )
     return html_to_bbcode(value)
 
 
