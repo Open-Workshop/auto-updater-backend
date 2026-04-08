@@ -2,6 +2,7 @@ import logging
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -115,6 +116,17 @@ def _clear_workshop_cache(
         )
 
 
+def _stream_output(stream, prefix: str, lines: list[str]):
+    """Read lines from stream and log them in real-time."""
+    for line in iter(stream.readline, ""):
+        if line:
+            line = line.rstrip("\n\r")
+            logging.info("DepotDownloader %s: %s", prefix, line)
+            lines.append(line)
+        else:
+            break
+
+
 def download_steam_mod(
     depotdownloader_path: Path,
     steam_root: Path,
@@ -144,33 +156,57 @@ def download_steam_mod(
     logging.info("DepotDownloader download: app_id=%s workshop_id=%s", app_id, workshop_id)
     
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=3600,  # 1 hour timeout
         )
+    except Exception as exc:
+        return SteamDownloadResult(
+            False,
+            f"Failed to start DepotDownloader: {exc}",
+            retryable=False,
+        )
+    
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    
+    stdout_thread = threading.Thread(
+        target=_stream_output,
+        args=(proc.stdout, "stdout", stdout_lines),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_stream_output,
+        args=(proc.stderr, "stderr", stderr_lines),
+        daemon=True,
+    )
+    
+    stdout_thread.start()
+    stderr_thread.start()
+    
+    try:
+        returncode = proc.wait(timeout=3600)
     except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
         return SteamDownloadResult(
             False,
             "DepotDownloader timeout after 1 hour",
             retryable=True,
         )
     
-    output = result.stdout or ""
-    stderr = result.stderr or ""
-    full_output = f"{output}\n{stderr}"
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
     
-    # Log output for debugging
-    if full_output:
-        logging.info("DepotDownloader output for workshop %s:\n%s", workshop_id, full_output[-4000:])
+    full_output = "\n".join(stdout_lines + stderr_lines)
     
     parsed_error = _extract_depotdownloader_error(full_output)
     
-    if result.returncode != 0:
-        reason = parsed_error or f"DepotDownloader exit code {result.returncode}"
-        retryable = _is_retryable_reason(reason, result.returncode)
+    if returncode != 0:
+        reason = parsed_error or f"DepotDownloader exit code {returncode}"
+        retryable = _is_retryable_reason(reason, returncode)
         logging.error("DepotDownloader failed for workshop %s: %s", workshop_id, reason)
         
         if retryable:
@@ -184,7 +220,7 @@ def download_steam_mod(
         )
     
     if parsed_error:
-        retryable = _is_retryable_reason(parsed_error, result.returncode)
+        retryable = _is_retryable_reason(parsed_error, returncode)
         logging.error("DepotDownloader error for workshop %s: %s", workshop_id, parsed_error)
         
         if retryable:
