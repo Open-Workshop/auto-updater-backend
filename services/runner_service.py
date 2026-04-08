@@ -6,7 +6,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from steam.steamcmd import download_mod_archive
+from steam.depot_downloader import download_mod_archive
 
 
 def _runner_host() -> str:
@@ -24,8 +24,8 @@ def _steam_root() -> Path:
     return Path(os.environ.get("STEAM_ROOT", "/data/runner/steam"))
 
 
-def _steamcmd_path() -> Path:
-    return Path(os.environ.get("STEAMCMD_PATH", "/opt/steamcmd/steamcmd.sh"))
+def _depotdownloader_path() -> Path:
+    return Path(os.environ.get("DEPOTDOWNLOADER_PATH", "/opt/depotdownloader/DepotDownloader"))
 
 
 async def _healthz(_: web.Request) -> web.Response:
@@ -45,7 +45,7 @@ async def _archive(request: web.Request) -> web.StreamResponse:
     result = await request.app["loop"].run_in_executor(
         None,
         lambda: download_mod_archive(
-            _steamcmd_path(),
+            _depotdownloader_path(),
             _steam_root(),
             app_id,
             workshop_id,

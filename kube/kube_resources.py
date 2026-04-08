@@ -374,7 +374,7 @@ def build_runner_statefulset(
                                 _env("RUNNER_BIND_HOST", "0.0.0.0"),
                                 _env("RUNNER_BIND_PORT", "8080"),
                                 _env("STEAM_ROOT", "/data/steam"),
-                                _env("STEAMCMD_PATH", "/opt/steamcmd/steamcmd.sh"),
+                                _env("DEPOTDOWNLOADER_PATH", "/opt/depotdownloader/DepotDownloader"),
                             ],
                             "volumeMounts": [{"name": "data", "mountPath": "/data"}],
                             "readinessProbe": {

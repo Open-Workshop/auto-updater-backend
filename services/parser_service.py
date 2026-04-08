@@ -183,7 +183,7 @@ class ParserRuntime:
                 self.cfg.scrape_required_items,
                 self.cfg.force_required_item_id,
                 self.cfg.language,
-                Path(self.cfg.steamcmd_path),
+                Path(self.cfg.depotdownloader_path),
                 self.cfg.steamcmd_runner_url or None,
             )
             self.last_sync_result = "success"
