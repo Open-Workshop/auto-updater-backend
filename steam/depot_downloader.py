@@ -26,26 +26,19 @@ def _extract_depotdownloader_error(output: str) -> str | None:
     """Extract error message from DepotDownloader output."""
     cleaned = (output or "").replace("\r", "\n")
     
-    # Look for common error patterns
-    error_patterns = [
-        r"Error:\s+(.+)",
-        r"ERROR:\s+(.+)",
-        r"Exception:\s+(.+)",
-        r"Failed to download.+?:\s*(.+)",
+    skip_patterns = [
+        "trying again",
+        "connection to steam failed",
+        "unable to query ugc details",
     ]
     
-    for pattern in error_patterns:
-        match = re.search(pattern, cleaned, re.IGNORECASE | re.MULTILINE)
-        if match:
-            return match.group(1).strip()
-    
-    # If no specific error found, look for lines with "error" or "failed"
     for line in cleaned.splitlines():
-        line = line.strip()
-        if not line:
+        line_lower = line.lower().strip()
+        if any(skip in line_lower for skip in skip_patterns):
             continue
-        if any(keyword in line.lower() for keyword in ["error", "failed", "exception"]):
-            return line
+        
+        if any(keyword in line_lower for keyword in ["error:", "error -", "exception:", "failed to"]):
+            return line.strip()
     
     return None
 
