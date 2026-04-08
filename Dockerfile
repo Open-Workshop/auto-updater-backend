@@ -8,10 +8,9 @@ RUN dpkg --add-architecture i386 \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
-        lib32gcc-s1 \
-        lib32stdc++6 \
-        lib32z1 \
+        unzip \
         locales \
+        p7zip-full \
     && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
     && locale-gen en_US.UTF-8 \
     && rm -rf /var/lib/apt/lists/*
@@ -21,12 +20,15 @@ ENV LANG=en_US.UTF-8 \
 
 RUN useradd -m -u 1000 steam
 
-RUN mkdir -p /opt/steamcmd \
-    && curl -sSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz \
-        | tar -xz -C /opt/steamcmd \
-    && chown -R steam:steam /opt/steamcmd
+RUN mkdir -p /opt/depotdownloader \
+    && curl -sSL https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_3.4.0/DepotDownloader-linux-x64.zip \
+        -o /tmp/depotdownloader.zip \
+    && unzip -o /tmp/depotdownloader.zip -d /opt/depotdownloader \
+    && rm /tmp/depotdownloader.zip \
+    && chmod +x /opt/depotdownloader/DepotDownloader \
+    && chown -R steam:steam /opt/depotdownloader
 
-ENV STEAMCMD_PATH=/opt/steamcmd/steamcmd.sh
+ENV DEPOTDOWNLOADER_PATH=/opt/depotdownloader/DepotDownloader
 
 WORKDIR /app
 

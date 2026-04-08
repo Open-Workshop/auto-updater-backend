@@ -29,7 +29,7 @@ from steam.steam_api import (
 )
 from steam.steam_mod import SteamMod
 from core.telemetry import start_span
-from steam.steamcmd import download_mod_archive
+from steam.depot_downloader import download_mod_archive
 from core.utils import (
     dedupe_images,
     ensure_dir,
@@ -82,8 +82,8 @@ class ModPayload:
 
 PHASH_MAX_DISTANCE = 6
 RECENT_OW_EDIT_SECONDS = 7 * 24 * 60 * 60
-STEAMCMD_MAX_DOWNLOAD_ATTEMPTS = 3
-STEAMCMD_RETRY_BACKOFF_SECONDS = 5.0
+DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS = 3
+DEPOTDOWNLOADER_RETRY_BACKOFF_SECONDS = 5.0
 
 
 def _recent_edit_window_label(seconds: int = RECENT_OW_EDIT_SECONDS) -> str:
@@ -977,7 +977,7 @@ class ModSyncer:
         game_id: int,
         mirror_root: Path,
         steam_root: Path,
-        steamcmd_path: Path,
+        depotdownloader_path: Path,
         steamcmd_runner_url: str | None,
         options: SyncOptions,
     ) -> None:
@@ -986,7 +986,7 @@ class ModSyncer:
         self.game_id = game_id
         self.mirror_root = mirror_root
         self.steam_root = steam_root
-        self.steamcmd_path = steamcmd_path
+        self.depotdownloader_path = depotdownloader_path
         self.steamcmd_runner_url = steamcmd_runner_url
         self.options = options
 
@@ -1314,6 +1314,7 @@ class ModSyncer:
             )
             self.dependency_manager.retry_pending()
         finally:
+            self._notify_archive_done(item_id)
             self._safe_unlink(archive_path)
 
     def _clear_local_caches(self, reason: str) -> None:
@@ -1481,9 +1482,9 @@ class ModSyncer:
                 "steam.app_id": self.steam_app_id,
             },
         ):
-            for attempt in range(1, STEAMCMD_MAX_DOWNLOAD_ATTEMPTS + 1):
+            for attempt in range(1, DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS + 1):
                 download_result = download_mod_archive(
-                    self.steamcmd_path,
+                    self.depotdownloader_path,
                     self.steam_root,
                     self.steam_app_id,
                     int(item_id),
@@ -1496,13 +1497,13 @@ class ModSyncer:
                 logging.error(
                     "SteamCMD download attempt %s/%s failed for %s: %s",
                     attempt,
-                    STEAMCMD_MAX_DOWNLOAD_ATTEMPTS,
+                    DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS,
                     item_id,
                     reason,
                 )
-                if attempt >= STEAMCMD_MAX_DOWNLOAD_ATTEMPTS or not download_result.retryable:
+                if attempt >= DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS or not download_result.retryable:
                     return None
-                delay = STEAMCMD_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                delay = DEPOTDOWNLOADER_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
                 logging.warning(
                     "Retrying SteamCMD download for %s in %.1fs",
                     item_id,
@@ -1510,6 +1511,20 @@ class ModSyncer:
                 )
                 time.sleep(delay)
         return None
+    
+    def _notify_archive_done(self, item_id: str) -> None:
+        if not self.steamcmd_runner_url:
+            return
+        try:
+            import requests
+            endpoint = self.steamcmd_runner_url.rstrip("/") + "/api/v1/archive/done"
+            requests.post(
+                endpoint,
+                json={"appId": self.steam_app_id, "workshopId": int(item_id)},
+                timeout=10,
+            )
+        except Exception as exc:
+            logging.warning("Failed to notify archive done: %s", exc)
 
 
 def ensure_game(
@@ -1622,7 +1637,7 @@ def sync_mods(
     scrape_required_items: bool,
     force_required_item_id: Optional[str],
     language: str,
-    steamcmd_path: Path,
+    depotdownloader_path: Path,
     steamcmd_runner_url: Optional[str] = None,
 ) -> None:
     options = SyncOptions(
@@ -1653,7 +1668,7 @@ def sync_mods(
         game_id,
         mirror_root,
         steam_root,
-        steamcmd_path,
+        depotdownloader_path,
         steamcmd_runner_url,
         options,
     ).run()

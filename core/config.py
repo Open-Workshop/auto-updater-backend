@@ -13,7 +13,7 @@ DEFAULT_STEAM_START_PAGE = 1
 DEFAULT_STEAM_PAGE_SIZE = 30
 DEFAULT_STEAM_DELAY = 1
 DEFAULT_MAX_SCREENSHOTS = 20
-DEFAULT_STEAMCMD_PATH = "/opt/steamcmd/steamcmd.sh"
+DEFAULT_DEPOTDOWNLOADER_PATH = "/opt/depotdownloader/DepotDownloader"
 DEFAULT_STEAM_HTTP_RETRIES = 2
 DEFAULT_STEAM_HTTP_BACKOFF = 2.0
 DEFAULT_STEAM_REQUEST_DELAY = 1
@@ -84,7 +84,7 @@ class Config:
     steam_max_items: int
     steam_delay: float
     max_screenshots: int
-    steamcmd_path: str
+    depotdownloader_path: str
     upload_resource_files: bool
     scrape_preview_images: bool
     scrape_required_items: bool
@@ -151,7 +151,7 @@ def load_config() -> Config:
     steam_max_items = parse_int(os.environ.get("OW_STEAM_MAX_ITEMS"), 0)
     steam_delay = float(os.environ.get("OW_STEAM_DELAY", DEFAULT_STEAM_DELAY))
     max_screenshots = parse_int(os.environ.get("OW_MAX_SCREENSHOTS"), DEFAULT_MAX_SCREENSHOTS)
-    steamcmd_path = os.environ.get("STEAMCMD_PATH", DEFAULT_STEAMCMD_PATH)
+    depotdownloader_path = os.environ.get("DEPOTDOWNLOADER_PATH", DEFAULT_DEPOTDOWNLOADER_PATH)
     upload_resource_files = parse_bool(os.environ.get("OW_RESOURCE_UPLOAD_FILES"), True)
     scrape_preview_images = parse_bool(os.environ.get("OW_SCRAPE_PREVIEW_IMAGES"), True)
     scrape_required_items = parse_bool(os.environ.get("OW_SCRAPE_REQUIRED_ITEMS"), True)
@@ -198,7 +198,7 @@ def load_config() -> Config:
         steam_max_items=steam_max_items,
         steam_delay=steam_delay,
         max_screenshots=max_screenshots,
-        steamcmd_path=steamcmd_path,
+        depotdownloader_path=depotdownloader_path,
         upload_resource_files=upload_resource_files,
         scrape_preview_images=scrape_preview_images,
         scrape_required_items=scrape_required_items,

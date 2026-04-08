@@ -318,6 +318,7 @@ def build_runner_statefulset(
     instance: dict[str, Any],
     app_image: str,
     singbox_image: str,
+    runner_proxy_url: str = "",
 ) -> dict[str, Any]:
     normalized = normalize_instance(instance)
     name = instance_name(normalized)
@@ -332,6 +333,75 @@ def build_runner_statefulset(
     storage_class = _storage_class(spec, "runner")
     if storage_class:
         claim_spec["storageClassName"] = storage_class
+    
+    use_proxy = bool(runner_proxy_url)
+    
+    runner_container = {
+        "name": "runner",
+        "image": app_image,
+        "imagePullPolicy": "IfNotPresent",
+        "args": ["runner"],
+        "ports": [{"name": "http", "containerPort": 8080}],
+        "env": [
+            _env("RUNNER_BIND_HOST", "0.0.0.0"),
+            _env("RUNNER_BIND_PORT", "8080"),
+            _env("STEAM_ROOT", "/data/steam"),
+            _env("DEPOTDOWNLOADER_PATH", "/opt/depotdownloader/DepotDownloader"),
+        ],
+        "volumeMounts": [{"name": "data", "mountPath": "/data"}],
+        "readinessProbe": {
+            "httpGet": {"path": "/healthz", "port": "http"},
+            "initialDelaySeconds": 5,
+            "periodSeconds": 10,
+        },
+        "livenessProbe": {
+            "httpGet": {"path": "/healthz", "port": "http"},
+            "initialDelaySeconds": 15,
+            "periodSeconds": 20,
+        },
+    }
+    
+    volumes = []
+    containers = [runner_container]
+    
+    if use_proxy:
+        volumes.extend([
+            {
+                "name": "runner-config",
+                "secret": {"secretName": runner_config_secret_name(name)},
+            },
+            {
+                "name": "dev-tun",
+                "hostPath": {"path": "/dev/net/tun", "type": "CharDevice"},
+            },
+        ])
+        containers.append({
+            "name": "tun-proxy",
+            "image": singbox_image,
+            "imagePullPolicy": "IfNotPresent",
+            "args": ["run", "-c", "/config/config.json"],
+            "securityContext": {
+                "runAsUser": 0,
+                "capabilities": {"add": ["NET_ADMIN"]},
+            },
+            "volumeMounts": [
+                {
+                    "name": "runner-config",
+                    "mountPath": "/config",
+                    "readOnly": True,
+                },
+                {
+                    "name": "dev-tun",
+                    "mountPath": "/dev/net/tun",
+                },
+            ],
+        })
+    else:
+        volumes.append({
+            "name": "data",
+            "emptyDir": {},
+        })
+    
     return {
         "apiVersion": "apps/v1",
         "kind": "StatefulSet",
@@ -353,63 +423,8 @@ def build_runner_statefulset(
                 "metadata": {"labels": labels},
                 "spec": {
                     "securityContext": {"fsGroup": 1000},
-                    "volumes": [
-                        {
-                            "name": "runner-config",
-                            "secret": {"secretName": runner_config_secret_name(name)},
-                        },
-                        {
-                            "name": "dev-tun",
-                            "hostPath": {"path": "/dev/net/tun", "type": "CharDevice"},
-                        },
-                    ],
-                    "containers": [
-                        {
-                            "name": "runner",
-                            "image": app_image,
-                            "imagePullPolicy": "IfNotPresent",
-                            "args": ["runner"],
-                            "ports": [{"name": "http", "containerPort": 8080}],
-                            "env": [
-                                _env("RUNNER_BIND_HOST", "0.0.0.0"),
-                                _env("RUNNER_BIND_PORT", "8080"),
-                                _env("STEAM_ROOT", "/data/steam"),
-                                _env("STEAMCMD_PATH", "/opt/steamcmd/steamcmd.sh"),
-                            ],
-                            "volumeMounts": [{"name": "data", "mountPath": "/data"}],
-                            "readinessProbe": {
-                                "httpGet": {"path": "/healthz", "port": "http"},
-                                "initialDelaySeconds": 5,
-                                "periodSeconds": 10,
-                            },
-                            "livenessProbe": {
-                                "httpGet": {"path": "/healthz", "port": "http"},
-                                "initialDelaySeconds": 15,
-                                "periodSeconds": 20,
-                            },
-                        },
-                        {
-                            "name": "tun-proxy",
-                            "image": singbox_image,
-                            "imagePullPolicy": "IfNotPresent",
-                            "args": ["run", "-c", "/config/config.json"],
-                            "securityContext": {
-                                "runAsUser": 0,
-                                "capabilities": {"add": ["NET_ADMIN"]},
-                            },
-                            "volumeMounts": [
-                                {
-                                    "name": "runner-config",
-                                    "mountPath": "/config",
-                                    "readOnly": True,
-                                },
-                                {
-                                    "name": "dev-tun",
-                                    "mountPath": "/dev/net/tun",
-                                },
-                            ],
-                        },
-                    ],
+                    "volumes": volumes,
+                    "containers": containers,
                 },
             },
             "volumeClaimTemplates": [
