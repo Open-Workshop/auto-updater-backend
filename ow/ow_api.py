@@ -256,6 +256,7 @@ class OWClient:
                 continue
 
             if response.status_code in (401, 403):
+                response.close()
                 logging.warning("Session expired, re-authenticating")
                 self.login()
                 if attempt > 1:
@@ -265,6 +266,7 @@ class OWClient:
                 )
 
             if response.status_code in self._retry_statuses and attempt < attempts:
+                response.close()
                 self._sleep_backoff(
                     attempt,
                     method,

@@ -396,12 +396,13 @@ def build_runner_statefulset(
                 },
             ],
         })
-    else:
-        volumes.append({
-            "name": "data",
-            "emptyDir": {},
-        })
-    
+    pod_spec: dict[str, Any] = {
+        "securityContext": {"fsGroup": 1000},
+        "containers": containers,
+    }
+    if volumes:
+        pod_spec["volumes"] = volumes
+
     return {
         "apiVersion": "apps/v1",
         "kind": "StatefulSet",
@@ -421,11 +422,7 @@ def build_runner_statefulset(
             "selector": {"matchLabels": labels},
             "template": {
                 "metadata": {"labels": labels},
-                "spec": {
-                    "securityContext": {"fsGroup": 1000},
-                    "volumes": volumes,
-                    "containers": containers,
-                },
+                "spec": pod_spec,
             },
             "volumeClaimTemplates": [
                 {

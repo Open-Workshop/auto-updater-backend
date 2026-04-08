@@ -77,6 +77,36 @@ def _float_from_form(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _validate_int_min(value: Any, *, minimum: int, label: str) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return f"{label} is required"
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return f"{label} must be an integer"
+    if parsed < minimum:
+        if minimum <= 0:
+            return f"{label} must be zero or greater"
+        return f"{label} must be at least {minimum}"
+    return None
+
+
+def _validate_float_min(value: Any, *, minimum: float, label: str) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return f"{label} is required"
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        return f"{label} must be a number"
+    if parsed < minimum:
+        if minimum <= 0:
+            return f"{label} must be zero or greater"
+        return f"{label} must be at least {minimum}"
+    return None
+
+
 def _url(settings: UISettings, path: str) -> str:
     normalized_path = path if path.startswith("/") else f"/{path}"
     if not settings.base_path:

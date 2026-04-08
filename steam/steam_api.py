@@ -150,6 +150,7 @@ class SteamClient:
 
             if response.status_code in self.policy.retry_statuses and attempt < attempts:
                 retry_after = response.headers.get("retry-after")
+                response.close()
                 if retry_after:
                     try:
                         time.sleep(float(retry_after))

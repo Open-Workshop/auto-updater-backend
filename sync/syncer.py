@@ -1515,16 +1515,23 @@ class ModSyncer:
     def _notify_archive_done(self, item_id: str) -> None:
         if not self.steamcmd_runner_url:
             return
+        response: requests.Response | None = None
         try:
-            import requests
             endpoint = self.steamcmd_runner_url.rstrip("/") + "/api/v1/archive/done"
-            requests.post(
+            response = requests.post(
                 endpoint,
                 json={"appId": self.steam_app_id, "workshopId": int(item_id)},
                 timeout=10,
             )
-        except Exception as exc:
-            logging.warning("Failed to notify archive done: %s", exc)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            details = ""
+            if response is not None:
+                details = f" status={response.status_code} body={(response.text or '')[:200]!r}"
+            logging.warning("Failed to notify archive done: %s%s", exc, details)
+        finally:
+            if response is not None:
+                response.close()
 
 
 def ensure_game(

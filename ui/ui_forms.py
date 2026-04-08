@@ -7,7 +7,16 @@ from core.http_utils import parse_proxy_url, validate_proxy_url
 from kube.kube_client import read_secret_value
 from kube.mirror_instance import DEFAULT_SPEC, deep_merge, instance_name, normalize_instance
 from ui.ui_assets import render_template
-from ui.ui_common import UISettings, _bool_from_form, _escape, _float_from_form, _int_from_form, _url
+from ui.ui_common import (
+    UISettings,
+    _bool_from_form,
+    _escape,
+    _float_from_form,
+    _int_from_form,
+    _url,
+    _validate_float_min,
+    _validate_int_min,
+)
 
 
 def _parse_sync_json(raw: str) -> dict[str, Any]:
@@ -217,6 +226,14 @@ def _validation_errors(
     parser_storage_size: str,
     runner_storage_size: str,
     sync_json_patch: str,
+    poll_interval_seconds: Any,
+    timeout_seconds: Any,
+    http_retries: Any,
+    http_retry_backoff: Any,
+    steam_http_retries: Any,
+    steam_http_backoff: Any,
+    steam_request_delay: Any,
+    max_screenshots: Any,
 ) -> dict[str, str]:
     errors: dict[str, str] = {}
     if not name:
@@ -241,6 +258,51 @@ def _validation_errors(
             _validate_proxy_pool(parser_proxy_pool)
         except Exception as exc:
             errors["parser_proxy_pool"] = str(exc)
+    numeric_errors = {
+        "poll_interval_seconds": _validate_int_min(
+            poll_interval_seconds,
+            minimum=1,
+            label="Poll interval",
+        ),
+        "timeout_seconds": _validate_int_min(
+            timeout_seconds,
+            minimum=1,
+            label="HTTP timeout",
+        ),
+        "http_retries": _validate_int_min(
+            http_retries,
+            minimum=0,
+            label="HTTP retries",
+        ),
+        "http_retry_backoff": _validate_float_min(
+            http_retry_backoff,
+            minimum=0.0,
+            label="HTTP retry backoff",
+        ),
+        "steam_http_retries": _validate_int_min(
+            steam_http_retries,
+            minimum=0,
+            label="Steam HTTP retries",
+        ),
+        "steam_http_backoff": _validate_float_min(
+            steam_http_backoff,
+            minimum=0.0,
+            label="Steam HTTP backoff",
+        ),
+        "steam_request_delay": _validate_float_min(
+            steam_request_delay,
+            minimum=0.0,
+            label="Steam request delay",
+        ),
+        "max_screenshots": _validate_int_min(
+            max_screenshots,
+            minimum=0,
+            label="Max screenshots",
+        ),
+    }
+    for field_name, message in numeric_errors.items():
+        if message:
+            errors[field_name] = message
     return errors
 
 

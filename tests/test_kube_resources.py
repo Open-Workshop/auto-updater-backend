@@ -75,6 +75,7 @@ class KubeResourceTests(unittest.TestCase):
             INSTANCE,
             "example/image:latest",
             "ghcr.io/sagernet/sing-box:latest",
+            "socks5://user:pass@46.8.223.44:3001",
         )
         containers = statefulset["spec"]["template"]["spec"]["containers"]
         self.assertEqual(len(containers), 2)
@@ -82,6 +83,20 @@ class KubeResourceTests(unittest.TestCase):
         self.assertEqual(
             containers[1]["securityContext"]["capabilities"]["add"],
             ["NET_ADMIN"],
+        )
+
+    def test_runner_statefulset_without_proxy_keeps_persistent_data_volume(self) -> None:
+        statefulset = build_runner_statefulset(
+            INSTANCE,
+            "example/image:latest",
+            "ghcr.io/sagernet/sing-box:latest",
+        )
+        containers = statefulset["spec"]["template"]["spec"]["containers"]
+        self.assertEqual([item["name"] for item in containers], ["runner"])
+        self.assertNotIn("volumes", statefulset["spec"]["template"]["spec"])
+        self.assertEqual(
+            statefulset["spec"]["volumeClaimTemplates"][0]["metadata"]["name"],
+            "data",
         )
 
 

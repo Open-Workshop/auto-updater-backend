@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from pathlib import Path
 
 from aiohttp import web
@@ -26,6 +27,43 @@ def _steam_root() -> Path:
 
 def _depotdownloader_path() -> Path:
     return Path(os.environ.get("DEPOTDOWNLOADER_PATH", "/opt/depotdownloader/DepotDownloader"))
+
+
+def _archive_paths(app_id: int, workshop_id: int) -> tuple[Path, Path]:
+    archive_path = _steam_root() / "archives" / f"{app_id}-{workshop_id}.zip"
+    workshop_path = (
+        _steam_root()
+        / "steamapps"
+        / "workshop"
+        / "content"
+        / str(app_id)
+        / str(workshop_id)
+    )
+    return archive_path, workshop_path
+
+
+def _cleanup_archive_artifacts(app_id: int, workshop_id: int) -> list[str]:
+    archive_path, workshop_path = _archive_paths(app_id, workshop_id)
+    cleaned: list[str] = []
+    if archive_path.exists():
+        try:
+            archive_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logging.warning("Failed to remove archive %s: %s", archive_path, exc)
+        else:
+            cleaned.append(str(archive_path))
+    if workshop_path.exists():
+        try:
+            shutil.rmtree(workshop_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logging.warning("Failed to remove workshop path %s: %s", workshop_path, exc)
+        else:
+            cleaned.append(str(workshop_path))
+    return cleaned
 
 
 async def _healthz(_: web.Request) -> web.Response:
@@ -81,29 +119,11 @@ async def _archive_done(request: web.Request) -> web.Response:
             {"reason": "appId and workshopId are required"},
             status=400,
         )
-    
-    import shutil
-    archive_path = _steam_root() / "archives" / f"{app_id}-{workshop_id}.zip"
-    workshop_path = (
-        _steam_root()
-        / "steamapps"
-        / "workshop"
-        / "content"
-        / str(app_id)
-        / str(workshop_id)
-    )
-    
-    cleaned = []
-    if archive_path.exists():
-        archive_path.unlink(missing_ok=True)
-        cleaned.append(str(archive_path))
-    if workshop_path.exists():
-        shutil.rmtree(workshop_path, ignore_errors=True)
-        cleaned.append(str(workshop_path))
-    
+    cleaned = _cleanup_archive_artifacts(app_id, workshop_id)
+
     if cleaned:
         logging.info("Cleaned after archive done: %s", cleaned)
-    
+
     return web.json_response({"cleaned": cleaned})
 
 
@@ -125,19 +145,63 @@ def _create_app() -> web.Application:
 
 def _cleanup_old_archives(max_age_seconds: int = 3600) -> None:
     import time
+
     archives_dir = _steam_root() / "archives"
-    if not archives_dir.exists():
-        return
     now = time.time()
-    cleaned = 0
-    for f in archives_dir.iterdir():
-        if f.is_file() and f.suffix == ".zip":
-            age = now - f.stat().st_mtime
-            if age > max_age_seconds:
-                f.unlink(missing_ok=True)
-                cleaned += 1
-    if cleaned:
-        logging.info("Cleaned %d old archive(s)", cleaned)
+    cleaned_archives = 0
+    if archives_dir.exists():
+        for archive_file in archives_dir.iterdir():
+            if not archive_file.is_file() or archive_file.suffix != ".zip":
+                continue
+            try:
+                age = now - archive_file.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if age <= max_age_seconds:
+                continue
+            try:
+                archive_file.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                logging.warning("Failed to remove stale archive %s: %s", archive_file, exc)
+            else:
+                cleaned_archives += 1
+
+    content_dir = _steam_root() / "steamapps" / "workshop" / "content"
+    cleaned_workshops = 0
+    if content_dir.exists():
+        for app_dir in content_dir.iterdir():
+            if not app_dir.is_dir() or app_dir.is_symlink():
+                continue
+            for workshop_dir in app_dir.iterdir():
+                if not workshop_dir.is_dir() or workshop_dir.is_symlink():
+                    continue
+                try:
+                    age = now - workshop_dir.stat().st_mtime
+                except FileNotFoundError:
+                    continue
+                if age <= max_age_seconds:
+                    continue
+                try:
+                    shutil.rmtree(workshop_dir)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    logging.warning(
+                        "Failed to remove stale workshop path %s: %s",
+                        workshop_dir,
+                        exc,
+                    )
+                else:
+                    cleaned_workshops += 1
+
+    if cleaned_archives or cleaned_workshops:
+        logging.info(
+            "Cleaned %d old archive(s) and %d old workshop path(s)",
+            cleaned_archives,
+            cleaned_workshops,
+        )
 
 
 def run_runner() -> int:

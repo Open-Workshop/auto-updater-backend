@@ -37,6 +37,15 @@ def parse_int(value: str | None, default: int) -> int:
         return default
 
 
+def parse_float(value: str | None, default: float) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 def parse_list(value: str | None) -> list[str]:
     if not value:
         return []
@@ -119,23 +128,36 @@ def load_config() -> Config:
     mirror_root = os.environ.get("OW_MIRROR_DIR", "/data/mirror")
     steam_root = os.environ.get("STEAM_ROOT", f"{mirror_root}/steam")
     page_size = parse_int(os.environ.get("OW_PAGE_SIZE"), DEFAULT_PAGE_SIZE)
-    poll_interval = parse_int(os.environ.get("OW_POLL_INTERVAL"), DEFAULT_POLL_INTERVAL)
-    timeout = parse_int(os.environ.get("OW_HTTP_TIMEOUT"), DEFAULT_TIMEOUT)
-    http_retries = parse_int(os.environ.get("OW_HTTP_RETRIES"), DEFAULT_HTTP_RETRIES)
-    http_retry_backoff = float(
-        os.environ.get("OW_HTTP_RETRY_BACKOFF", DEFAULT_HTTP_RETRY_BACKOFF)
+    poll_interval = max(1, parse_int(os.environ.get("OW_POLL_INTERVAL"), DEFAULT_POLL_INTERVAL))
+    timeout = max(1, parse_int(os.environ.get("OW_HTTP_TIMEOUT"), DEFAULT_TIMEOUT))
+    http_retries = max(0, parse_int(os.environ.get("OW_HTTP_RETRIES"), DEFAULT_HTTP_RETRIES))
+    http_retry_backoff = max(
+        0.0,
+        parse_float(os.environ.get("OW_HTTP_RETRY_BACKOFF"), DEFAULT_HTTP_RETRY_BACKOFF),
     )
     run_once = parse_bool(os.environ.get("OW_RUN_ONCE"), False)
     log_level = os.environ.get("OW_LOG_LEVEL", DEFAULT_LOG_LEVEL)
     log_steam_requests = parse_bool(os.environ.get("OW_LOG_STEAM_REQUESTS"), False)
-    steam_http_retries = parse_int(
-        os.environ.get("OW_STEAM_HTTP_RETRIES"), DEFAULT_STEAM_HTTP_RETRIES
+    steam_http_retries = max(
+        0,
+        parse_int(
+            os.environ.get("OW_STEAM_HTTP_RETRIES"),
+            DEFAULT_STEAM_HTTP_RETRIES,
+        ),
     )
-    steam_http_backoff = float(
-        os.environ.get("OW_STEAM_HTTP_BACKOFF", DEFAULT_STEAM_HTTP_BACKOFF)
+    steam_http_backoff = max(
+        0.0,
+        parse_float(
+            os.environ.get("OW_STEAM_HTTP_BACKOFF"),
+            DEFAULT_STEAM_HTTP_BACKOFF,
+        ),
     )
-    steam_request_delay = float(
-        os.environ.get("OW_STEAM_REQUEST_DELAY", DEFAULT_STEAM_REQUEST_DELAY)
+    steam_request_delay = max(
+        0.0,
+        parse_float(
+            os.environ.get("OW_STEAM_REQUEST_DELAY"),
+            DEFAULT_STEAM_REQUEST_DELAY,
+        ),
     )
     steam_proxy_pool = parse_list(
         os.environ.get("OW_STEAM_PROXY_POOL", DEFAULT_STEAM_PROXY_POOL)
@@ -149,8 +171,8 @@ def load_config() -> Config:
         os.environ.get("OW_STEAM_START_PAGE"), DEFAULT_STEAM_START_PAGE
     )
     steam_max_items = parse_int(os.environ.get("OW_STEAM_MAX_ITEMS"), 0)
-    steam_delay = float(os.environ.get("OW_STEAM_DELAY", DEFAULT_STEAM_DELAY))
-    max_screenshots = parse_int(os.environ.get("OW_MAX_SCREENSHOTS"), DEFAULT_MAX_SCREENSHOTS)
+    steam_delay = max(0.0, parse_float(os.environ.get("OW_STEAM_DELAY"), DEFAULT_STEAM_DELAY))
+    max_screenshots = max(0, parse_int(os.environ.get("OW_MAX_SCREENSHOTS"), DEFAULT_MAX_SCREENSHOTS))
     depotdownloader_path = os.environ.get("DEPOTDOWNLOADER_PATH", DEFAULT_DEPOTDOWNLOADER_PATH)
     upload_resource_files = parse_bool(os.environ.get("OW_RESOURCE_UPLOAD_FILES"), True)
     scrape_preview_images = parse_bool(os.environ.get("OW_SCRAPE_PREVIEW_IMAGES"), True)

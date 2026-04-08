@@ -421,6 +421,14 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
         parser_storage_size=parser_storage_size,
         runner_storage_size=runner_storage_size,
         sync_json_patch=sync_json_patch,
+        poll_interval_seconds=form.get("poll_interval_seconds"),
+        timeout_seconds=form.get("timeout_seconds"),
+        http_retries=form.get("http_retries"),
+        http_retry_backoff=form.get("http_retry_backoff"),
+        steam_http_retries=form.get("steam_http_retries"),
+        steam_http_backoff=form.get("steam_http_backoff"),
+        steam_request_delay=form.get("steam_request_delay"),
+        max_screenshots=form.get("max_screenshots"),
     )
     if "runner_proxy_url" not in errors:
         try:
