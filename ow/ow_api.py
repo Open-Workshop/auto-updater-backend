@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 import logging
 import random
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
@@ -21,6 +25,23 @@ _DEFAULT_LIMITS: Dict[str, int] = {
     "mod_description": 9999,
     "tag_name": 127,
 }
+
+_UPLOAD_WS_IDLE_TIMEOUT_MIN = 300.0
+_UPLOAD_WS_IDLE_TIMEOUT_FACTOR = 5.0
+_UPLOAD_WATCHDOG_POLL_SECONDS = 5.0
+
+
+@dataclass(frozen=True)
+class StorageTransfer:
+    transfer_url: str
+    ws_url: str | None = None
+
+
+@dataclass(frozen=True)
+class StorageUploadResponse:
+    status_code: int
+    text: str
+    headers: Dict[str, str]
 
 
 class OWLimits:
@@ -487,40 +508,289 @@ class OWClient:
             return None
         return urljoin(response.url, location)
 
-    def _transfer_url_from_init(self, response: requests.Response) -> Optional[str]:
-        redirect_url = self._redirect_location(response)
-        if redirect_url:
-            return redirect_url
-
+    @staticmethod
+    def _json_payload(response: requests.Response) -> Dict[str, Any] | None:
         try:
             payload = response.json()
         except ValueError:
-            payload = None
+            return None
         if isinstance(payload, dict):
-            transfer_url = payload.get("transfer_url")
-            if isinstance(transfer_url, str) and transfer_url.strip():
-                return transfer_url
+            return payload
         return None
+
+    @staticmethod
+    def _parse_transfer_token_payload(token: str | None) -> Dict[str, Any] | None:
+        raw = str(token or "").strip()
+        if not raw:
+            return None
+        parts = raw.split(".")
+        if len(parts) < 2:
+            return None
+        payload = parts[1].replace("-", "+").replace("_", "/")
+        padding = len(payload) % 4
+        if padding:
+            payload += "=" * (4 - padding)
+        try:
+            decoded = base64.b64decode(payload)
+            parsed = json.loads(decoded.decode("utf-8"))
+        except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+
+    @staticmethod
+    def _job_id_from_transfer_token(transfer_url: str) -> str | None:
+        token = urlparse(transfer_url).query
+        if token:
+            token_value = dict(parse_qsl(token, keep_blank_values=True)).get("token")
+        else:
+            token_value = None
+        payload = OWClient._parse_transfer_token_payload(token_value)
+        if not isinstance(payload, dict):
+            return None
+        job_id = payload.get("job_id")
+        if job_id is None:
+            return None
+        rendered = str(job_id).strip()
+        return rendered or None
+
+    @staticmethod
+    def _derive_transfer_ws_url(transfer_url: str, payload: Dict[str, Any] | None) -> str | None:
+        if payload:
+            ws_url = payload.get("ws_url")
+            if isinstance(ws_url, str) and ws_url.strip():
+                return ws_url.strip()
+        parsed_upload = urlparse(transfer_url)
+        token = dict(parse_qsl(parsed_upload.query, keep_blank_values=True)).get("token")
+        if not token:
+            return None
+        job_id = None
+        if payload:
+            payload_job_id = payload.get("job_id")
+            if payload_job_id is not None:
+                job_id = str(payload_job_id).strip() or None
+        if not job_id:
+            job_id = OWClient._job_id_from_transfer_token(transfer_url)
+        if not job_id:
+            return None
+        ws_scheme = "wss" if parsed_upload.scheme == "https" else "ws"
+        ws_query = urlencode({"token": token})
+        return urlunparse(
+            (
+                ws_scheme,
+                parsed_upload.netloc,
+                f"/transfer/ws/{job_id}",
+                "",
+                ws_query,
+                "",
+            )
+        )
+
+    @staticmethod
+    def _normalize_ws_url(ws_url: str | None) -> str | None:
+        raw = str(ws_url or "").strip()
+        if not raw:
+            return None
+        if raw.startswith("http://"):
+            return "ws://" + raw[len("http://") :]
+        if raw.startswith("https://"):
+            return "wss://" + raw[len("https://") :]
+        return raw
+
+    def _transfer_from_init(self, response: requests.Response) -> StorageTransfer | None:
+        redirect_url = self._redirect_location(response)
+        payload = self._json_payload(response)
+        transfer_url = redirect_url
+        if not transfer_url and payload:
+            candidate = payload.get("transfer_url")
+            if isinstance(candidate, str) and candidate.strip():
+                transfer_url = candidate.strip()
+        if not transfer_url:
+            return None
+        ws_url = self._normalize_ws_url(self._derive_transfer_ws_url(transfer_url, payload))
+        return StorageTransfer(transfer_url=transfer_url, ws_url=ws_url)
+
+    def _upload_ws_idle_timeout(self) -> float:
+        return max(
+            _UPLOAD_WS_IDLE_TIMEOUT_MIN,
+            float(self.timeout) * _UPLOAD_WS_IDLE_TIMEOUT_FACTOR,
+        )
+
+    async def _upload_file_to_storage_async(
+        self,
+        transfer: StorageTransfer,
+        file_path: Path,
+        file_size: int | None,
+        headers: Dict[str, str],
+    ) -> StorageUploadResponse:
+        import aiohttp
+
+        upload_timeout = aiohttp.ClientTimeout(
+            total=None,
+            connect=float(self.timeout),
+            sock_connect=float(self.timeout),
+            sock_read=None,
+        )
+        ws_idle_timeout = self._upload_ws_idle_timeout()
+        last_activity = time.monotonic()
+        last_stage = ""
+        last_progress_percent = -1
+        ws_watchdog_enabled = False
+        stop_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        ws_error_future: asyncio.Future[None] = loop.create_future()
+
+        def mark_activity() -> None:
+            nonlocal last_activity
+            last_activity = time.monotonic()
+
+        async def watch_ws_progress() -> None:
+            nonlocal last_stage
+            nonlocal last_progress_percent
+            nonlocal ws_watchdog_enabled
+            ws_url = transfer.ws_url
+            if not ws_url:
+                return
+            try:
+                async with aiohttp.ClientSession(timeout=upload_timeout) as ws_session:
+                    async with ws_session.ws_connect(ws_url, autoping=True, heartbeat=30) as ws:
+                        logging.info("Connected to storage upload websocket for %s", file_path.name)
+                        mark_activity()
+                        async for message in ws:
+                            if stop_event.is_set():
+                                break
+                            if message.type != aiohttp.WSMsgType.TEXT:
+                                continue
+                            try:
+                                payload = json.loads(message.data)
+                            except (TypeError, ValueError):
+                                continue
+                            if not isinstance(payload, dict):
+                                continue
+                            if not ws_watchdog_enabled:
+                                ws_watchdog_enabled = True
+                                logging.info("Storage upload watchdog armed for %s", file_path.name)
+                            mark_activity()
+                            event = str(payload.get("event") or "").strip().lower()
+                            stage = str(payload.get("stage") or "").strip()
+                            if stage and stage != last_stage:
+                                last_stage = stage
+                                logging.info("Storage upload stage for %s: %s", file_path.name, stage)
+                            if event == "progress":
+                                total = payload.get("total")
+                                sent = payload.get("bytes")
+                                try:
+                                    total_value = int(total)
+                                    sent_value = int(sent)
+                                except (TypeError, ValueError):
+                                    total_value = 0
+                                    sent_value = 0
+                                if total_value > 0:
+                                    percent = min(100, int((sent_value * 100) / total_value))
+                                    if percent >= last_progress_percent + 10 or percent == 100:
+                                        last_progress_percent = percent
+                                        logging.info(
+                                            "Storage upload progress for %s: %s%% (%s/%s bytes)",
+                                            file_path.name,
+                                            percent,
+                                            sent_value,
+                                            total_value,
+                                        )
+                            elif event == "complete":
+                                logging.info("Storage upload completed for %s", file_path.name)
+                                return
+                            elif event == "error":
+                                message_text = str(payload.get("message") or "Storage websocket reported upload error")
+                                if not ws_error_future.done():
+                                    ws_error_future.set_exception(RuntimeError(message_text))
+                                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logging.warning("Storage upload websocket is unavailable for %s: %s", file_path.name, exc)
+
+        async def watchdog() -> None:
+            if not transfer.ws_url:
+                return
+            while not stop_event.is_set():
+                await asyncio.sleep(_UPLOAD_WATCHDOG_POLL_SECONDS)
+                if not ws_watchdog_enabled:
+                    continue
+                idle_for = time.monotonic() - last_activity
+                if idle_for <= ws_idle_timeout:
+                    continue
+                raise TimeoutError(
+                    f"Storage upload websocket was idle for {idle_for:.1f}s "
+                    f"(limit {ws_idle_timeout:.1f}s) for {file_path.name}"
+                )
+
+        async def post_upload() -> StorageUploadResponse:
+            async with aiohttp.ClientSession(timeout=upload_timeout) as upload_session:
+                with file_path.open("rb") as handle:
+                    async with upload_session.post(
+                        transfer.transfer_url,
+                        data=handle,
+                        headers=headers,
+                        allow_redirects=False,
+                    ) as response:
+                        text = await response.text()
+                        return StorageUploadResponse(
+                            status_code=int(response.status),
+                            text=text,
+                            headers=dict(response.headers),
+                        )
+
+        ws_task = asyncio.create_task(watch_ws_progress())
+        watchdog_task = asyncio.create_task(watchdog())
+        upload_task = asyncio.create_task(post_upload())
+        try:
+            wait_targets: set[asyncio.Future[Any] | asyncio.Task[Any]] = {upload_task}
+            if transfer.ws_url:
+                wait_targets.add(watchdog_task)
+                wait_targets.add(ws_error_future)
+            done, pending = await asyncio.wait(wait_targets, return_when=asyncio.FIRST_COMPLETED)
+            if upload_task in done:
+                return await upload_task
+            if ws_error_future in done:
+                upload_task.cancel()
+                await asyncio.gather(upload_task, return_exceptions=True)
+                await ws_error_future
+            if watchdog_task in done:
+                upload_task.cancel()
+                await asyncio.gather(upload_task, return_exceptions=True)
+                await watchdog_task
+            return await upload_task
+        finally:
+            stop_event.set()
+            ws_task.cancel()
+            watchdog_task.cancel()
+            await asyncio.gather(ws_task, watchdog_task, return_exceptions=True)
 
     def _upload_file_to_storage(
         self,
         redirect_response: requests.Response,
         file_path,
-    ) -> requests.Response:
-        upload_url = self._transfer_url_from_init(redirect_response)
-        if not upload_url:
+    ) -> StorageUploadResponse:
+        transfer = self._transfer_from_init(redirect_response)
+        if not transfer:
             raise RuntimeError("Storage init does not contain transfer URL")
+        resolved_path = Path(file_path)
+        upload_url = transfer.transfer_url
         parsed_upload = urlparse(upload_url)
         file_size: int | None = None
         try:
-            file_size = int(file_path.stat().st_size)
+            file_size = int(resolved_path.stat().st_size)
         except (AttributeError, OSError, TypeError, ValueError):
             pass
+        query = dict(parse_qsl(parsed_upload.query, keep_blank_values=True))
+        query.setdefault("filename", resolved_path.name)
         if file_size is not None and file_size >= 0:
-            query = dict(parse_qsl(parsed_upload.query, keep_blank_values=True))
             query.setdefault("size", str(file_size))
+        if query:
             upload_url = urlunparse(parsed_upload._replace(query=urlencode(query)))
             parsed_upload = urlparse(upload_url)
+            transfer = StorageTransfer(transfer_url=upload_url, ws_url=transfer.ws_url)
 
         with start_span(
             "ow.upload_file_to_storage",
@@ -528,28 +798,33 @@ class OWClient:
                 "http.request.method": "POST",
                 "http.route": parsed_upload.path or "/",
                 "ow.upload.host": parsed_upload.netloc or parsed_upload.hostname or "",
-                "ow.upload.file_name": file_path.name,
+                "ow.upload.file_name": resolved_path.name,
                 "ow.upload.file_size": file_size,
                 "ow.redirect.status_code": redirect_response.status_code,
+                "ow.upload.ws_enabled": bool(transfer.ws_url),
             },
         ) as span:
             try:
-                with file_path.open("rb") as handle:
-                    headers = {
-                        "Content-Type": "application/octet-stream",
-                        "X-File-Name": file_path.name,
-                    }
-                    if file_size is not None and file_size >= 0:
-                        headers["X-File-Size"] = str(file_size)
-                    response = self.session.request(
-                        "post",
-                        upload_url,
-                        data=handle,
-                        headers=headers,
-                        timeout=self.timeout,
-                        allow_redirects=False,
+                headers = {
+                    "Content-Type": "application/octet-stream",
+                    "X-File-Name": resolved_path.name,
+                }
+                if file_size is not None and file_size >= 0:
+                    headers["X-File-Size"] = str(file_size)
+                response = asyncio.run(
+                    self._upload_file_to_storage_async(
+                        transfer,
+                        resolved_path,
+                        file_size,
+                        headers,
                     )
+                )
             except requests.RequestException as exc:
+                span.record_exception(exc)
+                span.set_attribute("error.type", type(exc).__name__)
+                span.set_attribute("error.message", str(exc)[:500])
+                raise
+            except Exception as exc:
                 span.record_exception(exc)
                 span.set_attribute("error.type", type(exc).__name__)
                 span.set_attribute("error.message", str(exc)[:500])
