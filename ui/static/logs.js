@@ -1,6 +1,7 @@
 (() => {
   const configNode = document.getElementById("logs-config");
   const targetButtons = Array.from(document.querySelectorAll("#log-targets [data-target]"));
+  const tagFilters = document.getElementById("log-tag-filters");
   const tailSelect = document.getElementById("log-tail");
   const pauseButton = document.getElementById("log-pause");
   const refreshButton = document.getElementById("log-refresh");
@@ -20,6 +21,12 @@
 
   const config = JSON.parse(configNode.textContent || "{}");
   const apiBase = config.apiBase || "";
+  const ALL_TAG_OPTION = [
+    { value: "all", label: "All" },
+    { value: "steam", label: "Steam" },
+    { value: "ow", label: "OW" },
+    { value: "parser", label: "Parser" },
+  ];
   const STATUS_TONES = {
     TRACE: "muted",
     DEBUG: "muted",
@@ -38,8 +45,11 @@
   const TIMESTAMP_PREFIX_RE = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:,\d+)?\s+)(.*)$/;
   const ACCESS_LOG_TIMESTAMP_RE = /\[\d{2}\/[A-Za-z]{3}\/\d{4}:\d{2}:\d{2}:\d{2}\s+[+-]\d{4}\]/g;
   let currentTarget = config.target || "parser";
+  let parserTag = config.tag || "all";
+  let availableTagOptions = ALL_TAG_OPTION.slice();
   let paused = false;
   let inFlight = false;
+  let queuedForcedRefresh = false;
   let lastBody = "";
   let lastRxBytes = null;
   let lastTxBytes = null;
@@ -236,6 +246,11 @@
     url.searchParams.set("tab", "logs");
     url.searchParams.set("target", currentTarget);
     url.searchParams.set("tail", tailSelect.value);
+    if (parserTag && parserTag !== "all" && currentTarget === "parser") {
+      url.searchParams.set("tag", parserTag);
+    } else {
+      url.searchParams.delete("tag");
+    }
     window.history.replaceState({}, "", url.toString());
   }
 
@@ -246,19 +261,65 @@
     logTargetLabel.textContent = currentTarget === "tun" ? "TUN" : currentTarget.charAt(0).toUpperCase() + currentTarget.slice(1);
   }
 
+  function renderTagFilters() {
+    if (!tagFilters) {
+      return;
+    }
+    const visible = currentTarget === "parser";
+    tagFilters.hidden = !visible;
+    if (!visible) {
+      tagFilters.innerHTML = "";
+      return;
+    }
+    tagFilters.innerHTML = availableTagOptions.map((option) => {
+      const value = String(option.value || "all");
+      const label = String(option.label || value.toUpperCase());
+      const active = value === parserTag ? " active" : "";
+      return `<button type="button" class="filter-chip${active}" data-log-tag="${escapeHtml(value)}">${escapeHtml(label)}</button>`;
+    }).join("");
+    Array.from(tagFilters.querySelectorAll("[data-log-tag]")).forEach((button) => {
+      button.addEventListener("click", () => {
+        parserTag = button.dataset.logTag || "all";
+        renderTagFilters();
+        refreshLogs(true);
+      });
+    });
+  }
+
+  function setTagOptions(options, preserveSelection = false) {
+    if (!Array.isArray(options) || options.length === 0) {
+      availableTagOptions = ALL_TAG_OPTION.slice();
+    } else {
+      availableTagOptions = options.map((option) => ({
+        value: String((option && option.value) || "all"),
+        label: String((option && option.label) || "All"),
+      }));
+    }
+    if (!preserveSelection && !availableTagOptions.some((option) => option.value === parserTag)) {
+      parserTag = "all";
+    }
+    renderTagFilters();
+  }
+
   function nearBottom(element) {
     return element.scrollHeight - element.scrollTop - element.clientHeight < 48;
   }
 
   async function refreshLogs(force = false) {
     if ((!force && paused) || inFlight) {
+      if (force) {
+        queuedForcedRefresh = true;
+      }
       return;
     }
     inFlight = true;
     logState.textContent = paused ? "Paused" : "Refreshing...";
     const stickToBottom = nearBottom(output);
+    const requestTarget = currentTarget;
+    const requestTail = tailSelect.value;
+    const requestTag = requestTarget === "parser" ? parserTag : "all";
     try {
-      const response = await fetch(`${apiBase}/${currentTarget}?tail=${tailSelect.value}`, {
+      const response = await fetch(`${apiBase}/${requestTarget}?tail=${requestTail}&tag=${encodeURIComponent(requestTag)}`, {
         headers: { Accept: "application/json" },
         cache: "no-store",
       });
@@ -266,7 +327,22 @@
       if (!response.ok) {
         throw new Error(payload.error || `HTTP ${response.status}`);
       }
-      const text = normalizeLogText(payload.logText || "(empty)");
+      const staleResponse = requestTarget !== currentTarget
+        || requestTail !== tailSelect.value
+        || (requestTarget === "parser" && requestTag !== parserTag);
+      if (staleResponse) {
+        return;
+      }
+      if (currentTarget === "parser") {
+        parserTag = payload.selectedTag || parserTag || "all";
+      }
+      setTagOptions(payload.tagOptions, currentTarget !== "parser");
+      let text = normalizeLogText(payload.logText || "");
+      if (!text) {
+        text = payload.selectedTag && payload.selectedTag !== "all"
+          ? `(no ${payload.selectedTag} log lines in current tail)`
+          : "(empty)";
+      }
       if (text !== lastBody) {
         output.innerHTML = renderLogBody(text);
         lastBody = text;
@@ -353,6 +429,10 @@
       window.autoUpdater.showToast(`Log refresh failed: ${error.message}`, "error");
     } finally {
       inFlight = false;
+      if (queuedForcedRefresh) {
+        queuedForcedRefresh = false;
+        refreshLogs(true);
+      }
     }
   }
 
@@ -360,6 +440,7 @@
     button.addEventListener("click", () => {
       currentTarget = button.dataset.target || "parser";
       setActiveTarget();
+      renderTagFilters();
       refreshLogs(true);
     });
   });
@@ -384,6 +465,7 @@
   });
 
   setActiveTarget();
+  renderTagFilters();
   refreshLogs(true);
   window.setInterval(() => refreshLogs(false), 2000);
 })();

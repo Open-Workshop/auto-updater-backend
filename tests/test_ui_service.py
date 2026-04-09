@@ -236,6 +236,25 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await client.close()
 
+    async def test_dashboard_offloads_summary_loading_to_thread(self) -> None:
+        threaded_calls: list[str] = []
+
+        async def run_in_band(func, *args, **kwargs):
+            threaded_calls.append(getattr(func, "__name__", str(func)))
+            return func(*args, **kwargs)
+
+        with patch("ui.ui_handlers.asyncio.to_thread", side_effect=run_in_band):
+            with patch("ui.ui_handlers._load_instance_summaries", return_value=[]):
+                app = _create_app(load_ui_settings())
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    response = await client.get("/auto-updater/", headers=_auth_headers())
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(threaded_calls, ["_load_instance_summaries"])
+                finally:
+                    await client.close()
+
     async def test_detail_page_logs_tab_contains_live_console(self) -> None:
         with patch("ui.ui_handlers._load_instance_summary", return_value=_sample_summary()):
             app = _create_app(load_ui_settings())
@@ -252,6 +271,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Pause", text)
                 self.assertIn("/auto-updater/api/instances/demo/logs", text)
                 self.assertIn('id="logs-config"', text)
+                self.assertIn('id="log-tag-filters"', text)
                 self.assertIn("/auto-updater/assets/logs.js", text)
             finally:
                 await client.close()
@@ -269,6 +289,50 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("INFO", text)
         finally:
             await client.close()
+
+    async def test_pod_logs_api_offloads_snapshot_to_thread(self) -> None:
+        payload = {
+            "instance": "demo",
+            "target": "parser",
+            "targetLabel": "Parser",
+            "component": "parser",
+            "container": "parser",
+            "podName": "demo-parser-0",
+            "tailLines": 400,
+            "logText": "hello",
+            "selectedTag": "steam",
+            "availableTags": ["steam", "ow"],
+            "tagOptions": [
+                {"value": "all", "label": "All"},
+                {"value": "steam", "label": "STEAM"},
+                {"value": "ow", "label": "OW"},
+            ],
+            "rxBytes": 1,
+            "txBytes": 2,
+        }
+        threaded_calls: list[str] = []
+
+        async def run_in_band(func, *args, **kwargs):
+            threaded_calls.append(getattr(func, "__name__", str(func)))
+            return func(*args, **kwargs)
+
+        with patch("ui.ui_handlers.asyncio.to_thread", side_effect=run_in_band):
+            with patch("ui.ui_handlers._pod_log_snapshot", return_value=payload):
+                app = _create_app(load_ui_settings())
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    response = await client.get(
+                        "/auto-updater/api/instances/demo/logs/parser",
+                        headers=_auth_headers(),
+                    )
+                    self.assertEqual(response.status, 200)
+                    body = await response.json()
+                    self.assertEqual(body["logText"], "hello")
+                    self.assertEqual(body["selectedTag"], "steam")
+                    self.assertEqual(threaded_calls, ["_pod_log_snapshot"])
+                finally:
+                    await client.close()
 
     async def test_instances_api_counts_running_sync_separately_from_health(self) -> None:
         summary = _sample_summary()

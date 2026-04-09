@@ -63,6 +63,10 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          {{- with .Values.ui.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: AUTO_UPDATER_NAMESPACE
               value: {{ .Release.Namespace | quote }}
@@ -88,9 +92,11 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: {{ .Values.ui.probes.timeoutSeconds }}
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
             initialDelaySeconds: 15
             periodSeconds: 20
+            timeoutSeconds: {{ .Values.ui.probes.timeoutSeconds }}

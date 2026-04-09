@@ -14,6 +14,12 @@ operator:
 ui:
   replicas: 1
   basePath: ""
+  probes:
+    timeoutSeconds: 5
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
   auth:
     enabled: true
     username: admin

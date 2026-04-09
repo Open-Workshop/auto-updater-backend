@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import queue
 import shutil
 import threading
@@ -22,6 +21,7 @@ import imagehash
 
 _PHASH_AVAILABLE = True
 
+from core.log_tags import tagged_logger
 from ow.ow_api import ApiClient
 from steam.steam_api import (
     steam_fetch_workshop_page_ids_html,
@@ -40,6 +40,10 @@ from core.utils import (
     truncate,
     zip_directory,
 )
+
+PARSER_LOG = tagged_logger("parser")
+STEAM_LOG = tagged_logger("steam")
+OW_LOG = tagged_logger("ow")
 
 
 @dataclass(frozen=True)
@@ -124,7 +128,7 @@ def _phash_from_path(path: Path) -> str | None:
             img = img.convert("RGB")
             return str(imagehash.phash(img))
     except Exception as exc:
-        logging.debug("Failed to compute phash for %s: %s", path, exc)
+        OW_LOG.debug("Failed to compute phash for %s: %s", path, exc)
         return None
 
 
@@ -333,7 +337,7 @@ class TagManager:
             missing_tags = [tid for tid in desired_tag_ids if tid not in current_tag_ids]
             extra_tags = [tid for tid in current_tag_ids if tid not in desired_tag_ids]
             if missing_tags or extra_tags:
-                logging.debug(
+                OW_LOG.debug(
                     "OW mod %s tags: current=%s desired=%s add=%s prune=%s",
                     ow_mod_id,
                     len(current_tag_ids),
@@ -358,7 +362,7 @@ class TagManager:
                 try:
                     tag_id = self.api.add_tag(tag_name)
                 except Exception as exc:
-                    logging.warning("Failed to add tag %s: %s", tag_name, exc)
+                    OW_LOG.warning("Failed to add tag %s: %s", tag_name, exc)
                     continue
                 self.api.associate_game_tag(self.game_id, tag_id)
                 self._name_to_id[key] = tag_id
@@ -431,7 +435,7 @@ class DependencyManager:
                     if dep_id not in desired_dep_ids:
                         self.api.delete_mod_dependency(ow_mod_id, dep_id)
             elif self.prune and not deps_ok:
-                logging.debug(
+                OW_LOG.debug(
                     "Skip dependency prune for %s due to Steam scrape failure",
                     ow_mod_id,
                 )
@@ -509,7 +513,7 @@ class ResourceSyncer:
             },
         ):
             if not self.upload_files:
-                logging.warning(
+                OW_LOG.warning(
                     "Resource URL sync mode is deprecated; forcing file upload mode for mod %s",
                     ow_mod_id,
                 )
@@ -547,7 +551,7 @@ class ResourceSyncer:
                     self.api.add_resource("mods", ow_mod_id, res_type, url)
 
             if self.prune and images_incomplete:
-                logging.debug(
+                OW_LOG.debug(
                     "Skip resource prune for %s due to missing image cache",
                     ow_mod_id,
                 )
@@ -682,7 +686,7 @@ class ResourceSyncer:
                                 existing_logo_sha256.add(hashes.sha256)
 
         if self.prune and images_incomplete:
-            logging.debug(
+            OW_LOG.debug(
                 "Skip resource prune for %s due to missing image cache",
                 mod.item_id,
             )
@@ -803,7 +807,7 @@ class ResourceSyncer:
                     except FileNotFoundError:
                         pass
                     except Exception:
-                        logging.debug("Failed to remove hash temp %s", file_path)
+                        OW_LOG.debug("Failed to remove hash temp %s", file_path)
 
         self._save_hash_cache(cache_path, cache)
         return hashes_by_id, cache
@@ -819,7 +823,7 @@ class ResourceSyncer:
             status = self._head_status(url)
             if status != 404:
                 continue
-            logging.warning("Deleting OW resource(s) with missing URL: %s", url)
+            OW_LOG.warning("Deleting OW resource(s) with missing URL: %s", url)
             for res_id in res_ids:
                 self.api.delete_resource(int(res_id))
                 if isinstance(cached_resources, dict):
@@ -836,7 +840,7 @@ class ResourceSyncer:
             if len(parts) >= 3 and parts[0] == "download" and parts[1] == "resource":
                 owner_type = parts[2]
                 if owner_type not in {"mods", "games"}:
-                    logging.warning(
+                    OW_LOG.warning(
                         "Skip resource probe for %s (unknown owner_type=%s)",
                         url,
                         owner_type,
@@ -853,7 +857,7 @@ class ResourceSyncer:
                     headers={"Range": "bytes=0-0"},
                 )
             except requests.RequestException as exc:
-                logging.debug("Failed to probe resource %s: %s", url, exc)
+                OW_LOG.debug("Failed to probe resource %s: %s", url, exc)
                 return None
             try:
                 return int(response.status_code)
@@ -862,7 +866,7 @@ class ResourceSyncer:
         try:
             response = requests.head(url, timeout=self.timeout, allow_redirects=True)
         except requests.RequestException as exc:
-            logging.debug("Failed to probe resource %s: %s", url, exc)
+            OW_LOG.debug("Failed to probe resource %s: %s", url, exc)
             return None
         try:
             status = int(response.status_code)
@@ -879,7 +883,7 @@ class ResourceSyncer:
                 headers={"Range": "bytes=0-0"},
             )
         except requests.RequestException as exc:
-            logging.debug("Failed to probe resource %s: %s", url, exc)
+            OW_LOG.debug("Failed to probe resource %s: %s", url, exc)
             return None
         try:
             return int(response.status_code)
@@ -948,7 +952,7 @@ class ResourceSyncer:
         try:
             path.write_text(json.dumps(cache, ensure_ascii=True, indent=2), "utf-8")
         except Exception as exc:
-            logging.warning("Failed to write hash cache %s: %s", path, exc)
+            OW_LOG.warning("Failed to write hash cache %s: %s", path, exc)
 
     @staticmethod
     def _build_desired_resources(images: List[str]) -> List[tuple[str, str]]:
@@ -976,7 +980,7 @@ class SteamModLoader:
     def load_batch(self, item_ids: List[str]) -> Dict[str, SteamMod]:
         if not item_ids:
             return {}
-        logging.info("Steam batch load: items=%s", len(item_ids))
+        STEAM_LOG.info("Steam batch load: items=%s", len(item_ids))
         with start_span(
             "steam.load_batch",
             {
@@ -993,7 +997,7 @@ class SteamModLoader:
             total = len(item_ids)
             for idx, item_id in enumerate(item_ids, start=1):
                 start = time.monotonic()
-                logging.info("Steam load %s/%s id=%s", idx, total, item_id)
+                STEAM_LOG.info("Steam load %s/%s id=%s", idx, total, item_id)
                 mod = SteamMod(item_id)
                 ok = await mod.load(
                     timeout=self.timeout,
@@ -1002,11 +1006,11 @@ class SteamModLoader:
                 )
                 elapsed = time.monotonic() - start
                 if not ok:
-                    logging.warning(
+                    STEAM_LOG.warning(
                         "Steam page parse failed for %s (%.2fs)", item_id, elapsed
                     )
                     continue
-                logging.debug("Steam page loaded %s (%.2fs)", item_id, elapsed)
+                STEAM_LOG.debug("Steam page loaded %s (%.2fs)", item_id, elapsed)
                 results[str(item_id)] = mod
         return results
 
@@ -1111,7 +1115,7 @@ class ModSyncer:
 
             stats = steam_stats_snapshot()
             if stats.get("total"):
-                logging.info(
+                STEAM_LOG.info(
                     "Steam requests: total=%s ok=%s failed=%s endpoints=%s",
                     stats.get("total"),
                     stats.get("success"),
@@ -1142,9 +1146,9 @@ class ModSyncer:
         try:
             if self.options.force_required_item_id:
                 self.queue.enqueue_metadata(str(self.options.force_required_item_id))
-                logging.info("Steam workshop items: 1 (forced)")
+                STEAM_LOG.info("Steam workshop items: 1 (forced)")
             else:
-                logging.info(
+                STEAM_LOG.info(
                     "Steam workshop listing: start_page=%s max_items=%s max_pages=%s",
                     self.start_page,
                     self.options.max_items or "unlimited",
@@ -1166,7 +1170,7 @@ class ModSyncer:
                 if not self._fetch_next_page():
                     break
         except Exception as exc:
-            logging.exception("Steam producer failed")
+            STEAM_LOG.exception("Steam producer failed")
             self._record_worker_error(exc)
         finally:
             self.queue.finish_producer()
@@ -1181,7 +1185,7 @@ class ModSyncer:
                 if self.queue.producer_finished():
                     break
         except Exception as exc:
-            logging.exception("Steam downloader failed")
+            STEAM_LOG.exception("Steam downloader failed")
             self._record_worker_error(exc)
         finally:
             self.queue.finish_downloader()
@@ -1196,7 +1200,7 @@ class ModSyncer:
                 if self.queue.downloader_finished():
                     break
         except Exception as exc:
-            logging.exception("OW worker failed")
+            OW_LOG.exception("OW worker failed")
             self._record_worker_error(exc)
 
     def _fetch_next_page(self) -> bool:
@@ -1213,7 +1217,7 @@ class ModSyncer:
                 last_page = self.start_page + self.options.max_pages - 1
                 if self.page > last_page:
                     return False
-            logging.info(
+            STEAM_LOG.info(
                 "Steam workshop page fetch: page=%s max_pages=%s",
                 self.page,
                 self.options.max_pages or "unlimited",
@@ -1277,7 +1281,7 @@ class ModSyncer:
             "metadata.batch",
             {"metadata.batch_size": len(batch_ids)},
         ):
-            logging.info("Process metadata batch: size=%s", len(batch_ids))
+            STEAM_LOG.info("Process metadata batch: size=%s", len(batch_ids))
             now_ts = int(time.time())
             window_label = _recent_edit_window_label()
             ow_mod_map = self._fetch_existing_ow_mods(batch_ids)
@@ -1287,7 +1291,7 @@ class ModSyncer:
                 ow_mod = ow_mod_map.get(str(workshop_id))
                 if ow_mod and _ow_recent_edit(ow_mod, now_ts):
                     skipped_recent += 1
-                    logging.info(
+                    STEAM_LOG.info(
                         "Skipping Steam fetch for %s (recent OW edit within %s)",
                         ow_mod.get("id") or workshop_id,
                         window_label,
@@ -1295,13 +1299,13 @@ class ModSyncer:
                     continue
                 fetch_ids.append(str(workshop_id))
             if not fetch_ids:
-                logging.info(
+                STEAM_LOG.info(
                     "Skipped %s mods from Steam fetch due to recent edits",
                     skipped_recent,
                 )
                 return
             if skipped_recent:
-                logging.info(
+                STEAM_LOG.info(
                     "Skipped %s mods from Steam fetch due to recent edits",
                     skipped_recent,
                 )
@@ -1311,7 +1315,7 @@ class ModSyncer:
             for workshop_id in fetch_ids:
                 mod = self.steam_mod_cache.get(str(workshop_id))
                 if not mod:
-                    logging.warning("Steam page missing for %s", workshop_id)
+                    STEAM_LOG.warning("Steam page missing for %s", workshop_id)
                     continue
                 with start_span(
                     "mod.payload_build",
@@ -1321,14 +1325,14 @@ class ModSyncer:
                 if payload is None:
                     continue
                 if payload.ow_mod_id is not None and _ow_recent_edit(payload.ow_mod):
-                    logging.info(
+                    OW_LOG.info(
                         "Skipping OW mod %s (recent edit within %s)",
                         payload.ow_mod_id,
                         _recent_edit_window_label(),
                     )
                     continue
                 if self._needs_file_update(mod, payload.ow_mod):
-                    logging.info(
+                    STEAM_LOG.info(
                         "Queue download for %s (new=%s)",
                         workshop_id,
                         payload.ow_mod_id is None,
@@ -1339,20 +1343,20 @@ class ModSyncer:
                 if payload.ow_mod_id is None:
                     continue
 
-                logging.info("Queue OW metadata update for %s", payload.ow_mod_id)
+                OW_LOG.info("Queue OW metadata update for %s", payload.ow_mod_id)
                 self.queue.enqueue_ready(str(workshop_id), payload)
 
     def _process_download_task(self, task: DownloadTask) -> None:
         item_id = task.item_id
         payload = task.payload
-        logging.info(
+        STEAM_LOG.info(
             "Downloading Steam mod %s (payload_new=%s)",
             item_id,
             payload.is_new,
         )
         archive_path = self._download_mod_archive(item_id)
         if not archive_path:
-            logging.error("Steam download failed for %s", item_id)
+            STEAM_LOG.error("Steam download failed for %s", item_id)
             return
         self.queue.enqueue_ready(item_id, payload, archive_path=archive_path)
 
@@ -1366,7 +1370,7 @@ class ModSyncer:
     def _process_metadata_update(self, item_id: str, payload: ModPayload) -> None:
         if payload.ow_mod_id is None:
             return
-        logging.info("Updating OW mod %s metadata", payload.ow_mod_id)
+        OW_LOG.info("Updating OW mod %s metadata", payload.ow_mod_id)
         with start_span(
             "ow.mod_upsert",
             {
@@ -1424,7 +1428,7 @@ class ModSyncer:
                         },
                     )
         if ow_mod is not None and _ow_recent_edit(ow_mod):
-            logging.info(
+            OW_LOG.info(
                 "Skipping OW mod %s download (recent edit within %s)",
                 ow_mod_id,
                 _recent_edit_window_label(),
@@ -1464,9 +1468,9 @@ class ModSyncer:
                 },
             )
             if created_now:
-                logging.info("Created OW mod %s for %s", int(ow_mod_id), item_id)
+                OW_LOG.info("Created OW mod %s for %s", int(ow_mod_id), item_id)
             else:
-                logging.info("Updated OW mod %s file", int(ow_mod_id))
+                OW_LOG.info("Updated OW mod %s file", int(ow_mod_id))
 
             if ow_mod_id is None:
                 return
@@ -1510,7 +1514,7 @@ class ModSyncer:
         if not path.exists():
             return
         if not path.is_dir():
-            logging.warning(
+            PARSER_LOG.warning(
                 "Skip cache cleanup for %s (%s): path is not a directory",
                 path,
                 reason,
@@ -1527,14 +1531,14 @@ class ModSyncer:
             except FileNotFoundError:
                 continue
             except Exception as exc:
-                logging.warning(
+                PARSER_LOG.warning(
                     "Failed to delete cache entry %s (%s): %s",
                     child,
                     reason,
                     exc,
                 )
         if removed:
-            logging.info("Cache cleanup %s (%s): removed=%s", path, reason, removed)
+            PARSER_LOG.info("Cache cleanup %s (%s): removed=%s", path, reason, removed)
 
     @staticmethod
     def _safe_unlink(path: Path) -> None:
@@ -1543,16 +1547,16 @@ class ModSyncer:
         except FileNotFoundError:
             pass
         except Exception as exc:
-            logging.warning("Failed to remove archive %s: %s", path, exc)
+            PARSER_LOG.warning("Failed to remove archive %s: %s", path, exc)
 
     def _build_payload(self, mod: SteamMod, workshop_id: str) -> Optional[ModPayload]:
         title = mod.title
         if not title:
             title = f"Steam Mod {workshop_id}"
-            logging.warning("Steam %s missing title, using fallback", workshop_id)
+            STEAM_LOG.warning("Steam %s missing title, using fallback", workshop_id)
         raw_description = mod.description
         tags = mod.tags
-        logging.debug("Steam %s tags: %s", workshop_id, tags)
+        STEAM_LOG.debug("Steam %s tags: %s", workshop_id, tags)
 
         short_desc = strip_bbcode(raw_description)
         if not short_desc:
@@ -1593,7 +1597,7 @@ class ModSyncer:
                 if len(screenshots) > self.options.max_screenshots:
                     screenshots = screenshots[: self.options.max_screenshots]
                 images = [logo] + screenshots
-        logging.debug(
+        STEAM_LOG.debug(
             "Steam %s images: %s (logo=%s extra=%s)",
             workshop_id,
             len(images),
@@ -1664,7 +1668,7 @@ class ModSyncer:
                 if download_result.ok:
                     return download_result.archive_path
                 reason = download_result.reason or "unknown reason"
-                logging.error(
+                STEAM_LOG.error(
                     "SteamCMD download attempt %s/%s failed for %s: %s",
                     attempt,
                     DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS,
@@ -1674,7 +1678,7 @@ class ModSyncer:
                 if attempt >= DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS or not download_result.retryable:
                     return None
                 delay = DEPOTDOWNLOADER_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
-                logging.warning(
+                STEAM_LOG.warning(
                     "Retrying SteamCMD download for %s in %.1fs",
                     item_id,
                     delay,
@@ -1698,7 +1702,7 @@ class ModSyncer:
             details = ""
             if response is not None:
                 details = f" status={response.status_code} body={(response.text or '')[:200]!r}"
-            logging.warning("Failed to notify archive done: %s%s", exc, details)
+            PARSER_LOG.warning("Failed to notify archive done: %s%s", exc, details)
         finally:
             if response is not None:
                 response.close()
@@ -1723,11 +1727,11 @@ def ensure_game(
             try:
                 game = api.get_game(game_id)
             except Exception as exc:
-                logging.warning("Game %s not found: %s", game_id, exc)
+                OW_LOG.warning("Game %s not found: %s", game_id, exc)
             else:
                 source_id = game.get("source_id")
                 if source_id and int(source_id) != steam_app_id:
-                    logging.warning(
+                    OW_LOG.warning(
                         "OW game source_id %s does not match steam app id %s",
                         source_id,
                         steam_app_id,

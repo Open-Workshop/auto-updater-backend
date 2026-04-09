@@ -9,6 +9,7 @@ from aiohttp import web
 
 from core.config import Config, load_config
 from kube.kube_client import merge_instance_status
+from core.log_tags import parser_log_handler
 from ow.ow_api import ApiClient, load_api_limits, ow_get_game
 from steam.steam_api import (
     set_steam_proxy_pool,
@@ -281,8 +282,7 @@ def run_parser() -> int:
     log_level = getattr(logging, cfg.log_level.upper(), logging.INFO)
     logging.basicConfig(
         level=log_level,
-        format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[logging.StreamHandler()],
+        handlers=[parser_log_handler()],
     )
     init_telemetry()
     runtime = ParserRuntime(cfg)

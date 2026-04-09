@@ -1,14 +1,17 @@
 """HTTP request handlers for UI service."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 from urllib.parse import quote, urlencode
 
 import requests
 from aiohttp import web
+from kubernetes.client.rest import ApiException
 
 from core.instance_schema import default_spec
+from core.log_tags import filter_log_text_by_tag, format_log_tag_options, normalize_log_tag
 from kube.kube_client import (
     delete_instance,
     delete_secret,
@@ -49,6 +52,11 @@ from ui.ui_forms import (
 from ui.ui_instance import _dashboard_resource_totals, _load_instance_summary, _load_instance_summaries
 from ui.ui_kube_utils import _select_best_pod
 from ui.ui_pages import _dashboard, _dashboard_counts, _detail_page, _new_instance_page
+
+
+async def _run_blocking(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """Run synchronous control-plane I/O away from the aiohttp event loop."""
+    return await asyncio.to_thread(func, *args, **kwargs)
 
 
 def _flash_redirect(settings: UISettings, path: str, message: str, kind: str = "info") -> web.HTTPFound:
@@ -124,6 +132,10 @@ def _tail_lines_from_request(request: web.Request, default: int = 400) -> int:
     return max(50, min(value, 2000))
 
 
+def _log_tag_from_request(request: web.Request) -> str:
+    return normalize_log_tag(str(request.query.get("tag", "")).strip()) or "all"
+
+
 def _latest_pod_name(namespace: str, name: str, component: str) -> str:
     """Get the latest pod name for a component."""
     from kube.kube_client import get_kube_clients
@@ -134,7 +146,13 @@ def _latest_pod_name(namespace: str, name: str, component: str) -> str:
     return str(best.metadata.name or "") if best is not None else ""
 
 
-def _pod_log_snapshot(settings: UISettings, name: str, target: str, tail_lines: int) -> dict[str, Any]:
+def _pod_log_snapshot(
+    settings: UISettings,
+    name: str,
+    target: str,
+    tail_lines: int,
+    selected_tag: str = "all",
+) -> dict[str, Any]:
     """Get pod log snapshot."""
     from ui.ui_kube_utils import _pod_network_metrics
     
@@ -152,6 +170,7 @@ def _pod_log_snapshot(settings: UISettings, name: str, target: str, tail_lines: 
         container=container,
         tail_lines=tail_lines,
     )
+    filtered_log_text, available_tags, applied_tag = filter_log_text_by_tag(log_text, selected_tag)
     
     return {
         "instance": name,
@@ -161,7 +180,10 @@ def _pod_log_snapshot(settings: UISettings, name: str, target: str, tail_lines: 
         "container": container,
         "podName": pod_name,
         "tailLines": tail_lines,
-        "logText": log_text,
+        "logText": filtered_log_text,
+        "selectedTag": applied_tag,
+        "availableTags": available_tags,
+        "tagOptions": format_log_tag_options(available_tags),
         "rxBytes": network_metrics.get("rxBytes"),
         "txBytes": network_metrics.get("txBytes"),
     }
@@ -245,7 +267,7 @@ async def dashboard(request: web.Request) -> web.Response:
     """Dashboard page handler."""
     settings: UISettings = request.app["settings"]
     flash, flash_kind = _flash_from_request(request)
-    items = _load_instance_summaries(settings)
+    items = await _run_blocking(_load_instance_summaries, settings)
     resource_totals = _dashboard_resource_totals(items)
     return web.Response(
         text=_dashboard(settings, items, flash, flash_kind, resource_totals),
@@ -256,7 +278,7 @@ async def dashboard(request: web.Request) -> web.Response:
 async def instances_api(request: web.Request) -> web.Response:
     """Instances API endpoint."""
     settings: UISettings = request.app["settings"]
-    items = _load_instance_summaries(settings)
+    items = await _run_blocking(_load_instance_summaries, settings)
     return web.json_response(
         {
             "items": items,
@@ -271,7 +293,7 @@ async def instance_summary_api(request: web.Request) -> web.Response:
     settings: UISettings = request.app["settings"]
     name = request.match_info["name"]
     try:
-        payload = _load_instance_summary(settings, name)
+        payload = await _run_blocking(_load_instance_summary, settings, name)
     except web.HTTPException:
         raise
     except Exception as exc:
@@ -300,14 +322,15 @@ async def instance_detail_page(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     tab = str(request.query.get("tab", "overview")).strip().lower() or "overview"
     target = str(request.query.get("target", "parser")).strip().lower() or "parser"
+    log_tag = _log_tag_from_request(request)
     tail_lines = _tail_lines_from_request(request)
     flash, flash_kind = _flash_from_request(request)
-    summary = _load_instance_summary(settings, name)
-    resources = _load_resource_entries(settings, name) if tab == "resources" else []
-    instance = get_instance(settings.namespace, name) if tab == "settings" else None
+    summary = await _run_blocking(_load_instance_summary, settings, name)
+    resources = await _run_blocking(_load_resource_entries, settings, name) if tab == "resources" else []
+    instance = await _run_blocking(get_instance, settings.namespace, name) if tab == "settings" else None
     settings_form = ""
     if tab == "settings":
-        context = _editor_context(settings, instance)
+        context = await _run_blocking(_editor_context, settings, instance)
         settings_form = _settings_form(
             settings,
             context,
@@ -324,6 +347,7 @@ async def instance_detail_page(request: web.Request) -> web.Response:
             flash=flash,
             flash_kind=flash_kind,
             target=target,
+            log_tag=log_tag,
             tail_lines=tail_lines,
         ),
         content_type="text/html",
@@ -345,14 +369,25 @@ async def pod_logs_api(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     target = request.match_info["target"]
     tail_lines = _tail_lines_from_request(request)
+    selected_tag = _log_tag_from_request(request)
     try:
-        payload = _pod_log_snapshot(settings, name, target, tail_lines)
+        payload = await _run_blocking(
+            _pod_log_snapshot,
+            settings,
+            name,
+            target,
+            tail_lines,
+            selected_tag,
+        )
     except web.HTTPException as exc:
         return web.json_response(
             {
                 "instance": name,
                 "target": target,
                 "tailLines": tail_lines,
+                "selectedTag": selected_tag,
+                "availableTags": [],
+                "tagOptions": format_log_tag_options(()),
                 "error": exc.text or exc.reason,
             },
             status=exc.status,
@@ -363,6 +398,9 @@ async def pod_logs_api(request: web.Request) -> web.Response:
                 "instance": name,
                 "target": target,
                 "tailLines": tail_lines,
+                "selectedTag": selected_tag,
+                "availableTags": [],
+                "tagOptions": format_log_tag_options(()),
                 "error": str(exc),
             },
             status=502,
@@ -395,10 +433,11 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
     existing_password = ""
     if original_name:
         try:
-            instance = get_instance(settings.namespace, original_name)
+            instance = await _run_blocking(get_instance, settings.namespace, original_name)
             credentials_ref = normalize_instance(instance)["spec"]["credentials"]["secretRef"]
-            existing_password = read_secret_value(settings.namespace, credentials_ref, "password")
-        except Exception:
+            existing_password = await _run_blocking(read_secret_value, settings.namespace, credentials_ref, "password")
+        except (ApiException, KeyError, ValueError) as exc:
+            logging.debug("Failed to load existing credentials for %s: %s", original_name, exc)
             instance = None
     runner_proxy_type = str(form.get("runner_proxy_type", "socks5")).strip() or "socks5"
     runner_proxy_url = str(form.get("runner_proxy_url", "")).strip()
@@ -435,7 +474,8 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
         except Exception as exc:
             errors["runner_proxy_url"] = str(exc)
     if errors:
-        context = _editor_context(
+        context = await _run_blocking(
+            _editor_context,
             settings,
             instance,
             form_data=submitted,
@@ -447,7 +487,7 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
         if instance is None:
             body = _new_instance_page(settings, context, "", "info")
         else:
-            summary = _load_instance_summary(settings, original_name or name)
+            summary = await _run_blocking(_load_instance_summary, settings, original_name or name)
             body = _detail_page(
                 settings,
                 summary,
@@ -503,14 +543,15 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
             },
         },
     }
-    replace_or_create_instance(settings.namespace, name, body)
-    saved_instance = get_instance(settings.namespace, name)
+    await _run_blocking(replace_or_create_instance, settings.namespace, name, body)
+    saved_instance = await _run_blocking(get_instance, settings.namespace, name)
     secret_specs = managed_secret_specs(saved_instance)
     credentials_metadata = secret_specs["credentials"]
     parser_proxy_metadata = secret_specs["parser_proxy"]
     runner_proxy_metadata = secret_specs["runner_proxy"]
 
-    upsert_secret(
+    await _run_blocking(
+        upsert_secret,
         settings.namespace,
         {
             "apiVersion": "v1",
@@ -529,7 +570,8 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
         },
     )
     if parser_proxy_pool_value:
-        upsert_secret(
+        await _run_blocking(
+            upsert_secret,
             settings.namespace,
             {
                 "apiVersion": "v1",
@@ -547,8 +589,9 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
             },
         )
     else:
-        delete_secret(settings.namespace, parser_proxy_metadata.name)
-    upsert_secret(
+        await _run_blocking(delete_secret, settings.namespace, parser_proxy_metadata.name)
+    await _run_blocking(
+        upsert_secret,
         settings.namespace,
         {
             "apiVersion": "v1",
@@ -566,9 +609,9 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
         },
     )
     if original_name and original_name != name:
-        delete_instance(settings.namespace, original_name)
+        await _run_blocking(delete_instance, settings.namespace, original_name)
         for secret_name in managed_secret_names(original_name):
-            delete_secret(settings.namespace, secret_name)
+            await _run_blocking(delete_secret, settings.namespace, secret_name)
     return _action_response(
         request,
         settings,
@@ -587,7 +630,7 @@ async def sync_now(request: web.Request) -> web.StreamResponse:
     return_path = str(form.get("return_path", "")).strip() if form else ""
     redirect_path = return_path or f"/instances/{quote(name)}?tab=overview"
     try:
-        response = requests.post(url, timeout=5)
+        response = await _run_blocking(requests.post, url, timeout=5)
         response.raise_for_status()
     except requests.RequestException as exc:
         if _wants_json(request):
@@ -608,9 +651,9 @@ async def toggle_instance(request: web.Request) -> web.StreamResponse:
     name = request.match_info["name"]
     form = await request.post()
     return_path = str(form.get("return_path", "")).strip() or f"/instances/{quote(name)}?tab=overview"
-    instance = normalize_instance(get_instance(settings.namespace, name))
+    instance = normalize_instance(await _run_blocking(get_instance, settings.namespace, name))
     enabled = not bool(instance["spec"].get("enabled", True))
-    patch_instance(settings.namespace, name, {"spec": {"enabled": enabled}})
+    await _run_blocking(patch_instance, settings.namespace, name, {"spec": {"enabled": enabled}})
     return _action_response(
         request,
         settings,
@@ -625,9 +668,9 @@ async def delete_instance_route(request: web.Request) -> web.StreamResponse:
     settings: UISettings = request.app["settings"]
     name = request.match_info["name"]
     await request.post()
-    delete_instance(settings.namespace, name)
+    await _run_blocking(delete_instance, settings.namespace, name)
     for secret_name in managed_secret_names(name):
-        delete_secret(settings.namespace, secret_name)
+        await _run_blocking(delete_secret, settings.namespace, secret_name)
     return _action_response(
         request,
         settings,

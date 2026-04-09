@@ -231,8 +231,15 @@ def _overview_tab(settings: UISettings, summary: dict[str, Any], return_path: st
     )
 
 
-def _logs_tab(settings: UISettings, summary: dict[str, Any], target: str, tail_lines: int) -> str:
+def _logs_tab(
+    settings: UISettings,
+    summary: dict[str, Any],
+    target: str,
+    log_tag: str,
+    tail_lines: int,
+) -> str:
     normalized_target = str(target or "parser").strip().lower() or "parser"
+    normalized_tag = str(log_tag or "all").strip().lower() or "all"
     return render_template(
         "logs_tab.html",
         tail_200_selected="selected" if tail_lines == 200 else "",
@@ -245,6 +252,7 @@ def _logs_tab(settings: UISettings, summary: dict[str, Any], target: str, tail_l
             {
                 "apiBase": summary["urls"]["logsApi"],
                 "target": normalized_target,
+                "tag": normalized_tag,
             }
         ),
         logs_js_href=_escape(_url(settings, "/assets/logs.js")),
@@ -288,13 +296,14 @@ def _detail_page(
     flash: str = "",
     flash_kind: str = "info",
     target: str = "parser",
+    log_tag: str = "all",
     tail_lines: int = 400,
 ) -> str:
     resources = resources or []
     tab = active_tab if active_tab in {"overview", "logs", "resources", "settings"} else "overview"
     return_path = f"/instances/{quote(summary['name'])}?tab={tab}"
     if tab == "logs":
-        tab_body = _logs_tab(settings, summary, target, tail_lines)
+        tab_body = _logs_tab(settings, summary, target, log_tag, tail_lines)
     elif tab == "resources":
         tab_body = _resources_tab(resources)
     elif tab == "settings":
