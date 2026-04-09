@@ -112,6 +112,28 @@ class InstanceSchemaTests(unittest.TestCase):
         self.assertEqual(errors["steam_request_delay"], "Steam request delay must be zero or greater")
         self.assertEqual(errors["steam_delay"], "Steam page delay must be zero or greater")
 
+    def test_optional_numeric_fields_accept_blank_and_use_defaults(self) -> None:
+        errors = validate_sync_form_inputs(
+            {
+                "steam_max_items": "",
+                "public_mode": "",
+            }
+        )
+
+        self.assertNotIn("steam_max_items", errors)
+        self.assertNotIn("public_mode", errors)
+
+        sync = build_sync_spec_from_form(
+            default_spec()["sync"],
+            {
+                "steam_max_items": "",
+                "public_mode": "",
+            },
+        )
+
+        self.assertEqual(sync["steamMaxItems"], 0)
+        self.assertEqual(sync["publicMode"], 0)
+
     def test_sync_json_patch_is_additive_only_for_unknown_fields(self) -> None:
         sync = build_sync_spec_from_form(
             INSTANCE["spec"]["sync"],

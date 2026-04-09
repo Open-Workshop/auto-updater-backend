@@ -9,6 +9,7 @@
   <form class="settings-form" method="post" action="$action_url">
     <input type="hidden" name="original_name" value="$original_name">
     <input type="hidden" name="return_path" value="$return_path">
+    $error_summary_html
 
     <section class="panel-section">
       <div class="section-title">Basics</div>
@@ -105,7 +106,7 @@
       </div>
     </section>
 
-    <details class="panel-section expert-panel">
+    <details class="panel-section expert-panel"$expert_open_attr>
       <summary>Expert mode</summary>
       <div class="section-title">Structured runtime tuning</div>
       <div class="field-grid">

@@ -61,6 +61,7 @@ class SyncFieldSpec:
     value_type: str
     default: Any
     minimum: int | float | None = None
+    required: bool = True
 
     def normalize(self, value: Any) -> Any:
         parsed = self._coerce(value, self.default)
@@ -84,6 +85,8 @@ class SyncFieldSpec:
             return None
         raw = str(value or "").strip()
         if not raw:
+            if not self.required:
+                return None
             return f"{self.label} is required"
         if self.value_type == "int":
             try:
@@ -135,14 +138,14 @@ SYNC_FIELD_SPECS: tuple[SyncFieldSpec, ...] = (
     SyncFieldSpec("steamRequestDelay", "OW_STEAM_REQUEST_DELAY", "steam_request_delay", "steam_request_delay", "Steam request delay", "float", 1.0, minimum=0.0),
     SyncFieldSpec("steamMaxPages", "OW_STEAM_MAX_PAGES", "steam_max_pages", "steam_max_pages", "Steam max pages", "int", 1000, minimum=0),
     SyncFieldSpec("steamStartPage", "OW_STEAM_START_PAGE", "steam_start_page", "steam_start_page", "Steam start page", "int", 1, minimum=1),
-    SyncFieldSpec("steamMaxItems", "OW_STEAM_MAX_ITEMS", "steam_max_items", "steam_max_items", "Steam max items", "int", 0, minimum=0),
+    SyncFieldSpec("steamMaxItems", "OW_STEAM_MAX_ITEMS", "steam_max_items", "steam_max_items", "Steam max items", "int", 0, minimum=0, required=False),
     SyncFieldSpec("steamDelay", "OW_STEAM_DELAY", "steam_delay", "steam_delay", "Steam page delay", "float", 1.0, minimum=0.0),
     SyncFieldSpec("maxScreenshots", "OW_MAX_SCREENSHOTS", "max_screenshots", "max_screenshots", "Max screenshots", "int", 20, minimum=0),
     SyncFieldSpec("uploadResourceFiles", "OW_RESOURCE_UPLOAD_FILES", "upload_resource_files", "upload_resource_files", "Upload resource files", "bool", True),
     SyncFieldSpec("scrapePreviewImages", "OW_SCRAPE_PREVIEW_IMAGES", "scrape_preview_images", "scrape_preview_images", "Scrape preview images", "bool", True),
     SyncFieldSpec("scrapeRequiredItems", "OW_SCRAPE_REQUIRED_ITEMS", "scrape_required_items", "scrape_required_items", "Scrape required items", "bool", True),
     SyncFieldSpec("forceRequiredItemId", "OW_FORCE_REQUIRED_ITEM_ID", "force_required_item_id", "force_required_item_id", "Forced required item", "str", ""),
-    SyncFieldSpec("publicMode", "OW_MOD_PUBLIC", "public_mode", "public_mode", "Mod public mode", "int", 0),
+    SyncFieldSpec("publicMode", "OW_MOD_PUBLIC", "public_mode", "public_mode", "Mod public mode", "int", 0, required=False),
     SyncFieldSpec("withoutAuthor", "OW_WITHOUT_AUTHOR", "without_author", "without_author", "Without author", "bool", False),
     SyncFieldSpec("syncTags", "OW_SYNC_TAGS", "sync_tags", "sync_tags", "Sync tags", "bool", True),
     SyncFieldSpec("pruneTags", "OW_PRUNE_TAGS", "prune_tags", "prune_tags", "Prune tags", "bool", True),

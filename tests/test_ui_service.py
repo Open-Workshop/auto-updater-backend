@@ -609,6 +609,70 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                                     finally:
                                         await client.close()
 
+    async def test_save_validation_opens_expert_panel_and_shows_summary(self) -> None:
+        with patch("ui.ui_handlers.get_instance", return_value=_sample_instance()):
+            with patch("ui.ui_handlers.read_secret_value", side_effect=_secret_value):
+                with patch("ui.ui_forms.read_secret_value", side_effect=_secret_value):
+                    with patch("ui.ui_handlers._load_instance_summary", return_value=_sample_summary()):
+                        app = _create_app(load_ui_settings())
+                        client = TestClient(TestServer(app))
+                        await client.start_server()
+                        try:
+                            response = await client.post(
+                                "/auto-updater/instances/save",
+                                headers=_auth_headers(),
+                                data={
+                                    "original_name": "demo",
+                                    "name": "demo",
+                                    "return_path": "/instances/demo?tab=settings",
+                                    "enabled": "on",
+                                    "steam_app_id": "602960",
+                                    "ow_game_id": "3",
+                                    "language": "english",
+                                    "parser_storage_size": "20Gi",
+                                    "runner_storage_size": "10Gi",
+                                    "ow_login": "demo-login",
+                                    "ow_password": "",
+                                    "runner_proxy_type": "socks5",
+                                    "runner_proxy_url": "socks5://runner-user:runner-pass@127.0.0.1:3001",
+                                    "parser_proxy_pool": "socks5://pool-user:pool-pass@127.0.0.1:3001",
+                                    "api_base": "https://api.openworkshop.miskler.ru",
+                                    "page_size": "77",
+                                    "poll_interval_seconds": "600",
+                                    "timeout_seconds": "60",
+                                    "http_retries": "3",
+                                    "http_retry_backoff": "5.0",
+                                    "steam_http_retries": "2",
+                                    "steam_http_backoff": "2.0",
+                                    "steam_request_delay": "1.0",
+                                    "steam_max_pages": "3000",
+                                    "steam_start_page": "1",
+                                    "steam_max_items": "0",
+                                    "steam_delay": "1.0",
+                                    "log_level": "INFO",
+                                    "max_screenshots": "20",
+                                    "public_mode": "0",
+                                    "force_required_item_id": "",
+                                    "sync_json_patch": "{broken",
+                                    "sync_tags": "on",
+                                    "prune_tags": "on",
+                                    "sync_dependencies": "on",
+                                    "prune_dependencies": "on",
+                                    "sync_resources": "on",
+                                    "prune_resources": "on",
+                                    "upload_resource_files": "on",
+                                    "scrape_preview_images": "on",
+                                    "scrape_required_items": "on",
+                                },
+                            )
+                            self.assertEqual(response.status, 400)
+                            text = await response.text()
+                            self.assertIn("Save failed.", text)
+                            self.assertIn("sync_json_patch", text)
+                            self.assertIn("<details class=\"panel-section expert-panel\" open>", text)
+                        finally:
+                            await client.close()
+
     async def test_delete_instance_keeps_legacy_secret_cleanup_as_fallback(self) -> None:
         events: list[tuple[str, str]] = []
 

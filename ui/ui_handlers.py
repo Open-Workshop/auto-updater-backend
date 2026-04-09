@@ -273,6 +273,11 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
         except Exception as exc:
             errors["runner_proxy_url"] = str(exc)
     if errors:
+        logging.warning(
+            "Validation failed while saving instance %s: %s",
+            original_name or name or "<unnamed>",
+            errors,
+        )
         context = await _run_blocking(
             _editor_context,
             settings,

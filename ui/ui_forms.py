@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from core.instance_schema import (
+    SYNC_FIELDS_BY_FORM,
     build_sync_spec_from_form,
     default_spec,
     sync_form_minimum,
@@ -73,6 +74,18 @@ def _field_hint(message: str = "") -> str:
     if not rendered:
         return ""
     return f"<div class='field-hint'>{_escape(rendered)}</div>"
+
+
+def _error_summary(errors: dict[str, str]) -> str:
+    items = []
+    for field_name, message in errors.items():
+        rendered = str(message or "").strip()
+        if not rendered:
+            continue
+        items.append(f"<li><strong>{_escape(field_name)}</strong>: {_escape(rendered)}</li>")
+    if not items:
+        return ""
+    return "<section class='flash error'><strong>Save failed.</strong><ul>" + "".join(items) + "</ul></section>"
 
 
 def _checked_attr(value: Any) -> str:
@@ -172,6 +185,13 @@ def _editor_context(
     }
 
 
+def _has_expert_errors(errors: dict[str, str]) -> bool:
+    if not errors:
+        return False
+    expert_fields = set(SYNC_FIELDS_BY_FORM) | {"sync_json_patch"}
+    return any(field_name in expert_fields for field_name in errors)
+
+
 def _build_sync_spec(base_sync: dict[str, Any], form: dict[str, Any]) -> dict[str, Any]:
     raw_patch = _parse_sync_json(str(form.get("sync_json_patch") or form.get("sync_json") or "{}"))
     return build_sync_spec_from_form(base_sync, form, raw_patch)
@@ -245,8 +265,10 @@ def _settings_form(
         heading=_escape(title if not context["is_new"] else panel_title),
         subtitle=_escape(panel_subtitle),
         action_url=_escape(_url(settings, "/instances/save")),
+        error_summary_html=_error_summary(errors),
         original_name=_escape(values["original_name"]),
         return_path=_escape(values["return_path"]),
+        expert_open_attr=" open" if _has_expert_errors(errors) else "",
         name_invalid_class=_input_modifier(errors, "name"),
         name_value=_escape(values["name"]),
         name_error=_field_error(errors, "name"),
