@@ -42,6 +42,21 @@ def _archive_paths(app_id: int, workshop_id: int) -> tuple[Path, Path]:
     return archive_path, workshop_path
 
 
+def _cleanup_workshop_content(app_id: int, workshop_id: int) -> list[str]:
+    _, workshop_path = _archive_paths(app_id, workshop_id)
+    cleaned: list[str] = []
+    if workshop_path.exists():
+        try:
+            shutil.rmtree(workshop_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logging.warning("Failed to remove workshop path %s: %s", workshop_path, exc)
+        else:
+            cleaned.append(str(workshop_path))
+    return cleaned
+
+
 def _cleanup_archive_artifacts(app_id: int, workshop_id: int) -> list[str]:
     archive_path, workshop_path = _archive_paths(app_id, workshop_id)
     cleaned: list[str] = []
@@ -54,15 +69,7 @@ def _cleanup_archive_artifacts(app_id: int, workshop_id: int) -> list[str]:
             logging.warning("Failed to remove archive %s: %s", archive_path, exc)
         else:
             cleaned.append(str(archive_path))
-    if workshop_path.exists():
-        try:
-            shutil.rmtree(workshop_path)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            logging.warning("Failed to remove workshop path %s: %s", workshop_path, exc)
-        else:
-            cleaned.append(str(workshop_path))
+    cleaned.extend(_cleanup_workshop_content(app_id, workshop_id))
     return cleaned
 
 
@@ -100,7 +107,11 @@ async def _archive(request: web.Request) -> web.StreamResponse:
             },
             status=502,
         )
-    
+
+    cleaned = _cleanup_workshop_content(app_id, workshop_id)
+    if cleaned:
+        logging.info("Cleaned workshop content after archive build: %s", cleaned)
+
     return web.FileResponse(
         path=result.archive_path,
         headers={

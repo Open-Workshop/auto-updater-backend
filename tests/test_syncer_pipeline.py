@@ -113,6 +113,11 @@ class SyncerPipelineTests(unittest.TestCase):
         )
         return syncer
 
+    def test_default_catalog_backpressure_watermarks_are_reduced(self) -> None:
+        syncer = self._make_syncer()
+        self.assertEqual(syncer.catalog_backpressure_high_watermark, 10)
+        self.assertEqual(syncer.catalog_backpressure_low_watermark, 5)
+
     def _payload(self, item_id: str):
         mod = types.SimpleNamespace(item_id=item_id)
         return self.syncer.ModPayload(

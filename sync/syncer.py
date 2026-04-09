@@ -40,8 +40,8 @@ from sync.support import (
     parse_ow_datetime as _parse_ow_datetime,
     recent_edit_window_label as _recent_edit_window_label,
 )
-CATALOG_BACKPRESSURE_HIGH_WATERMARK = 60
-CATALOG_BACKPRESSURE_LOW_WATERMARK = 30
+CATALOG_BACKPRESSURE_HIGH_WATERMARK = 10
+CATALOG_BACKPRESSURE_LOW_WATERMARK = 5
 CATALOG_BACKPRESSURE_POLL_SECONDS = 0.2
 
 

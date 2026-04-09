@@ -144,6 +144,7 @@ def _editor_context(
         bool_fields = {
             "enabled",
             "run_once",
+            "log_steam_requests",
             "sync_tags",
             "prune_tags",
             "sync_dependencies",
@@ -153,6 +154,7 @@ def _editor_context(
             "upload_resource_files",
             "scrape_preview_images",
             "scrape_required_items",
+            "without_author",
         }
         for key in values:
             if key == "existing_password":
@@ -187,14 +189,7 @@ def _validation_errors(
     parser_storage_size: str,
     runner_storage_size: str,
     sync_json_patch: str,
-    poll_interval_seconds: Any,
-    timeout_seconds: Any,
-    http_retries: Any,
-    http_retry_backoff: Any,
-    steam_http_retries: Any,
-    steam_http_backoff: Any,
-    steam_request_delay: Any,
-    max_screenshots: Any,
+    sync_form_data: dict[str, Any],
 ) -> dict[str, str]:
     errors: dict[str, str] = {}
     if not name:
@@ -219,18 +214,7 @@ def _validation_errors(
             _validate_proxy_pool(parser_proxy_pool)
         except Exception as exc:
             errors["parser_proxy_pool"] = str(exc)
-    sync_errors = validate_sync_form_inputs(
-        {
-            "poll_interval_seconds": poll_interval_seconds,
-            "timeout_seconds": timeout_seconds,
-            "http_retries": http_retries,
-            "http_retry_backoff": http_retry_backoff,
-            "steam_http_retries": steam_http_retries,
-            "steam_http_backoff": steam_http_backoff,
-            "steam_request_delay": steam_request_delay,
-            "max_screenshots": max_screenshots,
-        }
-    )
+    sync_errors = validate_sync_form_inputs(sync_form_data)
     for field_name, message in sync_errors.items():
         if message:
             errors[field_name] = message
@@ -308,6 +292,13 @@ def _settings_form(
         runner_storage_size_value=_escape(values["runner_storage_size"]),
         runner_storage_size_hint=_field_hint("Recommended: 10Gi if workshop archives can grow quickly."),
         runner_storage_size_error=_field_error(errors, "runner_storage_size"),
+        api_base_invalid_class=_input_modifier(errors, "api_base"),
+        api_base_value=_escape(values["api_base"]),
+        api_base_error=_field_error(errors, "api_base"),
+        page_size_min=_escape(sync_form_minimum("page_size")),
+        page_size_invalid_class=_input_modifier(errors, "page_size"),
+        page_size_value=_escape(values["page_size"]),
+        page_size_error=_field_error(errors, "page_size"),
         poll_interval_seconds_min=_escape(sync_form_minimum("poll_interval_seconds")),
         poll_interval_seconds_invalid_class=_input_modifier(errors, "poll_interval_seconds"),
         poll_interval_seconds_value=_escape(values["poll_interval_seconds"]),
@@ -336,18 +327,42 @@ def _settings_form(
         steam_request_delay_invalid_class=_input_modifier(errors, "steam_request_delay"),
         steam_request_delay_value=_escape(values["steam_request_delay"]),
         steam_request_delay_error=_field_error(errors, "steam_request_delay"),
+        steam_max_pages_min=_escape(sync_form_minimum("steam_max_pages")),
+        steam_max_pages_invalid_class=_input_modifier(errors, "steam_max_pages"),
+        steam_max_pages_value=_escape(values["steam_max_pages"]),
+        steam_max_pages_error=_field_error(errors, "steam_max_pages"),
+        steam_start_page_min=_escape(sync_form_minimum("steam_start_page")),
+        steam_start_page_invalid_class=_input_modifier(errors, "steam_start_page"),
+        steam_start_page_value=_escape(values["steam_start_page"]),
+        steam_start_page_error=_field_error(errors, "steam_start_page"),
+        steam_max_items_min=_escape(sync_form_minimum("steam_max_items")),
+        steam_max_items_invalid_class=_input_modifier(errors, "steam_max_items"),
+        steam_max_items_value=_escape(values["steam_max_items"]),
+        steam_max_items_error=_field_error(errors, "steam_max_items"),
+        steam_delay_min=_escape(sync_form_minimum("steam_delay")),
+        steam_delay_invalid_class=_input_modifier(errors, "steam_delay"),
+        steam_delay_value=_escape(values["steam_delay"]),
+        steam_delay_error=_field_error(errors, "steam_delay"),
         log_level_invalid_class=_input_modifier(errors, "log_level"),
         log_level_debug_selected=_selected_attr(values["log_level"], "DEBUG"),
         log_level_info_selected=_selected_attr(values["log_level"], "INFO"),
         log_level_warning_selected=_selected_attr(values["log_level"], "WARNING"),
         log_level_error_selected=_selected_attr(values["log_level"], "ERROR"),
         log_level_error=_field_error(errors, "log_level"),
+        public_mode_invalid_class=_input_modifier(errors, "public_mode"),
+        public_mode_value=_escape(values["public_mode"]),
+        public_mode_error=_field_error(errors, "public_mode"),
+        force_required_item_id_invalid_class=_input_modifier(errors, "force_required_item_id"),
+        force_required_item_id_value=_escape(values["force_required_item_id"]),
+        force_required_item_id_error=_field_error(errors, "force_required_item_id"),
         max_screenshots_min=_escape(sync_form_minimum("max_screenshots")),
         max_screenshots_invalid_class=_input_modifier(errors, "max_screenshots"),
         max_screenshots_value=_escape(values["max_screenshots"]),
         max_screenshots_error=_field_error(errors, "max_screenshots"),
         run_once_checked=_checked_attr(values["run_once"]),
         run_once_error=_field_error(errors, "run_once"),
+        log_steam_requests_checked=_checked_attr(values["log_steam_requests"]),
+        log_steam_requests_error=_field_error(errors, "log_steam_requests"),
         sync_tags_checked=_checked_attr(values["sync_tags"]),
         sync_tags_error=_field_error(errors, "sync_tags"),
         prune_tags_checked=_checked_attr(values["prune_tags"]),
@@ -366,6 +381,8 @@ def _settings_form(
         scrape_preview_images_error=_field_error(errors, "scrape_preview_images"),
         scrape_required_items_checked=_checked_attr(values["scrape_required_items"]),
         scrape_required_items_error=_field_error(errors, "scrape_required_items"),
+        without_author_checked=_checked_attr(values["without_author"]),
+        without_author_error=_field_error(errors, "without_author"),
         sync_json_patch_invalid_class=_input_modifier(errors, "sync_json_patch"),
         sync_json_patch_value=_escape(values["sync_json_patch"]),
         sync_json_patch_hint=_field_hint(

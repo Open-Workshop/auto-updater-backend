@@ -110,6 +110,16 @@
       <div class="section-title">Structured runtime tuning</div>
       <div class="field-grid">
         <label>
+          <span>API base</span>
+          <input class="input$api_base_invalid_class" type="text" name="api_base" value="$api_base_value">
+          $api_base_error
+        </label>
+        <label>
+          <span>Page size</span>
+          <input class="input$page_size_invalid_class" type="number" min="$page_size_min" name="page_size" value="$page_size_value">
+          $page_size_error
+        </label>
+        <label>
           <span>Poll interval (seconds)</span>
           <input class="input$poll_interval_seconds_invalid_class" type="number" min="$poll_interval_seconds_min" name="poll_interval_seconds" value="$poll_interval_seconds_value">
           $poll_interval_seconds_error
@@ -145,6 +155,26 @@
           $steam_request_delay_error
         </label>
         <label>
+          <span>Steam max pages</span>
+          <input class="input$steam_max_pages_invalid_class" type="number" min="$steam_max_pages_min" name="steam_max_pages" value="$steam_max_pages_value">
+          $steam_max_pages_error
+        </label>
+        <label>
+          <span>Steam start page</span>
+          <input class="input$steam_start_page_invalid_class" type="number" min="$steam_start_page_min" name="steam_start_page" value="$steam_start_page_value">
+          $steam_start_page_error
+        </label>
+        <label>
+          <span>Steam max items</span>
+          <input class="input$steam_max_items_invalid_class" type="number" min="$steam_max_items_min" name="steam_max_items" value="$steam_max_items_value">
+          $steam_max_items_error
+        </label>
+        <label>
+          <span>Steam page delay</span>
+          <input class="input$steam_delay_invalid_class" type="number" min="$steam_delay_min" step="0.1" name="steam_delay" value="$steam_delay_value">
+          $steam_delay_error
+        </label>
+        <label>
           <span>Log level</span>
           <select class="input$log_level_invalid_class" name="log_level">
             <option value="DEBUG" $log_level_debug_selected>DEBUG</option>
@@ -159,6 +189,16 @@
           <input class="input$max_screenshots_invalid_class" type="number" min="$max_screenshots_min" name="max_screenshots" value="$max_screenshots_value">
           $max_screenshots_error
         </label>
+        <label>
+          <span>Mod public mode</span>
+          <input class="input$public_mode_invalid_class" type="number" name="public_mode" value="$public_mode_value">
+          $public_mode_error
+        </label>
+        <label>
+          <span>Forced required item ID</span>
+          <input class="input$force_required_item_id_invalid_class" type="text" name="force_required_item_id" value="$force_required_item_id_value">
+          $force_required_item_id_error
+        </label>
       </div>
       <div class="toggle-grid">
         <label class="toggle-field">
@@ -167,6 +207,13 @@
             <span>Run once</span>
           </span>
           $run_once_error
+        </label>
+        <label class="toggle-field">
+          <span class="toggle">
+            <input type="checkbox" name="log_steam_requests" $log_steam_requests_checked>
+            <span>Log Steam requests</span>
+          </span>
+          $log_steam_requests_error
         </label>
         <label class="toggle-field">
           <span class="toggle">
@@ -230,6 +277,13 @@
             <span>Scrape required items</span>
           </span>
           $scrape_required_items_error
+        </label>
+        <label class="toggle-field">
+          <span class="toggle">
+            <input type="checkbox" name="without_author" $without_author_checked>
+            <span>Without author</span>
+          </span>
+          $without_author_error
         </label>
       </div>
       <label>
