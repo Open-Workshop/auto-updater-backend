@@ -47,7 +47,7 @@ def _install_syncer_stubs() -> None:
     sys.modules["steam.depot_downloader"] = depot_downloader
 
     utils = types.ModuleType("core.utils")
-    utils.dedupe_images = lambda items: items
+    utils.dedupe_images = lambda items: list(dict.fromkeys(items))
     utils.ensure_dir = lambda _path: None
     utils.has_files = lambda _path: False
     utils.strip_bbcode = lambda value: value
@@ -63,7 +63,9 @@ def _load_syncer_module():
 
 
 class _FakeApi:
-    pass
+    @staticmethod
+    def limit_mod_fields(title: str, short_desc: str, description: str):
+        return title, short_desc, description
 
 
 class SyncerPipelineTests(unittest.TestCase):
@@ -243,6 +245,68 @@ class SyncerPipelineTests(unittest.TestCase):
         self.assertTrue(file_processed.wait(timeout=1))
         runner.join(timeout=2)
         self.assertFalse(runner.is_alive(), "syncer.run should complete")
+
+    def test_catalog_producer_waits_for_backlog_to_drop_below_low_watermark(self) -> None:
+        syncer = self._make_syncer()
+        syncer.catalog_backpressure_high_watermark = 2
+        syncer.catalog_backpressure_low_watermark = 1
+        syncer.queue.enqueue_ready("101", self._payload("101"))
+        syncer.queue.enqueue_ready("102", self._payload("102"))
+
+        fetch_called = threading.Event()
+
+        def fetch_next_page() -> bool:
+            fetch_called.set()
+            return False
+
+        syncer._fetch_next_page = fetch_next_page
+
+        runner = threading.Thread(target=syncer._run_producer, name="test-producer-backpressure")
+        runner.start()
+
+        self.assertFalse(
+            fetch_called.wait(timeout=0.3),
+            "producer should pause while downstream backlog is at the high watermark",
+        )
+
+        syncer.queue.pop_ready(timeout=0.1)
+
+        self.assertTrue(
+            fetch_called.wait(timeout=1),
+            "producer should resume as soon as backlog falls to the low watermark",
+        )
+        runner.join(timeout=1)
+        self.assertFalse(runner.is_alive(), "producer should exit after fetch_next_page returns False")
+        self.assertEqual(syncer.queue.downstream_backlog(), 1)
+
+    def test_build_payload_uses_text_and_image_helpers(self) -> None:
+        syncer = self._make_syncer()
+        mod = types.SimpleNamespace(
+            item_id="42",
+            title="Test Mod",
+            description="Some [b]desc[/b]",
+            tags=["a", "b"],
+            dependencies=["12", "42", "13"],
+            page_ok=True,
+            logo="https://cdn/logo.png",
+            screenshots=[
+                "https://cdn/logo.png",
+                "https://cdn/1.png",
+                "https://cdn/1.png",
+            ],
+        )
+
+        payload = syncer._build_payload(mod, "42")
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload.short_desc, "Some [b]desc[/b]")
+        self.assertEqual(payload.description, "Some [b]desc[/b]")
+        self.assertEqual(payload.deps, ["12", "13"])
+        self.assertEqual(
+            payload.images,
+            ["https://cdn/logo.png", "https://cdn/1.png"],
+        )
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ import json
 import unittest
 from unittest.mock import Mock, patch
 
+import steam.steam_api as steam_api_module
 from ow.ow_api import OWClient
 from steam.steam_api import RetryPolicy, SteamClient
 
@@ -58,7 +59,7 @@ class HttpClientTests(unittest.TestCase):
         first = _FakeResponse(503)
         second = _FakeResponse(200)
 
-        with patch("steam.steam_api.requests.request", side_effect=[first, second]):
+        with patch.object(steam_api_module.requests, "request", side_effect=[first, second]):
             response = client.request("get", "https://example.com/mod", timeout=5)
 
         self.assertIs(response, second)

@@ -11,13 +11,11 @@ from aiohttp import web
 from kubernetes.client.rest import ApiException
 
 from core.instance_schema import default_spec
-from core.log_tags import filter_log_text_by_tag, format_log_tag_options, normalize_log_tag
 from kube.kube_client import (
     delete_instance,
     delete_secret,
     get_instance,
     patch_instance,
-    read_pod_log,
     read_secret_value,
     replace_or_create_instance,
     upsert_secret,
@@ -26,18 +24,13 @@ from kube.mirror_instance import (
     API_VERSION,
     KIND,
     common_labels,
-    instance_name,
     managed_credentials_secret_name,
     managed_secret_names,
     managed_secret_specs,
     managed_parser_proxy_secret_name,
     managed_runner_proxy_secret_name,
     normalize_instance,
-    parser_name,
-    parser_service_name,
     parser_service_url,
-    runner_name,
-    runner_service_name,
 )
 from ui.ui_assets import STATIC_DIR
 from ui.ui_common import UISettings, _bool_from_form, _int_from_form, _url
@@ -49,213 +42,26 @@ from ui.ui_forms import (
     _validate_proxy_pool,
     _validate_runner_proxy,
 )
+from ui.ui_http import (
+    _action_response,
+    _flash_from_request,
+    _flash_redirect,
+    _json_response,
+    _wants_json,
+)
 from ui.ui_instance import _dashboard_resource_totals, _load_instance_summary, _load_instance_summaries
-from ui.ui_kube_utils import _select_best_pod
+from ui.ui_logs import (
+    _load_resource_entries,
+    _log_tag_from_request,
+    _pod_log_snapshot,
+    _tail_lines_from_request,
+)
 from ui.ui_pages import _dashboard, _dashboard_counts, _detail_page, _new_instance_page
 
 
 async def _run_blocking(func: Any, /, *args: Any, **kwargs: Any) -> Any:
     """Run synchronous control-plane I/O away from the aiohttp event loop."""
     return await asyncio.to_thread(func, *args, **kwargs)
-
-
-def _flash_redirect(settings: UISettings, path: str, message: str, kind: str = "info") -> web.HTTPFound:
-    """Create a redirect response with flash message."""
-    target = _url(settings, path)
-    separator = "&" if "?" in path else "?"
-    query = urlencode({"flash": message, "flashKind": kind})
-    return web.HTTPFound(f"{target}{separator}{query}")
-
-
-def _flash_from_request(request: web.Request) -> tuple[str, str]:
-    """Extract flash message from request."""
-    message = str(request.query.get("flash", "")).strip()
-    kind = str(request.query.get("flashKind", "info")).strip().lower() or "info"
-    return message, kind
-
-
-def _wants_json(request: web.Request) -> bool:
-    """Check if request wants JSON response."""
-    accept = request.headers.get("Accept", "")
-    return "application/json" in accept or request.path.startswith("/api/") or "/api/" in request.path
-
-
-def _component_log_target(target: str) -> tuple[str, str]:
-    """Get component and container name from log target."""
-    normalized = str(target or "").strip().lower()
-    if normalized == "parser":
-        return "parser", "parser"
-    if normalized == "runner":
-        return "runner", "runner"
-    if normalized == "tun":
-        return "runner", "tun-proxy"
-    raise web.HTTPNotFound(text="unknown log target")
-
-
-def _component_label(target: str) -> str:
-    """Get display label for component."""
-    normalized = str(target or "").strip().lower()
-    if normalized == "parser":
-        return "Parser"
-    if normalized == "runner":
-        return "Runner"
-    if normalized == "tun":
-        return "TUN"
-    return normalized.title()
-
-
-def _labels_selector(name: str, component: str) -> str:
-    """Create label selector for component."""
-    return ",".join(f"{key}={value}" for key, value in common_labels(name, component).items())
-
-
-def _json_ready(value: Any) -> Any:
-    """Convert Kubernetes object to JSON-ready dict."""
-    payload = value.to_dict() if hasattr(value, "to_dict") else value
-    if isinstance(payload, dict):
-        payload = dict(payload)
-        metadata = payload.get("metadata")
-        if isinstance(metadata, dict):
-            metadata = dict(metadata)
-            metadata.pop("managed_fields", None)
-            metadata.pop("managedFields", None)
-            payload["metadata"] = metadata
-    return payload
-
-
-def _tail_lines_from_request(request: web.Request, default: int = 400) -> int:
-    """Get tail lines parameter from request."""
-    try:
-        value = int(str(request.query.get("tail", default)).strip())
-    except (TypeError, ValueError):
-        return default
-    return max(50, min(value, 2000))
-
-
-def _log_tag_from_request(request: web.Request) -> str:
-    return normalize_log_tag(str(request.query.get("tag", "")).strip()) or "all"
-
-
-def _latest_pod_name(namespace: str, name: str, component: str) -> str:
-    """Get the latest pod name for a component."""
-    from kube.kube_client import get_kube_clients
-    
-    selector = _labels_selector(name, component)
-    pods = get_kube_clients().core.list_namespaced_pod(namespace, label_selector=selector).items
-    best = _select_best_pod(list(pods))
-    return str(best.metadata.name or "") if best is not None else ""
-
-
-def _pod_log_snapshot(
-    settings: UISettings,
-    name: str,
-    target: str,
-    tail_lines: int,
-    selected_tag: str = "all",
-) -> dict[str, Any]:
-    """Get pod log snapshot."""
-    from ui.ui_kube_utils import _pod_network_metrics
-    
-    component, container = _component_log_target(target)
-    pod_name = _latest_pod_name(settings.namespace, name, component)
-    if not pod_name:
-        raise web.HTTPNotFound(text=f"Pod for {name}/{target} is not available yet")
-    network_metrics = _pod_network_metrics(settings.namespace, pod_name)
-    
-    # Read logs from the specified container only
-    # Note: steamcmd logs are already in the runner container (same container, separate process)
-    log_text = read_pod_log(
-        settings.namespace,
-        pod_name,
-        container=container,
-        tail_lines=tail_lines,
-    )
-    filtered_log_text, available_tags, applied_tag = filter_log_text_by_tag(log_text, selected_tag)
-    
-    return {
-        "instance": name,
-        "target": target,
-        "targetLabel": _component_label(target),
-        "component": component,
-        "container": container,
-        "podName": pod_name,
-        "tailLines": tail_lines,
-        "logText": filtered_log_text,
-        "selectedTag": applied_tag,
-        "availableTags": available_tags,
-        "tagOptions": format_log_tag_options(available_tags),
-        "rxBytes": network_metrics.get("rxBytes"),
-        "txBytes": network_metrics.get("txBytes"),
-    }
-
-
-def _load_resource_entries(settings: UISettings, name: str) -> list[dict[str, Any]]:
-    """Load resource entries for an instance."""
-    from kube.kube_client import get_kube_clients
-    
-    kube = get_kube_clients()
-    instance = get_instance(settings.namespace, name)
-    status = dict(instance.get("status") or {})
-    parser_pod_name = str(status.get("parserPod") or "") or _latest_pod_name(settings.namespace, name, "parser")
-    runner_pod_name = str(status.get("runnerPod") or "") or _latest_pod_name(settings.namespace, name, "runner")
-    readers: list[tuple[str, str, Any]] = [
-        ("MirrorInstance", name, lambda: instance),
-        ("StatefulSet", parser_name(name), lambda: kube.apps.read_namespaced_stateful_set(parser_name(name), settings.namespace)),
-        ("StatefulSet", runner_name(name), lambda: kube.apps.read_namespaced_stateful_set(runner_name(name), settings.namespace)),
-        ("Service", parser_service_name(name), lambda: kube.core.read_namespaced_service(parser_service_name(name), settings.namespace)),
-        ("Service", runner_service_name(name), lambda: kube.core.read_namespaced_service(runner_service_name(name), settings.namespace)),
-    ]
-    if parser_pod_name:
-        readers.append(("Pod", parser_pod_name, lambda: kube.core.read_namespaced_pod(parser_pod_name, settings.namespace)))
-    if runner_pod_name:
-        readers.append(("Pod", runner_pod_name, lambda: kube.core.read_namespaced_pod(runner_pod_name, settings.namespace)))
-    entries = []
-    for kind, resource_name, reader in readers:
-        try:
-            payload = _json_ready(reader())
-            error = ""
-        except Exception as exc:
-            payload = {"error": str(exc)}
-            error = str(exc)
-        entries.append(
-            {
-                "kind": kind,
-                "name": resource_name,
-                "payload": payload,
-                "error": error,
-            }
-        )
-    return entries
-
-
-def _json_response(message: str, *, kind: str = "success", status: int = 200, **extra: Any) -> web.Response:
-    """Create JSON response."""
-    payload = {"message": message, "kind": kind}
-    payload.update(extra)
-    return web.json_response(payload, status=status)
-
-
-def _action_response(
-    request: web.Request,
-    settings: UISettings,
-    *,
-    message: str,
-    redirect_path: str,
-    kind: str = "success",
-    status: int = 200,
-    extra: dict[str, Any] | None = None,
-) -> web.StreamResponse:
-    """Create action response (JSON or redirect)."""
-    extra = extra or {}
-    if _wants_json(request):
-        return _json_response(
-            message,
-            kind=kind,
-            status=status,
-            redirectUrl=_url(settings, redirect_path),
-            **extra,
-        )
-    raise _flash_redirect(settings, redirect_path, message, kind)
 
 
 async def healthz(_: web.Request) -> web.Response:
