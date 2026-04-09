@@ -50,8 +50,8 @@ class InstanceSchemaTests(unittest.TestCase):
         self.assertEqual(model.sync_extras, {"customMirrorSetting": {"keep": True}})
 
         rebuilt = model.to_spec_dict()
-        self.assertEqual(rebuilt["sync"]["pageSize"], 77)
-        self.assertEqual(rebuilt["sync"]["customMirrorSetting"], {"keep": True})
+        self.assertEqual(rebuilt["parser"]["config"]["pageSize"], 77)
+        self.assertEqual(rebuilt["parser"]["config"]["customMirrorSetting"], {"keep": True})
 
     def test_defaults_match_form_values_and_runtime_env_projection(self) -> None:
         spec = default_spec()

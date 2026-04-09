@@ -7,6 +7,7 @@ from pathlib import Path
 
 from aiohttp import web
 
+from core.instance_schema import default_parser_type
 from steam.depot_downloader import download_mod_archive
 
 
@@ -27,6 +28,14 @@ def _steam_root() -> Path:
 
 def _depotdownloader_path() -> Path:
     return Path(os.environ.get("DEPOTDOWNLOADER_PATH", "/opt/depotdownloader/DepotDownloader"))
+
+
+def _parser_type_from_env() -> str:
+    return os.environ.get("OW_PARSER_TYPE", "").strip() or default_parser_type()
+
+
+def _workload_id_from_env() -> str:
+    return os.environ.get("OW_WORKLOAD_ID", "").strip() or "steamcmd"
 
 
 def _archive_paths(app_id: int, workshop_id: int) -> tuple[Path, Path]:
@@ -216,11 +225,19 @@ def _cleanup_old_archives(max_age_seconds: int = 3600) -> None:
 
 
 def run_runner() -> int:
+    parser_type = _parser_type_from_env()
+    workload_id = _workload_id_from_env()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.StreamHandler()],
     )
+    if parser_type != default_parser_type():
+        logging.error("Unsupported parser type %s", parser_type)
+        return 2
+    if workload_id != "steamcmd":
+        logging.error("Runner host cannot run workload %s", workload_id)
+        return 2
     _cleanup_old_archives()
     app = _create_app()
     web.run_app(app, host=_runner_host(), port=_runner_port())

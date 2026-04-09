@@ -500,13 +500,20 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                                     )
                                     self.assertEqual(response.status, 302)
                                     self.assertEqual(captured["name"], "demo")
-                                    self.assertEqual(captured["body"]["spec"]["sync"]["pageSize"], 77)
+                                    self.assertEqual(captured["body"]["spec"]["parser"]["type"], "steam-workshop")
+                                    self.assertEqual(captured["body"]["spec"]["parser"]["config"]["pageSize"], 77)
                                     self.assertEqual(
-                                        captured["body"]["spec"]["sync"]["customMirrorSetting"],
+                                        captured["body"]["spec"]["parser"]["config"]["customMirrorSetting"],
                                         {"keep": True},
                                     )
-                                    self.assertEqual(captured["body"]["spec"]["sync"]["pollIntervalSeconds"], 600)
-                                    self.assertEqual(captured["body"]["spec"]["sync"]["steamMaxPages"], 3000)
+                                    self.assertEqual(
+                                        captured["body"]["spec"]["parser"]["config"]["pollIntervalSeconds"],
+                                        600,
+                                    )
+                                    self.assertEqual(
+                                        captured["body"]["spec"]["parser"]["config"]["steamMaxPages"],
+                                        3000,
+                                    )
                                     self.assertEqual(len(upserted_secrets), 3)
                                     for secret in upserted_secrets:
                                         self.assertEqual(

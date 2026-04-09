@@ -4,9 +4,12 @@ import json
 from typing import Any
 
 from core.instance_schema import (
+    MirrorInstanceSpecModel,
     SYNC_FIELDS_BY_FORM,
     build_sync_spec_from_form,
     default_spec,
+    get_parser_contract,
+    parser_type_options,
     sync_form_minimum,
     sync_form_values,
     validate_sync_form_inputs,
@@ -107,16 +110,18 @@ def _editor_context(
     errors = errors or {}
     if instance is None:
         normalized = {"spec": default_spec(), "metadata": {"name": ""}}
+        model = MirrorInstanceSpecModel.from_spec_dict(default_spec())
         login = ""
         parser_proxy_pool = ""
         runner_proxy_url = ""
         existing_password = ""
     else:
         normalized = normalize_instance(instance)
+        model = MirrorInstanceSpecModel.from_instance_dict(instance)
         name = instance_name(instance)
-        credentials_secret = normalized["spec"]["credentials"]["secretRef"]
-        parser_secret = normalized["spec"]["parser"].get("proxyPoolSecretRef", "")
-        runner_secret = normalized["spec"]["steamcmd"]["proxy"].get("secretRef", "")
+        credentials_secret = model.credentials_secret_ref
+        parser_secret = model.parser_secret_refs.get("parserProxyPoolSecretRef", "")
+        runner_secret = model.parser_secret_refs.get("runnerProxySecretRef", "")
         login = read_secret_value(settings.namespace, credentials_secret, "login")
         existing_password = read_secret_value(settings.namespace, credentials_secret, "password")
         parser_proxy_pool = ""
@@ -132,20 +137,26 @@ def _editor_context(
             except Exception:
                 runner_proxy_url = ""
         normalized["metadata"]["name"] = name
-    spec = normalized["spec"]
-    sync_spec = dict(spec["sync"])
+    contract = get_parser_contract(model.parser_type)
+    sync_spec = dict(model.sync)
+    parser_workload = dict(model.parser_workloads.get("parser") or {})
+    parser_storage = dict(parser_workload.get("storage") or {})
+    runner_workload = dict(model.parser_workloads.get("steamcmd") or {})
+    runner_storage = dict(runner_workload.get("storage") or {})
+    runner_workload_config = dict(runner_workload.get("config") or {})
     values = {
         "original_name": normalized.get("metadata", {}).get("name", ""),
         "name": normalized.get("metadata", {}).get("name", ""),
-        "enabled": bool(spec.get("enabled", True)),
-        "steam_app_id": spec["source"].get("steamAppId", 0),
-        "ow_game_id": spec["source"].get("owGameId", 0),
-        "language": spec["source"].get("language", "english"),
-        "parser_storage_size": spec["storage"]["parser"]["size"],
-        "runner_storage_size": spec["storage"]["runner"]["size"],
+        "enabled": bool(model.enabled),
+        "parser_type": model.parser_type,
+        "steam_app_id": model.source.get("steamAppId", 0),
+        "ow_game_id": model.source.get("owGameId", 0),
+        "language": model.source.get("language", "english"),
+        "parser_storage_size": parser_storage.get("size", ""),
+        "runner_storage_size": runner_storage.get("size", ""),
         "ow_login": login,
         "ow_password": "",
-        "runner_proxy_type": spec["steamcmd"]["proxy"].get("type", "socks5"),
+        "runner_proxy_type": runner_workload_config.get("proxyType", "socks5"),
         "runner_proxy_url": runner_proxy_url,
         "parser_proxy_pool": parser_proxy_pool,
         "sync_json_patch": sync_patch_value or "",
@@ -258,6 +269,10 @@ def _settings_form(
         if context["is_new"]
         else "Update the operational settings without digging through raw Kubernetes objects."
     )
+    parser_options_html = "".join(
+        f"<option value='{_escape(value)}' {_selected_attr(values['parser_type'], value)}>{_escape(label)}</option>"
+        for value, label in parser_type_options()
+    )
     return render_template(
         "settings_form.html",
         shell_class="settings-shell embedded" if embedded else "settings-shell",
@@ -275,6 +290,8 @@ def _settings_form(
         enabled_checked=_checked_attr(values["enabled"]),
         enabled_hint=_field_hint("Disabled instances stay visible but will not sync."),
         enabled_error=_field_error(errors, "enabled"),
+        parser_type_options_html=parser_options_html,
+        parser_type_error=_field_error(errors, "parser_type"),
         steam_app_id_invalid_class=_input_modifier(errors, "steam_app_id"),
         steam_app_id_value=_escape(values["steam_app_id"]),
         steam_app_id_error=_field_error(errors, "steam_app_id"),

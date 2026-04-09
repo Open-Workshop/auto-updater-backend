@@ -10,28 +10,12 @@ $error_block
     <div class="section-title">Instance</div>
     <div class="meta-grid">
       <div><span class="meta-label">Phase</span><strong>$phase</strong></div>
-      <div><span class="meta-label">Steam App ID</span><strong>$steam_app_id</strong></div>
-      <div><span class="meta-label">OW Game ID</span><strong>$ow_game_id</strong></div>
-      <div><span class="meta-label">Language</span><strong>$language</strong></div>
+      <div><span class="meta-label">Parser</span><strong>$parser_label</strong></div>
+      <div><span class="meta-label">Parser type</span><strong>$parser_type</strong></div>
+      $overview_pairs_html
     </div>
   </section>
-  <section class="panel-section">
-    <div class="section-title">Parser</div>
-    <div class="meta-grid">
-      <div><span class="meta-label">Pod</span><strong>$parser_pod</strong></div>
-      <div><span class="meta-label">Status</span><span class="pill tone-$parser_tone">$parser_state</span></div>
-      <div><span class="meta-label">Image</span><code>$parser_image</code></div>
-    </div>
-  </section>
-  <section class="panel-section">
-    <div class="section-title">Runner</div>
-    <div class="meta-grid">
-      <div><span class="meta-label">Pod</span><strong>$runner_pod</strong></div>
-      <div><span class="meta-label">Status</span><span class="pill tone-$runner_tone">$runner_state</span></div>
-      <div><span class="meta-label">Runner image</span><code>$runner_image</code></div>
-      <div><span class="meta-label">TUN image</span><code>$tun_image</code></div>
-    </div>
-  </section>
+  $workloads_html
   <section class="panel-section">
     <div class="section-title">Quick actions</div>
     <div class="inline-actions">

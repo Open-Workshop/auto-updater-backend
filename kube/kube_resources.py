@@ -3,24 +3,32 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from core.instance_schema import iter_sync_env_items
+from core.instance_schema import (
+    MirrorInstanceSpecModel,
+    get_parser_contract,
+    iter_parser_config_env_items,
+)
 from core.http_utils import ParsedProxy, parse_proxy_url
 from kube.mirror_instance import (
     common_labels,
+    from_instance_dict,
     instance_name,
     instance_namespace,
     normalize_instance,
     owner_reference,
     parser_name,
     parser_service_name,
-    runner_service_url,
     runner_config_secret_name,
     runner_name,
     runner_service_name,
+    workload_name,
+    workload_service_name,
+    workload_service_url,
 )
 
 
 PARSER_SERVICE_ACCOUNT_NAME = "auto-updater-parser"
+
 
 def _env(name: str, value: Any) -> dict[str, Any]:
     return {"name": name, "value": str(value)}
@@ -39,162 +47,140 @@ def _secret_env(name: str, secret_name: str, key: str, *, optional: bool = False
     }
 
 
-def _storage_size(spec: dict[str, Any], component: str) -> str:
-    return str(spec["storage"][component]["size"])
+def _workload_storage(model: MirrorInstanceSpecModel, workload_id: str) -> dict[str, Any]:
+    workload = dict(model.parser_workloads.get(workload_id) or {})
+    return dict(workload.get("storage") or {})
 
 
-def _storage_class(spec: dict[str, Any], component: str) -> str | None:
-    value = str(spec["storage"][component].get("storageClassName") or "").strip()
+def _storage_size(model: MirrorInstanceSpecModel, workload_id: str) -> str:
+    return str(_workload_storage(model, workload_id).get("size") or "")
+
+
+def _storage_class(model: MirrorInstanceSpecModel, workload_id: str) -> str | None:
+    value = str(_workload_storage(model, workload_id).get("storageClassName") or "").strip()
     return value or None
 
 
-def build_parser_service(instance: dict[str, Any]) -> dict[str, Any]:
-    name = instance_name(instance)
-    namespace = instance_namespace(instance)
-    labels = common_labels(name, "parser")
-    return {
-        "apiVersion": "v1",
-        "kind": "Service",
-        "metadata": {
-            "name": parser_service_name(name),
-            "namespace": namespace,
-            "labels": labels,
-            "ownerReferences": owner_reference(instance),
-        },
-        "spec": {
-            "selector": labels,
-            "ports": [
-                {
-                    "name": "http",
-                    "port": 8080,
-                    "targetPort": 8080,
-                }
-            ],
-        },
-    }
+def _workload_labels(name: str, parser_type: str, workload_id: str) -> dict[str, str]:
+    contract = get_parser_contract(parser_type)
+    workload = contract.workloads_by_id[workload_id]
+    return common_labels(name, workload.component)
 
 
-def build_runner_service(instance: dict[str, Any]) -> dict[str, Any]:
-    name = instance_name(instance)
-    namespace = instance_namespace(instance)
-    labels = common_labels(name, "runner")
-    return {
-        "apiVersion": "v1",
-        "kind": "Service",
-        "metadata": {
-            "name": runner_service_name(name),
-            "namespace": namespace,
-            "labels": labels,
-            "ownerReferences": owner_reference(instance),
-        },
-        "spec": {
-            "selector": labels,
-            "ports": [
-                {
-                    "name": "http",
-                    "port": 8080,
-                    "targetPort": 8080,
-                }
-            ],
-        },
-    }
+def _common_workload_env(instance: dict[str, Any], workload_id: str) -> list[dict[str, Any]]:
+    normalized = normalize_instance(instance)
+    name = instance_name(normalized)
+    namespace = instance_namespace(normalized)
+    model = from_instance_dict(normalized)
+    env = [
+        _secret_env("OW_LOGIN", model.credentials_secret_ref, "login"),
+        _secret_env("OW_PASSWORD", model.credentials_secret_ref, "password"),
+        _env("OW_PARSER_TYPE", model.parser_type),
+        _env("OW_WORKLOAD_ID", workload_id),
+        _env("OW_INSTANCE_NAME", name),
+        _env("OW_INSTANCE_NAMESPACE", namespace),
+        _env("OW_ADMIN_HOST", "0.0.0.0"),
+        _env("OW_ADMIN_PORT", "8080"),
+    ]
+    return env
 
 
 def build_parser_env(instance: dict[str, Any]) -> list[dict[str, Any]]:
     normalized = normalize_instance(instance)
     name = instance_name(normalized)
     namespace = instance_namespace(normalized)
-    spec = normalized["spec"]
-    credentials_secret = spec["credentials"]["secretRef"]
-    parser_proxy_secret = spec["parser"].get("proxyPoolSecretRef", "")
-    env = [
-        _secret_env("OW_LOGIN", credentials_secret, "login"),
-        _secret_env("OW_PASSWORD", credentials_secret, "password"),
-        _env("OW_STEAM_APP_ID", spec["source"].get("steamAppId", 0)),
-        _env("OW_GAME_ID", spec["source"].get("owGameId", 0)),
-        _env("STEAM_LANGUAGE", spec["source"].get("language", "english")),
-        _env("OW_MIRROR_DIR", "/data/mirror"),
-        _env("STEAM_ROOT", "/data/steam"),
-        _env("OW_STEAM_PROXY_SCOPE", "mod_pages" if parser_proxy_secret else "none"),
-        _env("OW_STEAMCMD_RUNNER_URL", runner_service_url(name, namespace)),
-        _env("OW_ADMIN_HOST", "0.0.0.0"),
-        _env("OW_ADMIN_PORT", "8080"),
-        _env("OW_INSTANCE_NAME", name),
-        _env("OW_INSTANCE_NAMESPACE", namespace),
-    ]
-    for env_name, value in iter_sync_env_items(spec["sync"]):
+    model = from_instance_dict(normalized)
+    parser_proxy_secret = str(
+        model.parser_secret_refs.get("parserProxyPoolSecretRef") or ""
+    ).strip()
+    env = _common_workload_env(normalized, "parser")
+    env.extend(
+        [
+            _env("OW_MIRROR_DIR", "/data/mirror"),
+            _env("STEAM_ROOT", "/data/steam"),
+            _env("OW_STEAM_PROXY_SCOPE", "mod_pages" if parser_proxy_secret else "none"),
+            _env(
+                "OW_STEAMCMD_RUNNER_URL",
+                workload_service_url(name, namespace, model.parser_type, "steamcmd"),
+            ),
+        ]
+    )
+    for env_name, value in iter_parser_config_env_items(model.parser_type, model.parser_config):
         env.append(_env(env_name, value))
     if parser_proxy_secret:
-        env.append(_secret_env("OW_STEAM_PROXY_POOL", parser_proxy_secret, "proxyPool", optional=True))
+        env.append(
+            _secret_env(
+                "OW_STEAM_PROXY_POOL",
+                parser_proxy_secret,
+                "proxyPool",
+                optional=True,
+            )
+        )
     return env
 
 
-def build_parser_statefulset(instance: dict[str, Any], app_image: str) -> dict[str, Any]:
+def build_runner_env(instance: dict[str, Any]) -> list[dict[str, Any]]:
+    env = _common_workload_env(instance, "steamcmd")
+    env.extend(
+        [
+            _env("RUNNER_BIND_HOST", "0.0.0.0"),
+            _env("RUNNER_BIND_PORT", "8080"),
+            _env("STEAM_ROOT", "/data/steam"),
+            _env("DEPOTDOWNLOADER_PATH", "/opt/depotdownloader/DepotDownloader"),
+        ]
+    )
+    return env
+
+
+def build_workload_service(instance: dict[str, Any], workload_id: str) -> dict[str, Any]:
     normalized = normalize_instance(instance)
+    model = from_instance_dict(normalized)
     name = instance_name(normalized)
     namespace = instance_namespace(normalized)
-    spec = normalized["spec"]
-    labels = common_labels(name, "parser")
-    replicas = 1 if spec.get("enabled", True) else 0
-    claim_spec: dict[str, Any] = {
-        "accessModes": ["ReadWriteOnce"],
-        "resources": {"requests": {"storage": _storage_size(spec, "parser")}},
-    }
-    storage_class = _storage_class(spec, "parser")
-    if storage_class:
-        claim_spec["storageClassName"] = storage_class
+    labels = _workload_labels(name, model.parser_type, workload_id)
     return {
-        "apiVersion": "apps/v1",
-        "kind": "StatefulSet",
+        "apiVersion": "v1",
+        "kind": "Service",
         "metadata": {
-            "name": parser_name(name),
+            "name": workload_service_name(name, model.parser_type, workload_id),
             "namespace": namespace,
             "labels": labels,
             "ownerReferences": owner_reference(instance),
         },
         "spec": {
-            "serviceName": parser_service_name(name),
-            "replicas": replicas,
-            "persistentVolumeClaimRetentionPolicy": {
-                "whenDeleted": "Delete",
-                "whenScaled": "Delete",
-            },
-            "selector": {"matchLabels": labels},
-            "template": {
-                "metadata": {"labels": labels},
-                "spec": {
-                    "serviceAccountName": PARSER_SERVICE_ACCOUNT_NAME,
-                    "containers": [
-                        {
-                            "name": "parser",
-                            "image": app_image,
-                            "imagePullPolicy": "IfNotPresent",
-                            "args": ["parser"],
-                            "ports": [{"name": "http", "containerPort": 8080}],
-                            "env": build_parser_env(instance),
-                            "volumeMounts": [{"name": "data", "mountPath": "/data"}],
-                            "readinessProbe": {
-                                "httpGet": {"path": "/healthz", "port": "http"},
-                                "initialDelaySeconds": 5,
-                                "periodSeconds": 10,
-                            },
-                            "livenessProbe": {
-                                "httpGet": {"path": "/healthz", "port": "http"},
-                                "initialDelaySeconds": 15,
-                                "periodSeconds": 20,
-                            },
-                        }
-                    ],
-                },
-            },
-            "volumeClaimTemplates": [
+            "selector": labels,
+            "ports": [
                 {
-                    "metadata": {"name": "data"},
-                    "spec": claim_spec,
+                    "name": "http",
+                    "port": 8080,
+                    "targetPort": 8080,
                 }
             ],
         },
     }
+
+
+def build_parser_service(instance: dict[str, Any]) -> dict[str, Any]:
+    return build_workload_service(instance, "parser")
+
+
+def build_runner_service(instance: dict[str, Any]) -> dict[str, Any]:
+    return build_workload_service(instance, "steamcmd")
+
+
+def _statefulset_claim_spec(model: MirrorInstanceSpecModel, workload_id: str) -> dict[str, Any]:
+    claim_spec: dict[str, Any] = {
+        "accessModes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": _storage_size(model, workload_id)}},
+    }
+    storage_class = _storage_class(model, workload_id)
+    if storage_class:
+        claim_spec["storageClassName"] = storage_class
+    return claim_spec
+
+
+def build_parser_statefulset(instance: dict[str, Any], app_image: str) -> dict[str, Any]:
+    return build_workload_statefulset(instance, "parser", app_image, "")
 
 
 def _proxy_outbound(proxy: ParsedProxy) -> dict[str, Any]:
@@ -257,9 +243,11 @@ def build_runner_config_secret(
     upstream_proxy_url: str,
 ) -> dict[str, Any]:
     normalized = normalize_instance(instance)
+    model = from_instance_dict(normalized)
     name = instance_name(normalized)
     namespace = instance_namespace(normalized)
-    spec = normalized["spec"]
+    runner_workload = dict(model.parser_workloads.get("steamcmd") or {})
+    runner_config = dict(runner_workload.get("config") or {})
     return {
         "apiVersion": "v1",
         "kind": "Secret",
@@ -273,112 +261,127 @@ def build_runner_config_secret(
         "stringData": {
             "config.json": render_singbox_config(
                 upstream_proxy_url,
-                str(spec["steamcmd"]["proxy"].get("type", "socks5")),
+                str(runner_config.get("proxyType") or "socks5"),
             )
         },
     }
 
 
-def build_runner_statefulset(
+def build_workload_statefulset(
     instance: dict[str, Any],
+    workload_id: str,
     app_image: str,
     singbox_image: str,
     runner_proxy_url: str = "",
 ) -> dict[str, Any]:
     normalized = normalize_instance(instance)
+    model = from_instance_dict(normalized)
+    contract = get_parser_contract(model.parser_type)
+    workload = contract.workloads_by_id[workload_id]
     name = instance_name(normalized)
     namespace = instance_namespace(normalized)
-    spec = normalized["spec"]
-    labels = common_labels(name, "runner")
-    replicas = 1 if spec.get("enabled", True) else 0
-    claim_spec: dict[str, Any] = {
-        "accessModes": ["ReadWriteOnce"],
-        "resources": {"requests": {"storage": _storage_size(spec, "runner")}},
-    }
-    storage_class = _storage_class(spec, "runner")
-    if storage_class:
-        claim_spec["storageClassName"] = storage_class
-    
-    use_proxy = bool(runner_proxy_url)
-    
-    runner_container = {
-        "name": "runner",
-        "image": app_image,
-        "imagePullPolicy": "IfNotPresent",
-        "args": ["runner"],
-        "ports": [{"name": "http", "containerPort": 8080}],
-        "env": [
-            _env("RUNNER_BIND_HOST", "0.0.0.0"),
-            _env("RUNNER_BIND_PORT", "8080"),
-            _env("STEAM_ROOT", "/data/steam"),
-            _env("DEPOTDOWNLOADER_PATH", "/opt/depotdownloader/DepotDownloader"),
-        ],
-        "volumeMounts": [{"name": "data", "mountPath": "/data"}],
-        "readinessProbe": {
-            "httpGet": {"path": "/healthz", "port": "http"},
-            "initialDelaySeconds": 5,
-            "periodSeconds": 10,
-        },
-        "livenessProbe": {
-            "httpGet": {"path": "/healthz", "port": "http"},
-            "initialDelaySeconds": 15,
-            "periodSeconds": 20,
-        },
-    }
-    
-    volumes = []
-    containers = [runner_container]
-    
-    if use_proxy:
-        volumes.extend([
-            {
-                "name": "runner-config",
-                "secret": {"secretName": runner_config_secret_name(name)},
-            },
-            {
-                "name": "dev-tun",
-                "hostPath": {"path": "/dev/net/tun", "type": "CharDevice"},
-            },
-        ])
-        containers.append({
-            "name": "tun-proxy",
-            "image": singbox_image,
+    labels = _workload_labels(name, model.parser_type, workload_id)
+    replicas = 1 if model.enabled else 0
+
+    if workload.mode == "parser":
+        container = {
+            "name": workload.main_container_name,
+            "image": app_image,
             "imagePullPolicy": "IfNotPresent",
-            "args": ["run", "-c", "/config/config.json"],
-            "securityContext": {
-                "runAsUser": 0,
-                "capabilities": {"add": ["NET_ADMIN"]},
+            "args": ["parser"],
+            "ports": [{"name": "http", "containerPort": 8080}],
+            "env": build_parser_env(instance),
+            "volumeMounts": [{"name": "data", "mountPath": "/data"}],
+            "readinessProbe": {
+                "httpGet": {"path": "/healthz", "port": "http"},
+                "initialDelaySeconds": 5,
+                "periodSeconds": 10,
             },
-            "volumeMounts": [
+            "livenessProbe": {
+                "httpGet": {"path": "/healthz", "port": "http"},
+                "initialDelaySeconds": 15,
+                "periodSeconds": 20,
+            },
+        }
+        pod_spec: dict[str, Any] = {
+            "serviceAccountName": PARSER_SERVICE_ACCOUNT_NAME,
+            "containers": [container],
+        }
+    elif workload.mode == "runner":
+        use_proxy = bool(runner_proxy_url)
+        containers = [
+            {
+                "name": workload.main_container_name,
+                "image": app_image,
+                "imagePullPolicy": "IfNotPresent",
+                "args": ["runner"],
+                "ports": [{"name": "http", "containerPort": 8080}],
+                "env": build_runner_env(instance),
+                "volumeMounts": [{"name": "data", "mountPath": "/data"}],
+                "readinessProbe": {
+                    "httpGet": {"path": "/healthz", "port": "http"},
+                    "initialDelaySeconds": 5,
+                    "periodSeconds": 10,
+                },
+                "livenessProbe": {
+                    "httpGet": {"path": "/healthz", "port": "http"},
+                    "initialDelaySeconds": 15,
+                    "periodSeconds": 20,
+                },
+            }
+        ]
+        pod_spec = {
+            "securityContext": {"fsGroup": 1000},
+            "containers": containers,
+        }
+        if use_proxy:
+            pod_spec["volumes"] = [
                 {
                     "name": "runner-config",
-                    "mountPath": "/config",
-                    "readOnly": True,
+                    "secret": {"secretName": runner_config_secret_name(name)},
                 },
                 {
                     "name": "dev-tun",
-                    "mountPath": "/dev/net/tun",
+                    "hostPath": {"path": "/dev/net/tun", "type": "CharDevice"},
                 },
-            ],
-        })
-    pod_spec: dict[str, Any] = {
-        "securityContext": {"fsGroup": 1000},
-        "containers": containers,
-    }
-    if volumes:
-        pod_spec["volumes"] = volumes
+            ]
+            containers.append(
+                {
+                    "name": "tun-proxy",
+                    "image": singbox_image,
+                    "imagePullPolicy": "IfNotPresent",
+                    "args": ["run", "-c", "/config/config.json"],
+                    "securityContext": {
+                        "runAsUser": 0,
+                        "capabilities": {"add": ["NET_ADMIN"]},
+                    },
+                    "volumeMounts": [
+                        {
+                            "name": "runner-config",
+                            "mountPath": "/config",
+                            "readOnly": True,
+                        },
+                        {
+                            "name": "dev-tun",
+                            "mountPath": "/dev/net/tun",
+                        },
+                    ],
+                }
+            )
+    else:
+        raise ValueError(f"unsupported workload mode: {workload.mode}")
 
     return {
         "apiVersion": "apps/v1",
         "kind": "StatefulSet",
         "metadata": {
-            "name": runner_name(name),
+            "name": workload_name(name, model.parser_type, workload_id),
             "namespace": namespace,
             "labels": labels,
             "ownerReferences": owner_reference(instance),
         },
         "spec": {
-            "serviceName": runner_service_name(name),
+            "serviceName": workload_service_name(name, model.parser_type, workload_id),
             "replicas": replicas,
             "persistentVolumeClaimRetentionPolicy": {
                 "whenDeleted": "Delete",
@@ -392,8 +395,23 @@ def build_runner_statefulset(
             "volumeClaimTemplates": [
                 {
                     "metadata": {"name": "data"},
-                    "spec": claim_spec,
+                    "spec": _statefulset_claim_spec(model, workload_id),
                 }
             ],
         },
     }
+
+
+def build_runner_statefulset(
+    instance: dict[str, Any],
+    app_image: str,
+    singbox_image: str,
+    runner_proxy_url: str = "",
+) -> dict[str, Any]:
+    return build_workload_statefulset(
+        instance,
+        "steamcmd",
+        app_image,
+        singbox_image,
+        runner_proxy_url,
+    )

@@ -24,9 +24,19 @@ from kube.kube_resources import (
     build_runner_config_secret,
     build_runner_service,
     build_runner_statefulset,
+    build_workload_service,
+    build_workload_statefulset,
 )
-from kube.mirror_instance import common_labels, instance_name, normalize_instance, set_condition
-from kube.mirror_instance import runner_config_secret_name
+from kube.mirror_instance import (
+    common_labels,
+    from_instance_dict,
+    instance_name,
+    normalize_instance,
+    runner_config_secret_name,
+    set_condition,
+    workload_service_name,
+)
+from core.instance_schema import get_parser_contract
 
 
 @dataclass
@@ -81,6 +91,19 @@ def _component_pod(namespace: str, name: str, component: str) -> Any | None:
     return pods[0]
 
 
+def _pod_main_image(pod: Any, container_name: str) -> str:
+    if pod is None or getattr(pod, "spec", None) is None:
+        return ""
+    for container in list(getattr(pod.spec, "containers", None) or []):
+        if str(getattr(container, "name", "") or "") == container_name:
+            return str(getattr(container, "image", "") or "")
+    return ""
+
+
+def _condition_type_for_workload(label: str) -> str:
+    return "".join(ch for ch in label.title() if ch.isalnum()) + "Ready"
+
+
 class MirrorInstanceOperator:
     def __init__(self, settings: OperatorSettings) -> None:
         self.settings = settings
@@ -110,21 +133,28 @@ class MirrorInstanceOperator:
     def reconcile_instance(self, instance: dict[str, Any]) -> None:
         normalized = normalize_instance(instance)
         name = instance_name(normalized)
-        spec = normalized["spec"]
-        credentials_secret = str(spec["credentials"].get("secretRef") or "").strip()
-        if not credentials_secret:
+        model = from_instance_dict(normalized)
+        contract = get_parser_contract(model.parser_type)
+        if not model.credentials_secret_ref:
             raise ValueError("spec.credentials.secretRef is required")
-        runner_proxy_secret = str(spec["steamcmd"]["proxy"].get("secretRef") or "").strip()
-        if not runner_proxy_secret:
-            raise ValueError("spec.steamcmd.proxy.secretRef is required")
 
         # Validate referenced secrets before creating child workloads.
-        read_secret_value(self.settings.namespace, credentials_secret, "login")
-        read_secret_value(self.settings.namespace, credentials_secret, "password")
-        parser_proxy_secret = str(spec["parser"].get("proxyPoolSecretRef") or "").strip()
-        if parser_proxy_secret:
-            read_secret_value(self.settings.namespace, parser_proxy_secret, "proxyPool")
-        runner_proxy_url = read_secret_value(self.settings.namespace, runner_proxy_secret, "proxyUrl") or ""
+        read_secret_value(self.settings.namespace, model.credentials_secret_ref, "login")
+        read_secret_value(self.settings.namespace, model.credentials_secret_ref, "password")
+        secret_values: dict[str, str] = {}
+        for secret_spec in contract.secret_specs:
+            secret_ref = str(model.parser_secret_refs.get(secret_spec.key) or "").strip()
+            if not secret_ref:
+                continue
+            secret_values[secret_spec.key] = (
+                read_secret_value(
+                    self.settings.namespace,
+                    secret_ref,
+                    secret_spec.secret_data_key,
+                )
+                or ""
+            )
+        runner_proxy_url = secret_values.get("runnerProxySecretRef", "")
 
         if runner_proxy_url:
             upsert_secret(
@@ -133,22 +163,23 @@ class MirrorInstanceOperator:
             )
         else:
             delete_secret(self.settings.namespace, runner_config_secret_name(name))
-        
-        upsert_service(self.settings.namespace, build_parser_service(normalized))
-        upsert_service(self.settings.namespace, build_runner_service(normalized))
-        upsert_statefulset(
-            self.settings.namespace,
-            build_parser_statefulset(normalized, self.settings.app_image),
-        )
-        upsert_statefulset(
-            self.settings.namespace,
-            build_runner_statefulset(
-                normalized,
-                self.settings.app_image,
-                self.settings.singbox_image,
-                runner_proxy_url,
-            ),
-        )
+
+        for workload in contract.workloads:
+            if workload.service_enabled:
+                upsert_service(
+                    self.settings.namespace,
+                    build_workload_service(normalized, workload.workload_id),
+                )
+            upsert_statefulset(
+                self.settings.namespace,
+                build_workload_statefulset(
+                    normalized,
+                    workload.workload_id,
+                    self.settings.app_image,
+                    self.settings.singbox_image,
+                    runner_proxy_url if workload.workload_id == "steamcmd" else "",
+                ),
+            )
         self._sync_status(normalized)
 
     def _mark_reconcile_error(self, instance: dict[str, Any], exc: Exception) -> None:
@@ -177,43 +208,78 @@ class MirrorInstanceOperator:
 
     def _sync_status(self, instance: dict[str, Any]) -> None:
         name = instance_name(instance)
-        enabled = bool(instance["spec"].get("enabled", True))
-        parser_pod = _component_pod(self.settings.namespace, name, "parser")
-        runner_pod = _component_pod(self.settings.namespace, name, "runner")
-        parser_ready = _pod_ready(parser_pod)
-        runner_ready = _pod_ready(runner_pod)
+        model = from_instance_dict(instance)
+        contract = get_parser_contract(model.parser_type)
+        enabled = bool(model.enabled)
+        generation = int(instance.get("metadata", {}).get("generation") or 0)
+        workload_status: dict[str, Any] = {}
+        workload_ready_map: dict[str, bool] = {}
+        parser_pod_name = ""
+        runner_pod_name = ""
+        conditions = list((instance.get("status") or {}).get("conditions") or [])
+
+        for workload in contract.workloads:
+            pod = _component_pod(self.settings.namespace, name, workload.component)
+            ready = _pod_ready(pod)
+            pod_name = str(getattr(getattr(pod, "metadata", None), "name", "") or "")
+            workload_ready_map[workload.workload_id] = ready
+            workload_status[workload.workload_id] = {
+                "podName": pod_name,
+                "state": str(getattr(getattr(pod, "status", None), "phase", "") or "Missing"),
+                "ready": ready,
+                "image": _pod_main_image(pod, workload.main_container_name),
+                "serviceName": workload_service_name(name, model.parser_type, workload.workload_id),
+                "observedGeneration": generation,
+            }
+            if workload.workload_id == "parser":
+                parser_pod_name = pod_name
+            if workload.workload_id == "steamcmd":
+                runner_pod_name = pod_name
+            condition_type = _condition_type_for_workload(workload.display_label)
+            conditions = set_condition(
+                conditions,
+                condition_type,
+                ready,
+                condition_type if ready else condition_type.replace("Ready", "NotReady"),
+                pod_name or f"{workload.display_label.lower()} pod not created yet",
+            )
+
+        all_ready = all(workload_ready_map.values()) if workload_ready_map else False
         phase = "Paused"
         if enabled:
-            phase = "Ready" if (parser_ready and runner_ready) else "Progressing"
-        conditions = list((instance.get("status") or {}).get("conditions") or [])
-        conditions = set_condition(
-            conditions,
-            "ParserReady",
-            parser_ready,
-            "ParserReady" if parser_ready else "ParserNotReady",
-            parser_pod.metadata.name if parser_pod else "parser pod not created yet",
-        )
-        conditions = set_condition(
-            conditions,
-            "RunnerReady",
-            runner_ready,
-            "RunnerReady" if runner_ready else "RunnerNotReady",
-            runner_pod.metadata.name if runner_pod else "runner pod not created yet",
-        )
+            phase = "Ready" if all_ready else "Progressing"
         conditions = set_condition(
             conditions,
             "Ready",
-            parser_ready and runner_ready and enabled,
+            all_ready and enabled,
             phase,
             phase,
         )
+        if "parser" in workload_ready_map:
+            conditions = set_condition(
+                conditions,
+                "ParserReady",
+                workload_ready_map["parser"],
+                "ParserReady" if workload_ready_map["parser"] else "ParserNotReady",
+                parser_pod_name or "parser pod not created yet",
+            )
+        if "steamcmd" in workload_ready_map:
+            conditions = set_condition(
+                conditions,
+                "RunnerReady",
+                workload_ready_map["steamcmd"],
+                "RunnerReady" if workload_ready_map["steamcmd"] else "RunnerNotReady",
+                runner_pod_name or "runner pod not created yet",
+            )
         merge_instance_status(
             self.settings.namespace,
             name,
             {
                 "phase": phase,
-                "parserPod": parser_pod.metadata.name if parser_pod else "",
-                "runnerPod": runner_pod.metadata.name if runner_pod else "",
+                "parserType": model.parser_type,
+                "workloads": workload_status,
+                "parserPod": parser_pod_name,
+                "runnerPod": runner_pod_name,
                 "conditions": conditions,
             },
         )

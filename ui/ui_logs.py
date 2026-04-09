@@ -5,6 +5,7 @@ from typing import Any
 
 from aiohttp import web
 
+from core.instance_schema import MirrorInstanceSpecModel, get_parser_contract
 from core.log_tags import (
     filter_log_text_by_tag,
     format_log_tag_options,
@@ -17,33 +18,37 @@ from kube.mirror_instance import (
     parser_service_name,
     runner_name,
     runner_service_name,
+    workload_name,
+    workload_service_name,
 )
 from ui.ui_common import UISettings
 from ui.ui_kube_utils import _select_best_pod
 
 
-def _component_log_target(target: str) -> tuple[str, str]:
-    """Get component and container name from log target."""
-    normalized = str(target or "").strip().lower()
-    if normalized == "parser":
-        return "parser", "parser"
-    if normalized == "runner":
-        return "runner", "runner"
-    if normalized == "tun":
-        return "runner", "tun-proxy"
-    raise web.HTTPNotFound(text="unknown log target")
+def _log_target_specs(instance: dict[str, Any]) -> dict[str, dict[str, str]]:
+    model = MirrorInstanceSpecModel.from_instance_dict(instance)
+    contract = get_parser_contract(model.parser_type)
+    payload: dict[str, dict[str, str]] = {}
+    for workload in contract.workloads:
+        for target in workload.log_targets:
+            payload[target.target] = {
+                "workloadId": workload.workload_id,
+                "component": workload.component,
+                "container": target.container_name,
+                "label": target.label,
+            }
+    return payload
 
 
-def _component_label(target: str) -> str:
-    """Get display label for component."""
+def _component_log_target(instance: dict[str, Any], target: str) -> tuple[str, str, str]:
+    """Get component, container name, and label from log target."""
     normalized = str(target or "").strip().lower()
-    if normalized == "parser":
-        return "Parser"
-    if normalized == "runner":
-        return "Runner"
-    if normalized == "tun":
-        return "TUN"
-    return normalized.title()
+    target_specs = _log_target_specs(instance)
+    try:
+        spec = target_specs[normalized]
+    except KeyError as exc:
+        raise web.HTTPNotFound(text="unknown log target") from exc
+    return spec["component"], spec["container"], spec["label"]
 
 
 def _labels_selector(name: str, component: str) -> str:
@@ -103,7 +108,8 @@ def _pod_log_snapshot(
     """Get pod log snapshot."""
     from ui.ui_kube_utils import _pod_network_metrics
 
-    component, container = _component_log_target(target)
+    instance = get_instance(settings.namespace, name)
+    component, container, target_label = _component_log_target(instance, target)
     pod_name = _latest_pod_name(settings.namespace, name, component)
     if not pod_name:
         raise web.HTTPNotFound(text=f"Pod for {name}/{target} is not available yet")
@@ -122,7 +128,7 @@ def _pod_log_snapshot(
     return {
         "instance": name,
         "target": target,
-        "targetLabel": _component_label(target),
+        "targetLabel": target_label,
         "component": component,
         "container": container,
         "podName": pod_name,
@@ -143,73 +149,49 @@ def _load_resource_entries(settings: UISettings, name: str) -> list[dict[str, An
     kube = get_kube_clients()
     instance = get_instance(settings.namespace, name)
     status = dict(instance.get("status") or {})
-    parser_pod_name = str(status.get("parserPod") or "") or _latest_pod_name(
-        settings.namespace,
-        name,
-        "parser",
-    )
-    runner_pod_name = str(status.get("runnerPod") or "") or _latest_pod_name(
-        settings.namespace,
-        name,
-        "runner",
-    )
-    readers: list[tuple[str, str, Any]] = [
-        ("MirrorInstance", name, lambda: instance),
-        (
-            "StatefulSet",
-            parser_name(name),
-            lambda: kube.apps.read_namespaced_stateful_set(
-                parser_name(name),
-                settings.namespace,
-            ),
-        ),
-        (
-            "StatefulSet",
-            runner_name(name),
-            lambda: kube.apps.read_namespaced_stateful_set(
-                runner_name(name),
-                settings.namespace,
-            ),
-        ),
-        (
-            "Service",
-            parser_service_name(name),
-            lambda: kube.core.read_namespaced_service(
-                parser_service_name(name),
-                settings.namespace,
-            ),
-        ),
-        (
-            "Service",
-            runner_service_name(name),
-            lambda: kube.core.read_namespaced_service(
-                runner_service_name(name),
-                settings.namespace,
-            ),
-        ),
-    ]
-    if parser_pod_name:
-        readers.append(
-            (
-                "Pod",
-                parser_pod_name,
-                lambda: kube.core.read_namespaced_pod(
-                    parser_pod_name,
-                    settings.namespace,
+    model = MirrorInstanceSpecModel.from_instance_dict(instance)
+    contract = get_parser_contract(model.parser_type)
+    workload_status = dict(status.get("workloads") or {})
+    readers: list[tuple[str, str, Any]] = [("MirrorInstance", name, lambda: instance)]
+    for workload in contract.workloads:
+        workload_name_value = workload_name(name, model.parser_type, workload.workload_id)
+        service_name_value = workload_service_name(name, model.parser_type, workload.workload_id)
+        readers.extend(
+            [
+                (
+                    "StatefulSet",
+                    workload_name_value,
+                    lambda workload_name_value=workload_name_value: kube.apps.read_namespaced_stateful_set(
+                        workload_name_value,
+                        settings.namespace,
+                    ),
                 ),
-            )
-        )
-    if runner_pod_name:
-        readers.append(
-            (
-                "Pod",
-                runner_pod_name,
-                lambda: kube.core.read_namespaced_pod(
-                    runner_pod_name,
-                    settings.namespace,
+                (
+                    "Service",
+                    service_name_value,
+                    lambda service_name_value=service_name_value: kube.core.read_namespaced_service(
+                        service_name_value,
+                        settings.namespace,
+                    ),
                 ),
-            )
+            ]
         )
+        pod_name = str(dict(workload_status.get(workload.workload_id) or {}).get("podName") or "") or _latest_pod_name(
+            settings.namespace,
+            name,
+            workload.component,
+        )
+        if pod_name:
+            readers.append(
+                (
+                    "Pod",
+                    pod_name,
+                    lambda pod_name=pod_name: kube.core.read_namespaced_pod(
+                        pod_name,
+                        settings.namespace,
+                    ),
+                )
+            )
     entries: list[dict[str, Any]] = []
     for kind, resource_name, reader in readers:
         try:

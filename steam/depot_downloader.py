@@ -1,5 +1,4 @@
 import logging
-import re
 import shutil
 import subprocess
 import threading
@@ -309,9 +308,6 @@ def download_mod_archive(
         reason = f"DepotDownloader finished but no files found at {workshop_path}"
         logging.error(reason)
         return SteamDownloadResult(False, reason=reason, retryable=False)
-    
-    archive_path = zip_directory(workshop_path, dest_zip)
-    return SteamDownloadResult(True, archive_path=archive_path)
     
     archive_path = zip_directory(workshop_path, dest_zip)
     return SteamDownloadResult(True, archive_path=archive_path)

@@ -7,7 +7,9 @@ from typing import Any
 
 from kubernetes.client.rest import ApiException
 
+from core.instance_schema import MirrorInstanceSpecModel, get_parser_contract
 from kube.kube_client import get_kube_clients
+from kube.mirror_instance import instance_name
 from ui.ui_formatting import _int_value
 from ui.ui_kube_utils import (
     _pod_snapshot,
@@ -46,19 +48,19 @@ def _resource_usage(
     }
 
 
-def _storage_request_bytes(instance: dict[str, Any], component: str) -> int | None:
+def _storage_request_bytes(instance: dict[str, Any], workload_id: str) -> int | None:
     """Get storage request bytes for a component."""
     from ui.ui_formatting import _parse_bytes
-    
-    spec = dict(instance.get("spec") or {})
-    storage = dict(spec.get("storage") or {})
-    component_storage = dict(storage.get(component) or {})
-    return _parse_bytes(component_storage.get("size"))
+
+    model = MirrorInstanceSpecModel.from_instance_dict(instance)
+    workload = dict(model.parser_workloads.get(workload_id) or {})
+    storage = dict(workload.get("storage") or {})
+    return _parse_bytes(storage.get("size"))
 
 
-def _storage_capacity_bytes(instance: dict[str, Any], component: str) -> int | None:
+def _storage_capacity_bytes(instance: dict[str, Any], workload_id: str) -> int | None:
     """Get effective storage capacity bytes for a component."""
-    return _storage_request_bytes(instance, component)
+    return _storage_request_bytes(instance, workload_id)
 
 
 def _pod_persistent_disk_metrics(
@@ -68,8 +70,8 @@ def _pod_persistent_disk_metrics(
     """Get PVC-backed disk metrics for pods from node stats summary."""
     pods_by_node: dict[str, set[str]] = {}
     for components in component_snapshots.values():
-        for component in ("parser", "runner"):
-            snapshot = dict(components.get(component) or {})
+        for snapshot_value in components.values():
+            snapshot = dict(snapshot_value or {})
             pod_name = str(snapshot.get("podName") or "")
             node_name = str(snapshot.get("nodeName") or "")
             if pod_name and node_name:
@@ -131,12 +133,12 @@ def _component_resource_metrics_for_names(
     resources: dict[str, dict[str, dict[str, int | None]]] = {}
     for name, components in component_snapshots.items():
         resources[name] = {}
-        for component in ("parser", "runner"):
-            snapshot = dict(components.get(component) or {})
+        for workload_id, snapshot_value in components.items():
+            snapshot = dict(snapshot_value or {})
             pod_name = str(snapshot.get("podName") or "")
             usage = dict(usage_metrics.get(pod_name) or {})
             disk = dict(disk_usage.get(pod_name) or {})
-            resources[name][component] = {
+            resources[name][workload_id] = {
                 "cpuMilliCores": _int_value(usage.get("cpuMilliCores")),
                 "memoryBytes": _int_value(usage.get("memoryBytes")),
                 "diskUsedBytes": _int_value(disk.get("usedBytes")),
@@ -149,9 +151,12 @@ def _component_resource_metrics_for_names(
     return resources
 
 
-def _component_snapshots_for_names(namespace: str, names: set[str]) -> dict[str, dict[str, Any]]:
+def _component_snapshots_for_instances(
+    namespace: str,
+    instances: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
     """Get pod snapshots for components by instance names."""
-    if not names:
+    if not instances:
         return {}
     try:
         pods = get_kube_clients().core.list_namespaced_pod(
@@ -165,15 +170,17 @@ def _component_snapshots_for_names(namespace: str, names: set[str]) -> dict[str,
         labels = dict(getattr(pod.metadata, "labels", None) or {})
         instance = str(labels.get("auto-updater.miskler.ru/instance") or "")
         component = str(labels.get("app.kubernetes.io/component") or "")
-        if instance not in names or component not in {"parser", "runner"}:
+        if instance not in instances:
             continue
         grouped.setdefault(instance, {}).setdefault(component, []).append(pod)
     snapshots: dict[str, dict[str, Any]] = {}
-    for name in names:
+    for name, instance in instances.items():
+        model = MirrorInstanceSpecModel.from_instance_dict(instance)
+        contract = get_parser_contract(model.parser_type)
         snapshots[name] = {}
-        for component in ("parser", "runner"):
-            best = _select_best_pod(grouped.get(name, {}).get(component, []))
-            snapshots[name][component] = _pod_snapshot(best)
+        for workload in contract.workloads:
+            best = _select_best_pod(grouped.get(name, {}).get(workload.component, []))
+            snapshots[name][workload.workload_id] = _pod_snapshot(best)
     return snapshots
 
 

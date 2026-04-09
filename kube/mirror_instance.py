@@ -8,7 +8,9 @@ from typing import Any
 from core.instance_schema import (
     MirrorInstanceSpecModel,
     default_spec,
+    default_parser_type,
     deep_merge,
+    get_parser_contract,
     normalize_instance_dict,
 )
 
@@ -53,20 +55,37 @@ def component_name(name: str, component: str) -> str:
     return f"{name}-{component}"
 
 
+def workload_name(name: str, parser_type: str, workload_id: str) -> str:
+    contract = get_parser_contract(parser_type)
+    workload = contract.workloads_by_id[workload_id]
+    return component_name(name, workload.name_suffix)
+
+
+def workload_service_name(name: str, parser_type: str, workload_id: str) -> str:
+    return workload_name(name, parser_type, workload_id)
+
+
+def workload_service_url(name: str, namespace: str, parser_type: str, workload_id: str) -> str:
+    return (
+        f"http://{workload_service_name(name, parser_type, workload_id)}."
+        f"{namespace}.svc.cluster.local:8080"
+    )
+
+
 def parser_name(name: str) -> str:
-    return component_name(name, "parser")
+    return workload_name(name, default_parser_type(), "parser")
 
 
 def runner_name(name: str) -> str:
-    return component_name(name, "steamcmd")
+    return workload_name(name, default_parser_type(), "steamcmd")
 
 
 def parser_service_name(name: str) -> str:
-    return parser_name(name)
+    return workload_service_name(name, default_parser_type(), "parser")
 
 
 def runner_service_name(name: str) -> str:
-    return runner_name(name)
+    return workload_service_name(name, default_parser_type(), "steamcmd")
 
 
 def runner_config_secret_name(name: str) -> str:
@@ -95,11 +114,11 @@ class ManagedSecretSpec:
 
 
 def managed_secret_names(name: str) -> set[str]:
-    return {
-        managed_credentials_secret_name(name),
-        managed_parser_proxy_secret_name(name),
-        managed_runner_proxy_secret_name(name),
-    }
+    names = {managed_credentials_secret_name(name)}
+    contract = get_parser_contract(default_parser_type())
+    for secret_spec in contract.secret_specs:
+        names.add(component_name(name, secret_spec.secret_component))
+    return names
 
 
 def managed_secret_specs(instance: dict[str, Any]) -> dict[str, ManagedSecretSpec]:
@@ -107,7 +126,7 @@ def managed_secret_specs(instance: dict[str, Any]) -> dict[str, ManagedSecretSpe
     name = instance_name(normalized)
     namespace = instance_namespace(normalized)
     refs = owner_reference(instance)
-    return {
+    specs = {
         "credentials": ManagedSecretSpec(
             name=managed_credentials_secret_name(name),
             namespace=namespace,
@@ -118,35 +137,33 @@ def managed_secret_specs(instance: dict[str, Any]) -> dict[str, ManagedSecretSpe
             },
             owner_references=refs,
         ),
-        "parser_proxy": ManagedSecretSpec(
-            name=managed_parser_proxy_secret_name(name),
-            namespace=namespace,
-            component="parser-proxies",
-            labels={
-                **common_labels(name, "parser-proxies"),
-                "auto-updater.miskler.ru/managed-secret": "true",
-            },
-            owner_references=refs,
-        ),
-        "runner_proxy": ManagedSecretSpec(
-            name=managed_runner_proxy_secret_name(name),
-            namespace=namespace,
-            component="runner-proxy",
-            labels={
-                **common_labels(name, "runner-proxy"),
-                "auto-updater.miskler.ru/managed-secret": "true",
-            },
-            owner_references=refs,
-        ),
     }
+    model = from_instance_dict(normalized)
+    contract = get_parser_contract(model.parser_type)
+    for secret_spec in contract.secret_specs:
+        specs[secret_spec.key] = ManagedSecretSpec(
+            name=component_name(name, secret_spec.secret_component),
+            namespace=namespace,
+            component=secret_spec.secret_component,
+            labels={
+                **common_labels(name, secret_spec.secret_component),
+                "auto-updater.miskler.ru/managed-secret": "true",
+            },
+            owner_references=refs,
+        )
+    if "parserProxyPoolSecretRef" in specs:
+        specs["parser_proxy"] = specs["parserProxyPoolSecretRef"]
+    if "runnerProxySecretRef" in specs:
+        specs["runner_proxy"] = specs["runnerProxySecretRef"]
+    return specs
 
 
 def parser_service_url(name: str, namespace: str) -> str:
-    return f"http://{parser_service_name(name)}.{namespace}.svc.cluster.local:8080"
+    return workload_service_url(name, namespace, default_parser_type(), "parser")
 
 
 def runner_service_url(name: str, namespace: str) -> str:
-    return f"http://{runner_service_name(name)}.{namespace}.svc.cluster.local:8080"
+    return workload_service_url(name, namespace, default_parser_type(), "steamcmd")
 
 
 def common_labels(name: str, component: str | None = None) -> dict[str, str]:

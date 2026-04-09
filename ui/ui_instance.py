@@ -5,6 +5,12 @@ import logging
 from typing import Any
 from urllib.parse import quote
 
+from core.instance_schema import (
+    MirrorInstanceSpecModel,
+    get_parser_contract,
+    parser_overview_pairs,
+    parser_subtitle_label,
+)
 from kube.kube_client import get_instance, list_instances
 from kube.mirror_instance import (
     common_labels,
@@ -26,12 +32,16 @@ from ui.ui_kube_utils import (
 )
 from ui.ui_resources import (
     _component_resource_metrics_for_names,
-    _component_snapshots_for_names,
     _component_state,
     _resource_usage,
     _storage_capacity_bytes,
     _storage_request_bytes,
 )
+
+try:
+    from ui.ui_resources import _component_snapshots_for_instances
+except ImportError:  # pragma: no cover - compatibility for lightweight test stubs
+    from ui.ui_resources import _component_snapshots_for_names as _component_snapshots_for_instances
 
 
 def _derive_health(
@@ -160,8 +170,7 @@ def _trusted_persistent_disk_used_bytes(
 
 
 def _rollup_component_resources(
-    parser_resources: dict[str, Any],
-    runner_resources: dict[str, Any],
+    workload_resources: list[dict[str, Any]],
     *,
     node_capacity_millicores: int | None,
     node_capacity_bytes: int | None,
@@ -169,34 +178,19 @@ def _rollup_component_resources(
     """Build a consistent total resource block from parser and runner resources."""
     return _resource_usage(
         cpu_millicores=_sum_values(
-            [
-                _int_value(parser_resources.get("cpuMilliCores")),
-                _int_value(runner_resources.get("cpuMilliCores")),
-            ]
+            [_int_value(item.get("cpuMilliCores")) for item in workload_resources]
         ),
         memory_bytes=_sum_values(
-            [
-                _int_value(parser_resources.get("memoryBytes")),
-                _int_value(runner_resources.get("memoryBytes")),
-            ]
+            [_int_value(item.get("memoryBytes")) for item in workload_resources]
         ),
         disk_capacity_bytes=_sum_values(
-            [
-                _int_value(parser_resources.get("diskCapacityBytes")),
-                _int_value(runner_resources.get("diskCapacityBytes")),
-            ]
+            [_int_value(item.get("diskCapacityBytes")) for item in workload_resources]
         ),
         disk_used_bytes=_sum_values(
-            [
-                _int_value(parser_resources.get("diskUsedBytes")),
-                _int_value(runner_resources.get("diskUsedBytes")),
-            ]
+            [_int_value(item.get("diskUsedBytes")) for item in workload_resources]
         ),
         disk_requested_bytes=_sum_values(
-            [
-                _int_value(parser_resources.get("diskRequestedBytes")),
-                _int_value(runner_resources.get("diskRequestedBytes")),
-            ]
+            [_int_value(item.get("diskRequestedBytes")) for item in workload_resources]
         ),
         node_capacity_millicores=node_capacity_millicores,
         node_capacity_bytes=node_capacity_bytes,
@@ -211,77 +205,102 @@ def _instance_summary(
 ) -> dict[str, Any]:
     """Create a summary of an instance."""
     normalized = normalize_instance(instance)
+    model = MirrorInstanceSpecModel.from_instance_dict(normalized)
+    contract = get_parser_contract(model.parser_type)
     status = dict(normalized.get("status") or {})
+    workload_status = dict(status.get("workloads") or {})
     name = instance_name(normalized)
     component_snapshots = component_snapshots or {}
     component_resources = component_resources or {}
     parser_snapshot = dict(component_snapshots.get("parser") or {})
-    runner_snapshot = dict(component_snapshots.get("runner") or {})
-    parser_resource_snapshot = dict(component_resources.get("parser") or {})
-    runner_resource_snapshot = dict(component_resources.get("runner") or {})
-    parser_pod_name = str(status.get("parserPod") or "") or str(parser_snapshot.get("podName") or "")
-    runner_pod_name = str(status.get("runnerPod") or "") or str(runner_snapshot.get("podName") or "")
-    parser_state = _component_state(parser_snapshot, parser_pod_name)
-    runner_state = _component_state(runner_snapshot, runner_pod_name)
-    
+    runner_snapshot = dict(component_snapshots.get("steamcmd") or {})
+
     # Get node CPU and memory capacity for percentage calculation
-    node_name = str(parser_snapshot.get("nodeName") or runner_snapshot.get("nodeName") or "")
+    node_name = next(
+        (
+            str(dict(component_snapshots.get(workload.workload_id) or {}).get("nodeName") or "")
+            for workload in contract.workloads
+            if str(dict(component_snapshots.get(workload.workload_id) or {}).get("nodeName") or "")
+        ),
+        "",
+    )
     logging.debug("Instance %s: node_name=%r, parser_nodeName=%r, runner_nodeName=%r",
                   name, node_name, parser_snapshot.get("nodeName"), runner_snapshot.get("nodeName"))
     node_capacity_millicores = _get_node_cpu_capacity(node_name) if node_name else None
     node_capacity_bytes = _get_node_memory_capacity(node_name) if node_name else None
     logging.debug("Instance %s: node_capacity_millicores=%r, node_capacity_bytes=%r", name, node_capacity_millicores, node_capacity_bytes)
 
-    parser_disk_capacity_bytes = _storage_capacity_bytes(normalized, "parser")
-    parser_disk_requested_bytes = _storage_request_bytes(normalized, "parser")
-    parser_disk_used_bytes = _trusted_persistent_disk_used_bytes(
-        _int_value(parser_resource_snapshot.get("diskUsedBytes")),
-        _int_value(parser_resource_snapshot.get("diskReportedCapacityBytes")),
-        parser_disk_capacity_bytes,
-    )
-    parser_resources = _resource_usage(
-        cpu_millicores=_int_value(parser_resource_snapshot.get("cpuMilliCores")),
-        memory_bytes=_int_value(parser_resource_snapshot.get("memoryBytes")),
-        disk_capacity_bytes=parser_disk_capacity_bytes,
-        disk_used_bytes=parser_disk_used_bytes,
-        disk_requested_bytes=parser_disk_requested_bytes,
-        node_capacity_millicores=node_capacity_millicores,
-        node_capacity_bytes=node_capacity_bytes,
-    )
-    runner_disk_capacity_bytes = _storage_capacity_bytes(normalized, "runner")
-    runner_disk_requested_bytes = _storage_request_bytes(normalized, "runner")
-    runner_disk_used_bytes = _trusted_persistent_disk_used_bytes(
-        _int_value(runner_resource_snapshot.get("diskUsedBytes")),
-        _int_value(runner_resource_snapshot.get("diskReportedCapacityBytes")),
-        runner_disk_capacity_bytes,
-    )
-    runner_resources = _resource_usage(
-        cpu_millicores=_int_value(runner_resource_snapshot.get("cpuMilliCores")),
-        memory_bytes=_int_value(runner_resource_snapshot.get("memoryBytes")),
-        disk_capacity_bytes=runner_disk_capacity_bytes,
-        disk_used_bytes=runner_disk_used_bytes,
-        disk_requested_bytes=runner_disk_requested_bytes,
-        node_capacity_millicores=node_capacity_millicores,
-        node_capacity_bytes=node_capacity_bytes,
-    )
+    workload_summaries: list[dict[str, Any]] = []
+    for workload in contract.workloads:
+        workload_id = workload.workload_id
+        snapshot = dict(component_snapshots.get(workload_id) or {})
+        resource_snapshot = dict(component_resources.get(workload_id) or {})
+        status_entry = dict(workload_status.get(workload_id) or {})
+        pod_name = str(status_entry.get("podName") or "") or str(snapshot.get("podName") or "")
+        state = _component_state(snapshot, pod_name)
+        disk_capacity_bytes = _storage_capacity_bytes(normalized, workload_id)
+        disk_requested_bytes = _storage_request_bytes(normalized, workload_id)
+        disk_used_bytes = _trusted_persistent_disk_used_bytes(
+            _int_value(resource_snapshot.get("diskUsedBytes")),
+            _int_value(resource_snapshot.get("diskReportedCapacityBytes")),
+            disk_capacity_bytes,
+        )
+        resources = _resource_usage(
+            cpu_millicores=_int_value(resource_snapshot.get("cpuMilliCores")),
+            memory_bytes=_int_value(resource_snapshot.get("memoryBytes")),
+            disk_capacity_bytes=disk_capacity_bytes,
+            disk_used_bytes=disk_used_bytes,
+            disk_requested_bytes=disk_requested_bytes,
+            node_capacity_millicores=node_capacity_millicores,
+            node_capacity_bytes=node_capacity_bytes,
+        )
+        images = dict(snapshot.get("images") or {})
+        workload_summaries.append(
+            {
+                "id": workload_id,
+                "label": workload.display_label,
+                "component": workload.component,
+                "podName": pod_name,
+                "state": state["label"],
+                "tone": state["tone"],
+                "ready": bool(snapshot.get("ready")),
+                "image": str(status_entry.get("image") or images.get(workload.main_container_name) or ""),
+                "serviceName": str(status_entry.get("serviceName") or ""),
+                "resources": resources,
+                "logTargets": [
+                    {
+                        "target": item.target,
+                        "label": item.label,
+                        "container": item.container_name,
+                    }
+                    for item in workload.log_targets
+                ],
+                "containerReady": dict(snapshot.get("containerReady") or {}),
+                "images": images,
+            }
+        )
     total_resources = _rollup_component_resources(
-        parser_resources,
-        runner_resources,
+        [dict(item.get("resources") or {}) for item in workload_summaries],
         node_capacity_millicores=node_capacity_millicores,
         node_capacity_bytes=node_capacity_bytes,
     )
     phase = str(status.get("phase") or "Unknown")
     last_sync_result = str(status.get("lastSyncResult") or "").strip().lower()
     enabled = bool(normalized["spec"].get("enabled", True))
+    all_ready = bool(workload_summaries) and all(bool(item.get("ready")) for item in workload_summaries)
+    parser_alias = next((item for item in workload_summaries if item["id"] == "parser"), {})
+    runner_alias = next((item for item in workload_summaries if item["id"] == "steamcmd"), {})
     health = _derive_health(
         enabled=enabled,
         phase=phase,
         last_error=str(status.get("lastError") or "").strip(),
-        parser_ready=bool(parser_snapshot.get("ready")),
-        runner_ready=bool(runner_snapshot.get("ready")),
+        parser_ready=all_ready,
+        runner_ready=all_ready,
     )
     return {
         "name": name,
+        "parserType": model.parser_type,
+        "parserLabel": contract.label,
         "enabled": enabled,
         "health": health,
         "healthTone": _health_tone(health),
@@ -293,28 +312,27 @@ def _instance_summary(
         "lastSyncFinishedAt": str(status.get("lastSyncFinishedAt") or ""),
         "errorSummary": _error_summary(health, phase, status, parser_snapshot, runner_snapshot),
         "lastError": str(status.get("lastError") or ""),
-        "source": {
-            "steamAppId": normalized["spec"]["source"].get("steamAppId", 0),
-            "owGameId": normalized["spec"]["source"].get("owGameId", 0),
-            "language": normalized["spec"]["source"].get("language", "english"),
-        },
+        "source": model.source,
+        "sourceSubtitle": parser_subtitle_label(model.parser_type, model.parser_config),
+        "overviewPairs": parser_overview_pairs(model.parser_type, model.parser_config),
+        "workloads": workload_summaries,
         "parser": {
-            "podName": parser_pod_name,
-            "state": parser_state["label"],
-            "tone": parser_state["tone"],
-            "ready": bool(parser_snapshot.get("ready")),
-            "image": str(parser_snapshot.get("images", {}).get("parser") or ""),
-            "resources": parser_resources,
+            "podName": str(parser_alias.get("podName") or ""),
+            "state": str(parser_alias.get("state") or "Missing"),
+            "tone": str(parser_alias.get("tone") or "error"),
+            "ready": bool(parser_alias.get("ready")),
+            "image": str(parser_alias.get("image") or ""),
+            "resources": dict(parser_alias.get("resources") or {}),
         },
         "runner": {
-            "podName": runner_pod_name,
-            "state": runner_state["label"],
-            "tone": runner_state["tone"],
-            "ready": bool(runner_snapshot.get("ready")),
-            "image": str(runner_snapshot.get("images", {}).get("runner") or ""),
-            "tunImage": str(runner_snapshot.get("images", {}).get("tun-proxy") or ""),
-            "tunReady": bool(runner_snapshot.get("containerReady", {}).get("tun-proxy", False)),
-            "resources": runner_resources,
+            "podName": str(runner_alias.get("podName") or ""),
+            "state": str(runner_alias.get("state") or "Missing"),
+            "tone": str(runner_alias.get("tone") or "error"),
+            "ready": bool(runner_alias.get("ready")),
+            "image": str(runner_alias.get("image") or ""),
+            "tunImage": str(dict(runner_alias.get("images") or {}).get("tun-proxy") or ""),
+            "tunReady": bool(dict(runner_alias.get("containerReady") or {}).get("tun-proxy", False)),
+            "resources": dict(runner_alias.get("resources") or {}),
         },
         "resources": total_resources,
         "conditions": list(status.get("conditions") or []),
@@ -325,8 +343,10 @@ def _instance_summary(
 def _load_instance_summaries(settings: UISettings) -> list[dict[str, Any]]:
     """Load summaries for all instances."""
     instances = list_instances(settings.namespace)
-    names = {instance_name(item) for item in instances if instance_name(item)}
-    snapshots = _component_snapshots_for_names(settings.namespace, names)
+    instances_by_name = {
+        instance_name(item): item for item in instances if instance_name(item)
+    }
+    snapshots = _component_snapshots_for_instances(settings.namespace, instances_by_name)
     resources = _component_resource_metrics_for_names(settings.namespace, snapshots)
     summaries = [
         _instance_summary(
@@ -344,7 +364,7 @@ def _load_instance_summaries(settings: UISettings) -> list[dict[str, Any]]:
 def _load_instance_summary(settings: UISettings, name: str) -> dict[str, Any]:
     """Load summary for a single instance."""
     instance = get_instance(settings.namespace, name)
-    snapshots = _component_snapshots_for_names(settings.namespace, {name})
+    snapshots = _component_snapshots_for_instances(settings.namespace, {name: instance})
     resources = _component_resource_metrics_for_names(settings.namespace, snapshots)
     return _instance_summary(settings, instance, snapshots.get(name, {}), resources.get(name, {}))
 
@@ -357,16 +377,11 @@ def _dashboard_resource_totals(items: list[dict[str, Any]]) -> dict[str, Any]:
         [
             _sum_values(
                 [
-                    _int_value(
-                        dict(dict(item.get("parser") or {}).get("resources") or {}).get(
-                            "cpuMilliCores"
-                        )
-                    ),
-                    _int_value(
-                        dict(dict(item.get("runner") or {}).get("resources") or {}).get(
-                            "cpuMilliCores"
-                        )
-                    ),
+                    _int_value(dict(dict(workload.get("resources") or {})).get("cpuMilliCores"))
+                    for workload in (
+                        list(item.get("workloads") or [])
+                        or [item.get("parser") or {}, item.get("runner") or {}]
+                    )
                 ]
             )
             for item in items
@@ -376,16 +391,11 @@ def _dashboard_resource_totals(items: list[dict[str, Any]]) -> dict[str, Any]:
         [
             _sum_values(
                 [
-                    _int_value(
-                        dict(dict(item.get("parser") or {}).get("resources") or {}).get(
-                            "memoryBytes"
-                        )
-                    ),
-                    _int_value(
-                        dict(dict(item.get("runner") or {}).get("resources") or {}).get(
-                            "memoryBytes"
-                        )
-                    ),
+                    _int_value(dict(dict(workload.get("resources") or {})).get("memoryBytes"))
+                    for workload in (
+                        list(item.get("workloads") or [])
+                        or [item.get("parser") or {}, item.get("runner") or {}]
+                    )
                 ]
             )
             for item in items
@@ -396,15 +406,12 @@ def _dashboard_resource_totals(items: list[dict[str, Any]]) -> dict[str, Any]:
             _sum_values(
                 [
                     _int_value(
-                        dict(dict(item.get("parser") or {}).get("resources") or {}).get(
-                            "diskRequestedBytes"
-                        )
-                    ),
-                    _int_value(
-                        dict(dict(item.get("runner") or {}).get("resources") or {}).get(
-                            "diskRequestedBytes"
-                        )
-                    ),
+                        dict(dict(workload.get("resources") or {})).get("diskRequestedBytes")
+                    )
+                    for workload in (
+                        list(item.get("workloads") or [])
+                        or [item.get("parser") or {}, item.get("runner") or {}]
+                    )
                 ]
             )
             for item in items

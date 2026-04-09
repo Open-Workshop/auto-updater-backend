@@ -89,8 +89,13 @@ def _resource_label(resources: dict[str, Any], key: str, fallback: str = "n/a") 
 
 def _resource_cell(item: dict[str, Any]) -> str:
     total = dict(item.get("resources") or {})
-    parser = dict(item.get("parser", {}).get("resources") or {})
-    runner = dict(item.get("runner", {}).get("resources") or {})
+    workload_lines = "".join(
+        f"<div class='resource-detail'>{_escape(str(workload.get('label') or workload.get('id') or 'Workload'))} · "
+        f"{_escape(_resource_label(dict(workload.get('resources') or {}), 'cpuLabel'))} · "
+        f"{_escape(_resource_label(dict(workload.get('resources') or {}), 'memoryLabel'))} · "
+        f"{_escape(_resource_label(dict(workload.get('resources') or {}), 'diskLabel'))}</div>"
+        for workload in list(item.get("workloads") or [])
+    )
     return f"""
     <div class="resource-stack">
       <div class="resource-summary">
@@ -98,10 +103,23 @@ def _resource_cell(item: dict[str, Any]) -> str:
         <span class="resource-chip">RAM {_escape(_resource_label(total, "memoryLabel"))}</span>
         <span class="resource-chip">Disk {_escape(_resource_label(total, "diskLabel"))}</span>
       </div>
-      <div class="resource-detail">Parser · {_escape(_resource_label(parser, "cpuLabel"))} · {_escape(_resource_label(parser, "memoryLabel"))} · {_escape(_resource_label(parser, "diskLabel"))}</div>
-      <div class="resource-detail">Runner · {_escape(_resource_label(runner, "cpuLabel"))} · {_escape(_resource_label(runner, "memoryLabel"))} · {_escape(_resource_label(runner, "diskLabel"))}</div>
+      {workload_lines}
     </div>
     """
+
+
+def _workloads_cell(item: dict[str, Any]) -> str:
+    parts = []
+    for workload in list(item.get("workloads") or []):
+        parts.append(
+            f"""
+            <div class="workload-line">
+              <span class="pill tone-{_escape(workload.get('tone') or 'muted')}">{_escape(workload.get('label') or workload.get('id') or 'Workload')} · {_escape(workload.get('state') or 'Unknown')}</span>
+              <div class="cell-subtle">{_escape(workload.get('podName') or 'n/a')}</div>
+            </div>
+            """
+        )
+    return "".join(parts) or "<div class='cell-subtle'>n/a</div>"
 
 
 def _dashboard_rows(settings: UISettings, items: list[dict[str, Any]]) -> str:
@@ -113,7 +131,7 @@ def _dashboard_rows(settings: UISettings, items: list[dict[str, Any]]) -> str:
               <td>
                 <div class="primary-cell">
                   <a class="row-link" href="{_escape(item['urls']['detail'])}">{_escape(item['name'])}</a>
-                  <div class="cell-subtle">Steam {_escape(item['source']['steamAppId'])} · OW {_escape(item['source']['owGameId'])}</div>
+                  <div class="cell-subtle">{_escape(item.get('parserLabel') or '')} · {_escape(item.get('sourceSubtitle') or '')}</div>
                 </div>
               </td>
               <td><span class="pill tone-{'healthy' if item['enabled'] else 'muted'}">{'Enabled' if item['enabled'] else 'Paused'}</span></td>
@@ -121,14 +139,7 @@ def _dashboard_rows(settings: UISettings, items: list[dict[str, Any]]) -> str:
               <td><span class="pill tone-{_sync_state_tone(item['syncState'])}">{_escape(item['syncState'])}</span></td>
               <td>{_escape(item['lastSyncLabel'])}</td>
               <td class="error-cell">{_escape(item['errorSummary'])}</td>
-              <td>
-                <span class="pill tone-{_escape(item['parser']['tone'])}">{_escape(item['parser']['state'])}</span>
-                <div class="cell-subtle">{_escape(item['parser']['podName'] or 'n/a')}</div>
-              </td>
-              <td>
-                <span class="pill tone-{_escape(item['runner']['tone'])}">{_escape(item['runner']['state'])}</span>
-                <div class="cell-subtle">{_escape(item['runner']['podName'] or 'n/a')}</div>
-              </td>
+              <td>{_workloads_cell(item)}</td>
               <td>{_resource_cell(item)}</td>
               <td class="actions-cell">{_instance_actions(settings, item, return_path='/')}</td>
             </tr>
@@ -206,6 +217,24 @@ def _overview_tab(settings: UISettings, summary: dict[str, Any], return_path: st
         if summary["lastError"]
         else ""
     )
+    overview_pairs_html = "".join(
+        f"<div><span class='meta-label'>{_escape(label)}</span><strong>{_escape(value)}</strong></div>"
+        for label, value in list(summary.get("overviewPairs") or [])
+    )
+    workloads_html = "".join(
+        f"""
+        <section class="panel-section">
+          <div class="section-title">{_escape(workload.get('label') or workload.get('id') or 'Workload')}</div>
+          <div class="meta-grid">
+            <div><span class="meta-label">Pod</span><strong>{_escape(workload.get('podName') or 'n/a')}</strong></div>
+            <div><span class="meta-label">Status</span><span class="pill tone-{_escape(workload.get('tone') or 'muted')}">{_escape(workload.get('state') or 'Unknown')}</span></div>
+            <div><span class="meta-label">Image</span><code>{_escape(workload.get('image') or 'n/a')}</code></div>
+            <div><span class="meta-label">Service</span><code>{_escape(workload.get('serviceName') or 'n/a')}</code></div>
+          </div>
+        </section>
+        """
+        for workload in list(summary.get("workloads") or [])
+    )
     return render_template(
         "overview_tab.html",
         health_metric=_summary_metric("Health", summary["health"], summary["healthTone"]),
@@ -214,18 +243,10 @@ def _overview_tab(settings: UISettings, summary: dict[str, Any], return_path: st
         enabled_metric=_summary_metric("Enabled", "Yes" if summary["enabled"] else "No", "healthy" if summary["enabled"] else "muted"),
         error_block=error_block,
         phase=_escape(summary["phase"]),
-        steam_app_id=_escape(summary["source"]["steamAppId"]),
-        ow_game_id=_escape(summary["source"]["owGameId"]),
-        language=_escape(summary["source"]["language"]),
-        parser_pod=_escape(summary["parser"]["podName"] or "n/a"),
-        parser_tone=_escape(summary["parser"]["tone"]),
-        parser_state=_escape(summary["parser"]["state"]),
-        parser_image=_escape(summary["parser"]["image"] or "n/a"),
-        runner_pod=_escape(summary["runner"]["podName"] or "n/a"),
-        runner_tone=_escape(summary["runner"]["tone"]),
-        runner_state=_escape(summary["runner"]["state"]),
-        runner_image=_escape(summary["runner"]["image"] or "n/a"),
-        tun_image=_escape(summary["runner"]["tunImage"] or "n/a"),
+        parser_label=_escape(summary.get("parserLabel") or ""),
+        parser_type=_escape(summary.get("parserType") or ""),
+        overview_pairs_html=overview_pairs_html,
+        workloads_html=workloads_html,
         actions_html=_instance_actions(settings, summary, return_path=return_path),
         conditions_json=_escape(json.dumps(summary["conditions"], ensure_ascii=False, indent=2, sort_keys=True)),
     )
@@ -240,6 +261,20 @@ def _logs_tab(
 ) -> str:
     normalized_target = str(target or "parser").strip().lower() or "parser"
     normalized_tag = str(log_tag or "all").strip().lower() or "all"
+    initial_target_label = next(
+        (
+            str(log_target.get("label") or "")
+            for workload in list(summary.get("workloads") or [])
+            for log_target in list(workload.get("logTargets") or [])
+            if str(log_target.get("target") or "").strip().lower() == normalized_target
+        ),
+        _component_label(normalized_target),
+    )
+    target_buttons_html = "".join(
+        f"<button type='button' class='segmented-button' data-target='{_escape(log_target.get('target') or '')}'>{_escape(log_target.get('label') or _component_label(log_target.get('target') or ''))}</button>"
+        for workload in list(summary.get("workloads") or [])
+        for log_target in list(workload.get("logTargets") or [])
+    )
     return render_template(
         "logs_tab.html",
         tail_200_selected="selected" if tail_lines == 200 else "",
@@ -247,7 +282,8 @@ def _logs_tab(
         tail_800_selected="selected" if tail_lines == 800 else "",
         tail_1600_selected="selected" if tail_lines == 1600 else "",
         instance_name=_escape(summary["name"]),
-        target_label=_escape(_component_label(normalized_target)),
+        target_label=_escape(initial_target_label),
+        target_buttons_html=target_buttons_html,
         logs_config_json=_json_script(
             {
                 "apiBase": summary["urls"]["logsApi"],

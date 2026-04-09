@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ from typing import Any
 from aiohttp import web
 
 from core.config import Config, load_config, parse_list
-from core.instance_schema import iter_sync_env_items, load_sync_config_from_env
+from core.instance_schema import default_parser_type, iter_sync_env_items, load_sync_config_from_env
 from kube.kube_client import get_instance, merge_instance_status, read_secret_value
 from kube.mirror_instance import normalize_instance, runner_service_url
 from core.log_tags import parser_log_handler
@@ -39,6 +40,14 @@ _CLIENT_REINIT_FIELDS = {
     "http_retry_backoff",
     "language",
 }
+
+
+def _parser_type_from_env() -> str:
+    return os.environ.get("OW_PARSER_TYPE", "").strip() or default_parser_type()
+
+
+def _workload_id_from_env() -> str:
+    return os.environ.get("OW_WORKLOAD_ID", "").strip() or "parser"
 
 
 class ParserRuntime:
@@ -398,6 +407,24 @@ def _create_app(runtime: ParserRuntime) -> web.Application:
 
 
 def run_parser() -> int:
+    parser_type = _parser_type_from_env()
+    workload_id = _workload_id_from_env()
+    if parser_type != default_parser_type():
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+            handlers=[logging.StreamHandler()],
+        )
+        logging.error("Unsupported parser type %s", parser_type)
+        return 2
+    if workload_id != "parser":
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+            handlers=[logging.StreamHandler()],
+        )
+        logging.error("Parser host cannot run workload %s", workload_id)
+        return 2
     cfg = load_config()
     log_level = getattr(logging, cfg.log_level.upper(), logging.INFO)
     logging.basicConfig(

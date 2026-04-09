@@ -10,7 +10,8 @@ import requests
 from aiohttp import web
 from kubernetes.client.rest import ApiException
 
-from core.instance_schema import default_spec
+from core.instance_schema import MirrorInstanceSpecModel, default_spec, get_parser_contract
+from core.log_tags import format_log_tag_options
 from kube.kube_client import (
     delete_instance,
     delete_secret,
@@ -303,7 +304,14 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
         return web.Response(text=body, content_type="text/html", status=400)
 
     normalized_instance = normalize_instance(instance) if instance is not None else {"spec": default_spec()}
-    sync_spec = _build_sync_spec(dict(normalized_instance["spec"]["sync"]), submitted)
+    model = (
+        MirrorInstanceSpecModel.from_instance_dict(instance)
+        if instance is not None
+        else MirrorInstanceSpecModel.from_spec_dict(default_spec())
+    )
+    parser_type = str(form.get("parser_type", model.parser_type)).strip() or model.parser_type
+    contract = get_parser_contract(parser_type)
+    sync_spec = _build_sync_spec(dict(model.sync), submitted)
     parser_proxy_pool_value = _validate_proxy_pool(parser_proxy_pool)
     runner_proxy_url_value = _validate_runner_proxy(runner_proxy_url, runner_proxy_type)
     credentials_secret = managed_credentials_secret_name(name)
@@ -311,6 +319,54 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
     runner_proxy_secret = managed_runner_proxy_secret_name(name)
     parser_proxy_ref = parser_proxy_secret if parser_proxy_pool_value else ""
     final_password = password or existing_password
+    parser_config = dict(model.parser_config)
+    parser_config["steamAppId"] = steam_app_id
+    parser_config["owGameId"] = _int_from_form(form.get("ow_game_id"), 0)
+    parser_config["language"] = str(form.get("language", "")).strip() or "english"
+    parser_config.update(
+        {
+            key: value
+            for key, value in sync_spec.items()
+            if key in contract.config_fields_by_key
+        }
+    )
+    parser_config_extras = {
+        key: value
+        for key, value in sync_spec.items()
+        if key not in contract.config_fields_by_key
+    }
+    parser_secret_refs = dict(model.parser_secret_refs)
+    parser_secret_refs["parserProxyPoolSecretRef"] = parser_proxy_ref
+    parser_secret_refs["runnerProxySecretRef"] = runner_proxy_secret
+    parser_workloads = {
+        key: {
+            "storage": dict(dict(value or {}).get("storage") or {}),
+            "config": dict(dict(value or {}).get("config") or {}),
+        }
+        for key, value in model.parser_workloads.items()
+    }
+    parser_workloads.setdefault("parser", {}).setdefault("storage", {})
+    parser_workloads["parser"]["storage"]["size"] = (
+        parser_storage_size
+        or str(parser_workloads["parser"]["storage"].get("size") or "")
+    )
+    parser_workloads.setdefault("steamcmd", {}).setdefault("storage", {})
+    parser_workloads["steamcmd"]["storage"]["size"] = (
+        runner_storage_size
+        or str(parser_workloads["steamcmd"]["storage"].get("size") or "")
+    )
+    parser_workloads.setdefault("steamcmd", {}).setdefault("config", {})
+    parser_workloads["steamcmd"]["config"]["proxyType"] = runner_proxy_type
+    updated_model = MirrorInstanceSpecModel(
+        raw_spec=dict(model.raw_spec),
+        enabled=_bool_from_form(form.get("enabled")),
+        credentials_secret_ref=credentials_secret,
+        parser_type=parser_type,
+        parser_config=parser_config,
+        parser_config_extras=parser_config_extras,
+        parser_secret_refs=parser_secret_refs,
+        parser_workloads=parser_workloads,
+    )
     body = {
         "apiVersion": API_VERSION,
         "kind": KIND,
@@ -319,33 +375,7 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
             "namespace": settings.namespace,
             "labels": common_labels(name, "instance"),
         },
-        "spec": {
-            "enabled": _bool_from_form(form.get("enabled")),
-            "source": {
-                "steamAppId": steam_app_id,
-                "owGameId": _int_from_form(form.get("ow_game_id"), 0),
-                "language": str(form.get("language", "")).strip() or "english",
-            },
-            "sync": sync_spec,
-            "credentials": {"secretRef": credentials_secret},
-            "parser": {"proxyPoolSecretRef": parser_proxy_ref},
-            "steamcmd": {
-                "proxy": {
-                    "type": runner_proxy_type,
-                    "secretRef": runner_proxy_secret,
-                }
-            },
-            "storage": {
-                "parser": {
-                    "size": parser_storage_size or normalized_instance["spec"]["storage"]["parser"]["size"],
-                    "storageClassName": normalized_instance["spec"]["storage"]["parser"]["storageClassName"],
-                },
-                "runner": {
-                    "size": runner_storage_size or normalized_instance["spec"]["storage"]["runner"]["size"],
-                    "storageClassName": normalized_instance["spec"]["storage"]["runner"]["storageClassName"],
-                },
-            },
-        },
+        "spec": updated_model.to_spec_dict(),
     }
     await _run_blocking(replace_or_create_instance, settings.namespace, name, body)
     saved_instance = await _run_blocking(get_instance, settings.namespace, name)

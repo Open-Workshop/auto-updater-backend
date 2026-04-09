@@ -62,17 +62,29 @@
     return `${escapeHtml(label)} · ${escapeHtml(resourceLabel(resources, "cpuLabel"))} · ${escapeHtml(resourceLabel(resources, "memoryLabel"))} · ${escapeHtml(resourceLabel(resources, "diskLabel"))}`;
   }
 
+  function workloadsCellHtml(item) {
+    const workloads = Array.isArray(item.workloads) ? item.workloads : [];
+    if (!workloads.length) {
+      return '<div class="cell-subtle">n/a</div>';
+    }
+    return workloads.map((workload) => `
+      <div class="workload-line">
+        <span class="pill tone-${escapeHtml(workload.tone || "muted")}">${escapeHtml(workload.label || workload.id || "Workload")} · ${escapeHtml(workload.state || "Unknown")}</span>
+        <div class="cell-subtle">${escapeHtml(workload.podName || "n/a")}</div>
+      </div>
+    `).join("");
+  }
+
   function rowHtml(item) {
     const toggleLabel = item.enabled ? "Pause" : "Resume";
     const totalResources = item.resources || {};
-    const parserResources = (item.parser && item.parser.resources) || {};
-    const runnerResources = (item.runner && item.runner.resources) || {};
+    const workloadResources = Array.isArray(item.workloads) ? item.workloads : [];
     return `
       <tr data-health="${escapeHtml(item.health)}" data-instance="${escapeHtml(item.name)}">
         <td>
           <div class="primary-cell">
             <a class="row-link" href="${escapeHtml(item.urls.detail)}">${escapeHtml(item.name)}</a>
-            <div class="cell-subtle">Steam ${escapeHtml(item.source.steamAppId)} · OW ${escapeHtml(item.source.owGameId)}</div>
+            <div class="cell-subtle">${escapeHtml(item.parserLabel || "")} · ${escapeHtml(item.sourceSubtitle || "")}</div>
           </div>
         </td>
         <td><span class="pill tone-${item.enabled ? "healthy" : "muted"}">${item.enabled ? "Enabled" : "Paused"}</span></td>
@@ -80,14 +92,7 @@
         <td><span class="pill tone-${toneForSync(item.syncState)}">${escapeHtml(item.syncState)}</span></td>
         <td>${escapeHtml(item.lastSyncLabel)}</td>
         <td class="error-cell">${escapeHtml(item.errorSummary || "—")}</td>
-        <td>
-          <span class="pill tone-${escapeHtml(item.parser.tone)}">${escapeHtml(item.parser.state)}</span>
-          <div class="cell-subtle">${escapeHtml(item.parser.podName || "n/a")}</div>
-        </td>
-        <td>
-          <span class="pill tone-${escapeHtml(item.runner.tone)}">${escapeHtml(item.runner.state)}</span>
-          <div class="cell-subtle">${escapeHtml(item.runner.podName || "n/a")}</div>
-        </td>
+        <td>${workloadsCellHtml(item)}</td>
         <td>
           <div class="resource-stack">
             <div class="resource-summary">
@@ -95,8 +100,7 @@
               <span class="resource-chip">RAM ${escapeHtml(resourceLabel(totalResources, "memoryLabel"))}</span>
               <span class="resource-chip">Disk ${escapeHtml(resourceLabel(totalResources, "diskLabel"))}</span>
             </div>
-            <div class="resource-detail">${resourceCellHtml("Parser", parserResources)}</div>
-            <div class="resource-detail">${resourceCellHtml("Runner", runnerResources)}</div>
+            ${workloadResources.map((workload) => `<div class="resource-detail">${resourceCellHtml(workload.label || workload.id || "Workload", workload.resources || {})}</div>`).join("")}
           </div>
         </td>
         <td class="actions-cell">
@@ -141,17 +145,16 @@
       if (!needle) return matchesFilter;
       const haystack = [
         item.name,
-        item.source.steamAppId,
-        item.source.owGameId,
+        item.parserLabel,
+        item.sourceSubtitle,
         item.errorSummary,
-        item.parser.podName,
-        item.runner.podName,
+        ...(Array.isArray(item.workloads) ? item.workloads.flatMap((workload) => [workload.label, workload.podName]) : []),
       ].join(" ").toLowerCase();
       return matchesFilter && haystack.includes(needle);
     });
     root.innerHTML = filtered.map(rowHtml).join("") || `
       <tr>
-        <td colspan="10">
+        <td colspan="9">
           <div class="empty-state">No instances match the current filters.</div>
         </td>
       </tr>
