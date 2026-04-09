@@ -28,6 +28,11 @@ from ui.ui_handlers import (
 )
 
 
+async def favicon(request: web.Request) -> web.FileResponse:
+    del request
+    return web.FileResponse(STATIC_DIR / "favicon.ico")
+
+
 def _create_app(settings: UISettings) -> web.Application:
     """Create and configure the aiohttp application."""
     app = web.Application(middlewares=[_basic_auth])
@@ -44,6 +49,7 @@ def _create_app(settings: UISettings) -> web.Application:
                 app.router.add_route(method, f"{settings.base_path}{path}", handler)
 
     register("GET", "/healthz", healthz)
+    register("GET", "/favicon.ico", favicon)
     register("GET", "/", dashboard)
     register("GET", "/api/instances", instances_api)
     register("GET", "/api/instances/{name}", instance_summary_api)

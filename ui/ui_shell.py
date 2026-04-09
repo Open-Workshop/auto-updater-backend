@@ -21,6 +21,8 @@ def _layout(settings: UISettings, body: str, *, flash: str = "", flash_kind: str
         title=_escape(title),
         body=body,
         initial_toast=initial_toast,
+        favicon_ico_href=_escape(_url(settings, "/assets/favicon.ico")),
+        favicon_png_href=_escape(_url(settings, "/assets/favicon.png")),
         stylesheet_href=_escape(_url(settings, "/assets/app.css")),
         app_js_href=_escape(_url(settings, "/assets/app.js")),
     )
