@@ -477,7 +477,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                                             "steam_http_retries": "2",
                                             "steam_http_backoff": "2.0",
                                             "steam_request_delay": "1.0",
-                                            "steam_max_pages": "1000",
+                                            "steam_max_pages": "3000",
                                             "steam_start_page": "1",
                                             "steam_max_items": "0",
                                             "steam_delay": "1.0",
@@ -506,6 +506,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                                         {"keep": True},
                                     )
                                     self.assertEqual(captured["body"]["spec"]["sync"]["pollIntervalSeconds"], 600)
+                                    self.assertEqual(captured["body"]["spec"]["sync"]["steamMaxPages"], 3000)
                                     self.assertEqual(len(upserted_secrets), 3)
                                     for secret in upserted_secrets:
                                         self.assertEqual(

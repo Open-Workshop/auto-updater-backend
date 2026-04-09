@@ -57,6 +57,9 @@ rules:
   - apiGroups: ["auto-updater.miskler.ru"]
     resources: ["mirrorinstances/status"]
     verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
