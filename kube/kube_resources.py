@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from core.instance_schema import iter_sync_env_items
 from core.http_utils import ParsedProxy, parse_proxy_url
 from kube.mirror_instance import (
     common_labels,
@@ -20,11 +21,6 @@ from kube.mirror_instance import (
 
 
 PARSER_SERVICE_ACCOUNT_NAME = "auto-updater-parser"
-
-
-def _stringify_bool(value: Any) -> str:
-    return "true" if bool(value) else "false"
-
 
 def _env(name: str, value: Any) -> dict[str, Any]:
     return {"name": name, "value": str(value)}
@@ -50,10 +46,6 @@ def _storage_size(spec: dict[str, Any], component: str) -> str:
 def _storage_class(spec: dict[str, Any], component: str) -> str | None:
     value = str(spec["storage"][component].get("storageClassName") or "").strip()
     return value or None
-
-
-def _sync_value(spec: dict[str, Any], key: str) -> Any:
-    return spec["sync"][key]
 
 
 def build_parser_service(instance: dict[str, Any]) -> dict[str, Any]:
@@ -118,47 +110,20 @@ def build_parser_env(instance: dict[str, Any]) -> list[dict[str, Any]]:
     env = [
         _secret_env("OW_LOGIN", credentials_secret, "login"),
         _secret_env("OW_PASSWORD", credentials_secret, "password"),
-        _env("OW_API_BASE", _sync_value(spec, "apiBase")),
         _env("OW_STEAM_APP_ID", spec["source"].get("steamAppId", 0)),
         _env("OW_GAME_ID", spec["source"].get("owGameId", 0)),
         _env("STEAM_LANGUAGE", spec["source"].get("language", "english")),
         _env("OW_MIRROR_DIR", "/data/mirror"),
         _env("STEAM_ROOT", "/data/steam"),
-        _env("OW_PAGE_SIZE", _sync_value(spec, "pageSize")),
-        _env("OW_POLL_INTERVAL", _sync_value(spec, "pollIntervalSeconds")),
-        _env("OW_HTTP_TIMEOUT", _sync_value(spec, "timeoutSeconds")),
-        _env("OW_HTTP_RETRIES", _sync_value(spec, "httpRetries")),
-        _env("OW_HTTP_RETRY_BACKOFF", _sync_value(spec, "httpRetryBackoff")),
-        _env("OW_RUN_ONCE", _stringify_bool(_sync_value(spec, "runOnce"))),
-        _env("OW_LOG_LEVEL", _sync_value(spec, "logLevel")),
-        _env("OW_LOG_STEAM_REQUESTS", _stringify_bool(_sync_value(spec, "logSteamRequests"))),
-        _env("OW_STEAM_HTTP_RETRIES", _sync_value(spec, "steamHttpRetries")),
-        _env("OW_STEAM_HTTP_BACKOFF", _sync_value(spec, "steamHttpBackoff")),
-        _env("OW_STEAM_REQUEST_DELAY", _sync_value(spec, "steamRequestDelay")),
         _env("OW_STEAM_PROXY_SCOPE", "mod_pages" if parser_proxy_secret else "none"),
-        _env("OW_STEAM_MAX_PAGES", _sync_value(spec, "steamMaxPages")),
-        _env("OW_STEAM_START_PAGE", _sync_value(spec, "steamStartPage")),
-        _env("OW_STEAM_MAX_ITEMS", _sync_value(spec, "steamMaxItems")),
-        _env("OW_STEAM_DELAY", _sync_value(spec, "steamDelay")),
-        _env("OW_MAX_SCREENSHOTS", _sync_value(spec, "maxScreenshots")),
-        _env("OW_RESOURCE_UPLOAD_FILES", _stringify_bool(_sync_value(spec, "uploadResourceFiles"))),
-        _env("OW_SCRAPE_PREVIEW_IMAGES", _stringify_bool(_sync_value(spec, "scrapePreviewImages"))),
-        _env("OW_SCRAPE_REQUIRED_ITEMS", _stringify_bool(_sync_value(spec, "scrapeRequiredItems"))),
-        _env("OW_FORCE_REQUIRED_ITEM_ID", _sync_value(spec, "forceRequiredItemId")),
-        _env("OW_MOD_PUBLIC", _sync_value(spec, "publicMode")),
-        _env("OW_WITHOUT_AUTHOR", _stringify_bool(_sync_value(spec, "withoutAuthor"))),
-        _env("OW_SYNC_TAGS", _stringify_bool(_sync_value(spec, "syncTags"))),
-        _env("OW_PRUNE_TAGS", _stringify_bool(_sync_value(spec, "pruneTags"))),
-        _env("OW_SYNC_DEPENDENCIES", _stringify_bool(_sync_value(spec, "syncDependencies"))),
-        _env("OW_PRUNE_DEPENDENCIES", _stringify_bool(_sync_value(spec, "pruneDependencies"))),
-        _env("OW_SYNC_RESOURCES", _stringify_bool(_sync_value(spec, "syncResources"))),
-        _env("OW_PRUNE_RESOURCES", _stringify_bool(_sync_value(spec, "pruneResources"))),
         _env("OW_STEAMCMD_RUNNER_URL", runner_service_url(name, namespace)),
         _env("OW_ADMIN_HOST", "0.0.0.0"),
         _env("OW_ADMIN_PORT", "8080"),
         _env("OW_INSTANCE_NAME", name),
         _env("OW_INSTANCE_NAMESPACE", namespace),
     ]
+    for env_name, value in iter_sync_env_items(spec["sync"]):
+        env.append(_env(env_name, value))
     if parser_proxy_secret:
         env.append(_secret_env("OW_STEAM_PROXY_POOL", parser_proxy_secret, "proxyPool", optional=True))
     return env

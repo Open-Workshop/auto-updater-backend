@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import queue
 import shutil
+import threading
 import time
-from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,6 +82,19 @@ class ModPayload:
     is_new: bool
 
 
+@dataclass(frozen=True)
+class DownloadTask:
+    item_id: str
+    payload: ModPayload
+
+
+@dataclass(frozen=True)
+class ReadyTask:
+    item_id: str
+    payload: ModPayload
+    archive_path: Path | None = None
+
+
 PHASH_MAX_DISTANCE = 6
 RECENT_OW_EDIT_SECONDS = 7 * 24 * 60 * 60
 DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS = 3
@@ -147,97 +162,124 @@ def _hash_matches_any(target: ImageHashes, candidates: Iterable[ImageHashes]) ->
 
 class WorkQueue:
     def __init__(self) -> None:
-        self.meta_queue: deque[str] = deque()
+        self.meta_queue: queue.Queue[str] = queue.Queue()
         self.queued_ids: set[str] = set()
-        self.download_queue: deque[str] = deque()
-        self.download_queued: set[str] = set()
-        self.pending_downloads: Dict[str, ModPayload] = {}
+        self.download_queue: queue.Queue[DownloadTask] = queue.Queue()
+        self.ready_queue: queue.Queue[ReadyTask] = queue.Queue()
+        self._lock = threading.Lock()
+        self._producer_done = threading.Event()
+        self._downloader_done = threading.Event()
 
     def enqueue_metadata(self, item_id: str) -> None:
         item_id = str(item_id)
-        if item_id in self.queued_ids:
-            return
-        self.queued_ids.add(item_id)
-        self.meta_queue.append(item_id)
+        with self._lock:
+            if item_id in self.queued_ids:
+                return
+            self.queued_ids.add(item_id)
+        self.meta_queue.put(item_id)
 
     def enqueue_download(self, item_id: str, payload: ModPayload) -> None:
-        item_id = str(item_id)
-        self.pending_downloads[item_id] = payload
-        if item_id in self.download_queued:
-            return
-        self.download_queued.add(item_id)
-        self.download_queue.append(item_id)
+        self.download_queue.put(DownloadTask(item_id=str(item_id), payload=payload))
 
-    def pop_meta_batch(self, max_size: int) -> List[str]:
+    def enqueue_ready(
+        self,
+        item_id: str,
+        payload: ModPayload,
+        *,
+        archive_path: Path | None = None,
+    ) -> None:
+        self.ready_queue.put(
+            ReadyTask(
+                item_id=str(item_id),
+                payload=payload,
+                archive_path=archive_path,
+            )
+        )
+
+    def pop_meta_batch(self, max_size: int, timeout: float = 0.2) -> List[str]:
         batch: List[str] = []
-        while self.meta_queue and len(batch) < max_size:
-            batch.append(self.meta_queue.popleft())
+        try:
+            batch.append(self.meta_queue.get(timeout=timeout))
+        except queue.Empty:
+            return batch
+        while len(batch) < max_size:
+            try:
+                batch.append(self.meta_queue.get_nowait())
+            except queue.Empty:
+                break
         return batch
 
-    def pop_download(self) -> Optional[tuple[str, ModPayload]]:
-        if not self.download_queue:
+    def pop_download(self, timeout: float = 0.2) -> Optional[DownloadTask]:
+        try:
+            return self.download_queue.get(timeout=timeout)
+        except queue.Empty:
             return None
-        item_id = self.download_queue.popleft()
-        self.download_queued.discard(item_id)
-        payload = self.pending_downloads.pop(item_id, None)
-        if payload is None:
-            return None
-        return item_id, payload
 
-    def has_work(self) -> bool:
-        return bool(self.meta_queue or self.download_queue)
+    def pop_ready(self, timeout: float = 0.2) -> Optional[ReadyTask]:
+        try:
+            return self.ready_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def has_metadata(self) -> bool:
+        return not self.meta_queue.empty()
+
+    def finish_producer(self) -> None:
+        self._producer_done.set()
+
+    def producer_finished(self) -> bool:
+        return self._producer_done.is_set()
+
+    def finish_downloader(self) -> None:
+        self._downloader_done.set()
+
+    def downloader_finished(self) -> bool:
+        return self._downloader_done.is_set()
 
 
 class ModIndex:
-    def __init__(self, api: ApiClient) -> None:
-        self.api = api
+    def __init__(self) -> None:
         self._cache: Dict[str, Optional[Dict[str, Any]]] = {}
+        self._lock = threading.Lock()
 
     def get(self, source_id: str) -> Optional[Dict[str, Any]]:
         key = str(source_id)
-        if key in self._cache:
-            return self._cache[key]
-        try:
-            source_int = int(source_id)
-        except (TypeError, ValueError):
-            self._cache[key] = None
-            return None
-        mod = self.api.get_mod_by_source("steam", source_int)
-        self._cache[key] = mod
-        return mod
+        with self._lock:
+            value = self._cache.get(key)
+            return deepcopy(value) if value is not None else None
+
+    def has(self, source_id: str) -> bool:
+        with self._lock:
+            return str(source_id) in self._cache
 
     def set(self, source_id: str, mod: Dict[str, Any]) -> None:
-        self._cache[str(source_id)] = mod
+        with self._lock:
+            self._cache[str(source_id)] = deepcopy(mod)
+
+    def remember_many(
+        self,
+        source_ids: Iterable[str],
+        mods_by_source_id: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        rendered_ids = [str(item) for item in source_ids]
+        with self._lock:
+            for source_id in rendered_ids:
+                if source_id in self._cache:
+                    continue
+                mod = mods_by_source_id.get(source_id)
+                self._cache[source_id] = deepcopy(mod) if mod is not None else None
+            return {
+                source_id: (
+                    deepcopy(self._cache[source_id])
+                    if self._cache.get(source_id) is not None
+                    else None
+                )
+                for source_id in rendered_ids
+            }
 
     def clear(self) -> None:
-        self._cache.clear()
-
-    def get_many(self, source_ids: Iterable[str]) -> Dict[str, Optional[Dict[str, Any]]]:
-        requested = [str(item) for item in source_ids]
-        missing: List[int] = []
-        for item in requested:
-            if item in self._cache:
-                continue
-            try:
-                source_int = int(item)
-            except (TypeError, ValueError):
-                self._cache[item] = None
-                continue
-            missing.append(source_int)
-        if missing:
-            results = self.api.get_mods_by_source_ids(
-                "steam", missing, page_size=len(missing)
-            )
-            found: Dict[str, Dict[str, Any]] = {}
-            for mod in results:
-                source_id = mod.get("source_id")
-                if source_id is None:
-                    continue
-                found[str(source_id)] = mod
-            for item in requested:
-                if item not in self._cache:
-                    self._cache[item] = found.get(item)
-        return {item: self._cache.get(item) for item in requested}
+        with self._lock:
+            self._cache.clear()
 
 
 class TagManager:
@@ -991,10 +1033,14 @@ class ModSyncer:
         self.options = options
 
         self.queue = WorkQueue()
+        self.stop_requested = threading.Event()
+        self._worker_error: Exception | None = None
+        self._worker_error_lock = threading.Lock()
+        self.lookup_api: ApiClient | None = None
         self.start_page = max(1, int(options.start_page))
         self.page = self.start_page
         self.listed_count = 0
-        self.mod_index = ModIndex(api)
+        self.mod_index = ModIndex()
         self.steam_mod_cache: Dict[str, SteamMod] = {}
         self.tag_manager = TagManager(
             api,
@@ -1035,7 +1081,65 @@ class ModSyncer:
             self._clear_local_caches("startup")
             steam_stats_reset()
             self.tag_manager.preload()
+            self.lookup_api = self._create_lookup_api()
+            producer = threading.Thread(
+                target=self._run_producer,
+                name="steam-producer",
+            )
+            downloader = threading.Thread(
+                target=self._run_downloader,
+                name="steam-downloader",
+            )
+            ow_worker = threading.Thread(
+                target=self._run_ow_worker,
+                name="ow-worker",
+            )
+            try:
+                producer.start()
+                downloader.start()
+                ow_worker.start()
+                producer.join()
+                downloader.join()
+                ow_worker.join()
+            finally:
+                if self.lookup_api is not None:
+                    self.lookup_api.session.close()
+                    self.lookup_api = None
+            if self._worker_error is not None:
+                raise self._worker_error
+            self.dependency_manager.retry_pending()
 
+            stats = steam_stats_snapshot()
+            if stats.get("total"):
+                logging.info(
+                    "Steam requests: total=%s ok=%s failed=%s endpoints=%s",
+                    stats.get("total"),
+                    stats.get("success"),
+                    stats.get("failed"),
+                    stats.get("by_endpoint"),
+                )
+
+    def _create_lookup_api(self) -> ApiClient:
+        lookup_api = ApiClient(
+            self.api.base_url,
+            self.api.login_name,
+            self.api.password,
+            self.api.timeout,
+            retries=self.api.retries,
+            retry_backoff=self.api.retry_backoff,
+            limits=self.api.limits,
+        )
+        lookup_api.login()
+        return lookup_api
+
+    def _record_worker_error(self, exc: Exception) -> None:
+        with self._worker_error_lock:
+            if self._worker_error is None:
+                self._worker_error = exc
+        self.stop_requested.set()
+
+    def _run_producer(self) -> None:
+        try:
             if self.options.force_required_item_id:
                 self.queue.enqueue_metadata(str(self.options.force_required_item_id))
                 logging.info("Steam workshop items: 1 (forced)")
@@ -1047,39 +1151,53 @@ class ModSyncer:
                     self.options.max_pages or "unlimited",
                 )
 
-            while True:
-                if not self.queue.has_work():
-                    if self.options.force_required_item_id:
-                        break
-                    if (
-                        self.options.max_items > 0
-                        and self.listed_count >= self.options.max_items
-                    ):
-                        break
-                    if not self._fetch_next_page():
-                        break
-                    if not self.queue.meta_queue:
-                        continue
-
-                if self.queue.meta_queue:
-                    self._process_metadata_batch()
+            while not self.stop_requested.is_set():
+                batch_ids = self.queue.pop_meta_batch(30)
+                if batch_ids:
+                    self._process_metadata_batch(batch_ids)
                     continue
+                if self.options.force_required_item_id:
+                    break
+                if (
+                    self.options.max_items > 0
+                    and self.listed_count >= self.options.max_items
+                ):
+                    break
+                if not self._fetch_next_page():
+                    break
+        except Exception as exc:
+            logging.exception("Steam producer failed")
+            self._record_worker_error(exc)
+        finally:
+            self.queue.finish_producer()
 
-                download_item = self.queue.pop_download()
-                if download_item:
-                    item_id, payload = download_item
-                    self._process_download_item(item_id, payload)
+    def _run_downloader(self) -> None:
+        try:
+            while not self.stop_requested.is_set():
+                task = self.queue.pop_download()
+                if task is not None:
+                    self._process_download_task(task)
                     continue
+                if self.queue.producer_finished():
+                    break
+        except Exception as exc:
+            logging.exception("Steam downloader failed")
+            self._record_worker_error(exc)
+        finally:
+            self.queue.finish_downloader()
 
-            stats = steam_stats_snapshot()
-            if stats.get("total"):
-                logging.info(
-                    "Steam requests: total=%s ok=%s failed=%s endpoints=%s",
-                    stats.get("total"),
-                    stats.get("success"),
-                    stats.get("failed"),
-                    stats.get("by_endpoint"),
-                )
+    def _run_ow_worker(self) -> None:
+        try:
+            while not self.stop_requested.is_set():
+                task = self.queue.pop_ready()
+                if task is not None:
+                    self._process_ready_task(task)
+                    continue
+                if self.queue.downloader_finished():
+                    break
+        except Exception as exc:
+            logging.exception("OW worker failed")
+            self._record_worker_error(exc)
 
     def _fetch_next_page(self) -> bool:
         with start_span(
@@ -1095,8 +1213,6 @@ class ModSyncer:
                 last_page = self.start_page + self.options.max_pages - 1
                 if self.page > last_page:
                     return False
-            if self.page > self.start_page:
-                self._clear_local_caches(f"before_page_{self.page}")
             logging.info(
                 "Steam workshop page fetch: page=%s max_pages=%s",
                 self.page,
@@ -1123,8 +1239,38 @@ class ModSyncer:
                 time.sleep(self.options.page_delay)
             return True
 
-    def _process_metadata_batch(self) -> None:
-        batch_ids = self.queue.pop_meta_batch(30)
+    def _fetch_existing_ow_mods(
+        self,
+        source_ids: List[str],
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        requested = [str(item) for item in source_ids]
+        if not requested:
+            return {}
+        if self.lookup_api is None:
+            return {item: self.mod_index.get(item) for item in requested}
+        missing: List[int] = []
+        for source_id in requested:
+            if self.mod_index.has(source_id):
+                continue
+            try:
+                missing.append(int(source_id))
+            except (TypeError, ValueError):
+                continue
+        found: Dict[str, Dict[str, Any]] = {}
+        if missing:
+            results = self.lookup_api.get_mods_by_source_ids(
+                "steam",
+                missing,
+                page_size=len(missing),
+            )
+            for mod in results:
+                source_id = mod.get("source_id")
+                if source_id is None:
+                    continue
+                found[str(source_id)] = mod
+        return self.mod_index.remember_many(requested, found)
+
+    def _process_metadata_batch(self, batch_ids: List[str]) -> None:
         if not batch_ids:
             return
         with start_span(
@@ -1134,7 +1280,7 @@ class ModSyncer:
             logging.info("Process metadata batch: size=%s", len(batch_ids))
             now_ts = int(time.time())
             window_label = _recent_edit_window_label()
-            ow_mod_map = self.mod_index.get_many(batch_ids)
+            ow_mod_map = self._fetch_existing_ow_mods(batch_ids)
             fetch_ids: List[str] = []
             skipped_recent = 0
             for workshop_id in batch_ids:
@@ -1193,40 +1339,72 @@ class ModSyncer:
                 if payload.ow_mod_id is None:
                     continue
 
-                logging.info("Updating OW mod %s metadata", payload.ow_mod_id)
-                with start_span(
-                    "ow.mod_upsert",
-                    {
-                        "ow.mod_id": payload.ow_mod_id,
-                        "steam.item_id": str(workshop_id),
-                        "ow.mode": "metadata_update",
-                    },
-                ):
-                    self.api.edit_mod(
-                        payload.ow_mod_id,
-                        payload.title,
-                        payload.short_desc,
-                        payload.description,
-                        "steam",
-                        int(workshop_id),
-                        self.game_id,
-                        self.options.public_mode,
-                        set_source=False,
-                    )
-                self.tag_manager.sync_mod_tags(payload.ow_mod_id, payload.tags)
-                self.dependency_manager.sync_dependencies(
-                    payload.ow_mod_id,
-                    payload.deps,
-                    payload.deps_ok,
-                )
-                self.resource_syncer.sync_resources(
-                    payload.ow_mod_id,
-                    mod,
-                    payload.images,
-                    payload.images_incomplete,
-                )
+                logging.info("Queue OW metadata update for %s", payload.ow_mod_id)
+                self.queue.enqueue_ready(str(workshop_id), payload)
 
-    def _process_download_item(self, item_id: str, payload: ModPayload) -> None:
+    def _process_download_task(self, task: DownloadTask) -> None:
+        item_id = task.item_id
+        payload = task.payload
+        logging.info(
+            "Downloading Steam mod %s (payload_new=%s)",
+            item_id,
+            payload.is_new,
+        )
+        archive_path = self._download_mod_archive(item_id)
+        if not archive_path:
+            logging.error("Steam download failed for %s", item_id)
+            return
+        self.queue.enqueue_ready(item_id, payload, archive_path=archive_path)
+
+    def _process_ready_task(self, task: ReadyTask) -> None:
+        if task.archive_path is None:
+            self._process_metadata_update(task.item_id, task.payload)
+        else:
+            self._process_file_update(task.item_id, task.payload, task.archive_path)
+        self.dependency_manager.retry_pending()
+
+    def _process_metadata_update(self, item_id: str, payload: ModPayload) -> None:
+        if payload.ow_mod_id is None:
+            return
+        logging.info("Updating OW mod %s metadata", payload.ow_mod_id)
+        with start_span(
+            "ow.mod_upsert",
+            {
+                "ow.mod_id": payload.ow_mod_id,
+                "steam.item_id": str(item_id),
+                "ow.mode": "metadata_update",
+            },
+        ):
+            self.api.edit_mod(
+                payload.ow_mod_id,
+                payload.title,
+                payload.short_desc,
+                payload.description,
+                "steam",
+                int(item_id),
+                self.game_id,
+                self.options.public_mode,
+                set_source=False,
+            )
+        self.tag_manager.sync_mod_tags(payload.ow_mod_id, payload.tags)
+        self.dependency_manager.sync_dependencies(
+            payload.ow_mod_id,
+            payload.deps,
+            payload.deps_ok,
+        )
+        self.resource_syncer.sync_resources(
+            payload.ow_mod_id,
+            payload.mod,
+            payload.images,
+            payload.images_incomplete,
+        )
+
+    def _process_file_update(
+        self,
+        item_id: str,
+        payload: ModPayload,
+        archive_path: Path,
+    ) -> None:
         ow_mod = payload.ow_mod
         ow_mod_id = payload.ow_mod_id
         if ow_mod is None:
@@ -1251,15 +1429,8 @@ class ModSyncer:
                 ow_mod_id,
                 _recent_edit_window_label(),
             )
-            return
-        logging.info(
-            "Downloading Steam mod %s (payload_new=%s)",
-            item_id,
-            payload.is_new,
-        )
-        archive_path = self._download_mod_archive(item_id)
-        if not archive_path:
-            logging.error("Steam download failed for %s", item_id)
+            self._notify_archive_done(item_id)
+            self._safe_unlink(archive_path)
             return
 
         try:
@@ -1312,7 +1483,6 @@ class ModSyncer:
                 payload.images,
                 payload.images_incomplete,
             )
-            self.dependency_manager.retry_pending()
         finally:
             self._notify_archive_done(item_id)
             self._safe_unlink(archive_path)

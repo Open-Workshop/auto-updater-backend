@@ -3,19 +3,22 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from core.instance_schema import (
+    build_sync_spec_from_form,
+    default_spec,
+    sync_form_minimum,
+    sync_form_values,
+    validate_sync_form_inputs,
+)
 from core.http_utils import parse_proxy_url, validate_proxy_url
 from kube.kube_client import read_secret_value
-from kube.mirror_instance import DEFAULT_SPEC, deep_merge, instance_name, normalize_instance
+from kube.mirror_instance import instance_name, normalize_instance
 from ui.ui_assets import render_template
 from ui.ui_common import (
     UISettings,
     _bool_from_form,
     _escape,
-    _float_from_form,
-    _int_from_form,
     _url,
-    _validate_float_min,
-    _validate_int_min,
 )
 
 
@@ -90,7 +93,7 @@ def _editor_context(
 ) -> dict[str, Any]:
     errors = errors or {}
     if instance is None:
-        normalized = {"spec": deep_merge(DEFAULT_SPEC, {}), "metadata": {"name": ""}}
+        normalized = {"spec": default_spec(), "metadata": {"name": ""}}
         login = ""
         parser_proxy_pool = ""
         runner_proxy_url = ""
@@ -125,36 +128,18 @@ def _editor_context(
         "steam_app_id": spec["source"].get("steamAppId", 0),
         "ow_game_id": spec["source"].get("owGameId", 0),
         "language": spec["source"].get("language", "english"),
-        "parser_storage_size": spec["storage"]["parser"].get("size", "20Gi"),
-        "runner_storage_size": spec["storage"]["runner"].get("size", "10Gi"),
+        "parser_storage_size": spec["storage"]["parser"]["size"],
+        "runner_storage_size": spec["storage"]["runner"]["size"],
         "ow_login": login,
         "ow_password": "",
         "runner_proxy_type": spec["steamcmd"]["proxy"].get("type", "socks5"),
         "runner_proxy_url": runner_proxy_url,
         "parser_proxy_pool": parser_proxy_pool,
-        "poll_interval_seconds": sync_spec.get("pollIntervalSeconds", 600),
-        "timeout_seconds": sync_spec.get("timeoutSeconds", 60),
-        "http_retries": sync_spec.get("httpRetries", 3),
-        "http_retry_backoff": sync_spec.get("httpRetryBackoff", 5.0),
-        "steam_http_retries": sync_spec.get("steamHttpRetries", 2),
-        "steam_http_backoff": sync_spec.get("steamHttpBackoff", 2.0),
-        "steam_request_delay": sync_spec.get("steamRequestDelay", 1.0),
-        "log_level": sync_spec.get("logLevel", "INFO"),
-        "run_once": bool(sync_spec.get("runOnce", False)),
-        "sync_tags": bool(sync_spec.get("syncTags", True)),
-        "prune_tags": bool(sync_spec.get("pruneTags", True)),
-        "sync_dependencies": bool(sync_spec.get("syncDependencies", True)),
-        "prune_dependencies": bool(sync_spec.get("pruneDependencies", True)),
-        "sync_resources": bool(sync_spec.get("syncResources", True)),
-        "prune_resources": bool(sync_spec.get("pruneResources", True)),
-        "upload_resource_files": bool(sync_spec.get("uploadResourceFiles", True)),
-        "scrape_preview_images": bool(sync_spec.get("scrapePreviewImages", True)),
-        "scrape_required_items": bool(sync_spec.get("scrapeRequiredItems", True)),
-        "max_screenshots": sync_spec.get("maxScreenshots", 20),
         "sync_json_patch": sync_patch_value or "",
         "return_path": "",
         "existing_password": existing_password,
     }
+    values.update(sync_form_values(sync_spec))
     if form_data is not None:
         bool_fields = {
             "enabled",
@@ -186,32 +171,8 @@ def _editor_context(
 
 
 def _build_sync_spec(base_sync: dict[str, Any], form: dict[str, Any]) -> dict[str, Any]:
-    sync = deep_merge(base_sync, {})
-    sync.update(
-        {
-            "pollIntervalSeconds": _int_from_form(form.get("poll_interval_seconds"), sync.get("pollIntervalSeconds", 600)),
-            "timeoutSeconds": _int_from_form(form.get("timeout_seconds"), sync.get("timeoutSeconds", 60)),
-            "httpRetries": _int_from_form(form.get("http_retries"), sync.get("httpRetries", 3)),
-            "httpRetryBackoff": _float_from_form(form.get("http_retry_backoff"), sync.get("httpRetryBackoff", 5.0)),
-            "steamHttpRetries": _int_from_form(form.get("steam_http_retries"), sync.get("steamHttpRetries", 2)),
-            "steamHttpBackoff": _float_from_form(form.get("steam_http_backoff"), sync.get("steamHttpBackoff", 2.0)),
-            "steamRequestDelay": _float_from_form(form.get("steam_request_delay"), sync.get("steamRequestDelay", 1.0)),
-            "logLevel": str(form.get("log_level", sync.get("logLevel", "INFO"))).strip() or "INFO",
-            "runOnce": _bool_from_form(form.get("run_once")),
-            "syncTags": _bool_from_form(form.get("sync_tags")),
-            "pruneTags": _bool_from_form(form.get("prune_tags")),
-            "syncDependencies": _bool_from_form(form.get("sync_dependencies")),
-            "pruneDependencies": _bool_from_form(form.get("prune_dependencies")),
-            "syncResources": _bool_from_form(form.get("sync_resources")),
-            "pruneResources": _bool_from_form(form.get("prune_resources")),
-            "uploadResourceFiles": _bool_from_form(form.get("upload_resource_files")),
-            "scrapePreviewImages": _bool_from_form(form.get("scrape_preview_images")),
-            "scrapeRequiredItems": _bool_from_form(form.get("scrape_required_items")),
-            "maxScreenshots": _int_from_form(form.get("max_screenshots"), sync.get("maxScreenshots", 20)),
-        }
-    )
     raw_patch = _parse_sync_json(str(form.get("sync_json_patch") or form.get("sync_json") or "{}"))
-    return deep_merge(sync, raw_patch)
+    return build_sync_spec_from_form(base_sync, form, raw_patch)
 
 
 def _validation_errors(
@@ -258,49 +219,19 @@ def _validation_errors(
             _validate_proxy_pool(parser_proxy_pool)
         except Exception as exc:
             errors["parser_proxy_pool"] = str(exc)
-    numeric_errors = {
-        "poll_interval_seconds": _validate_int_min(
-            poll_interval_seconds,
-            minimum=1,
-            label="Poll interval",
-        ),
-        "timeout_seconds": _validate_int_min(
-            timeout_seconds,
-            minimum=1,
-            label="HTTP timeout",
-        ),
-        "http_retries": _validate_int_min(
-            http_retries,
-            minimum=0,
-            label="HTTP retries",
-        ),
-        "http_retry_backoff": _validate_float_min(
-            http_retry_backoff,
-            minimum=0.0,
-            label="HTTP retry backoff",
-        ),
-        "steam_http_retries": _validate_int_min(
-            steam_http_retries,
-            minimum=0,
-            label="Steam HTTP retries",
-        ),
-        "steam_http_backoff": _validate_float_min(
-            steam_http_backoff,
-            minimum=0.0,
-            label="Steam HTTP backoff",
-        ),
-        "steam_request_delay": _validate_float_min(
-            steam_request_delay,
-            minimum=0.0,
-            label="Steam request delay",
-        ),
-        "max_screenshots": _validate_int_min(
-            max_screenshots,
-            minimum=0,
-            label="Max screenshots",
-        ),
-    }
-    for field_name, message in numeric_errors.items():
+    sync_errors = validate_sync_form_inputs(
+        {
+            "poll_interval_seconds": poll_interval_seconds,
+            "timeout_seconds": timeout_seconds,
+            "http_retries": http_retries,
+            "http_retry_backoff": http_retry_backoff,
+            "steam_http_retries": steam_http_retries,
+            "steam_http_backoff": steam_http_backoff,
+            "steam_request_delay": steam_request_delay,
+            "max_screenshots": max_screenshots,
+        }
+    )
+    for field_name, message in sync_errors.items():
         if message:
             errors[field_name] = message
     return errors
@@ -377,24 +308,31 @@ def _settings_form(
         runner_storage_size_value=_escape(values["runner_storage_size"]),
         runner_storage_size_hint=_field_hint("Recommended: 10Gi if workshop archives can grow quickly."),
         runner_storage_size_error=_field_error(errors, "runner_storage_size"),
+        poll_interval_seconds_min=_escape(sync_form_minimum("poll_interval_seconds")),
         poll_interval_seconds_invalid_class=_input_modifier(errors, "poll_interval_seconds"),
         poll_interval_seconds_value=_escape(values["poll_interval_seconds"]),
         poll_interval_seconds_error=_field_error(errors, "poll_interval_seconds"),
+        timeout_seconds_min=_escape(sync_form_minimum("timeout_seconds")),
         timeout_seconds_invalid_class=_input_modifier(errors, "timeout_seconds"),
         timeout_seconds_value=_escape(values["timeout_seconds"]),
         timeout_seconds_error=_field_error(errors, "timeout_seconds"),
+        http_retries_min=_escape(sync_form_minimum("http_retries")),
         http_retries_invalid_class=_input_modifier(errors, "http_retries"),
         http_retries_value=_escape(values["http_retries"]),
         http_retries_error=_field_error(errors, "http_retries"),
+        http_retry_backoff_min=_escape(sync_form_minimum("http_retry_backoff")),
         http_retry_backoff_invalid_class=_input_modifier(errors, "http_retry_backoff"),
         http_retry_backoff_value=_escape(values["http_retry_backoff"]),
         http_retry_backoff_error=_field_error(errors, "http_retry_backoff"),
+        steam_http_retries_min=_escape(sync_form_minimum("steam_http_retries")),
         steam_http_retries_invalid_class=_input_modifier(errors, "steam_http_retries"),
         steam_http_retries_value=_escape(values["steam_http_retries"]),
         steam_http_retries_error=_field_error(errors, "steam_http_retries"),
+        steam_http_backoff_min=_escape(sync_form_minimum("steam_http_backoff")),
         steam_http_backoff_invalid_class=_input_modifier(errors, "steam_http_backoff"),
         steam_http_backoff_value=_escape(values["steam_http_backoff"]),
         steam_http_backoff_error=_field_error(errors, "steam_http_backoff"),
+        steam_request_delay_min=_escape(sync_form_minimum("steam_request_delay")),
         steam_request_delay_invalid_class=_input_modifier(errors, "steam_request_delay"),
         steam_request_delay_value=_escape(values["steam_request_delay"]),
         steam_request_delay_error=_field_error(errors, "steam_request_delay"),
@@ -404,6 +342,7 @@ def _settings_form(
         log_level_warning_selected=_selected_attr(values["log_level"], "WARNING"),
         log_level_error_selected=_selected_attr(values["log_level"], "ERROR"),
         log_level_error=_field_error(errors, "log_level"),
+        max_screenshots_min=_escape(sync_form_minimum("max_screenshots")),
         max_screenshots_invalid_class=_input_modifier(errors, "max_screenshots"),
         max_screenshots_value=_escape(values["max_screenshots"]),
         max_screenshots_error=_field_error(errors, "max_screenshots"),

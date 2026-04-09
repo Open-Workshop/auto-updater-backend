@@ -9,6 +9,7 @@ from typing import Any
 from kubernetes.client.rest import ApiException
 
 from kube.kube_client import (
+    delete_secret,
     get_kube_clients,
     list_instances,
     merge_instance_status,
@@ -25,6 +26,7 @@ from kube.kube_resources import (
     build_runner_statefulset,
 )
 from kube.mirror_instance import common_labels, instance_name, normalize_instance, set_condition
+from kube.mirror_instance import runner_config_secret_name
 
 
 @dataclass
@@ -129,6 +131,8 @@ class MirrorInstanceOperator:
                 self.settings.namespace,
                 build_runner_config_secret(normalized, runner_proxy_url),
             )
+        else:
+            delete_secret(self.settings.namespace, runner_config_secret_name(name))
         
         upsert_service(self.settings.namespace, build_parser_service(normalized))
         upsert_service(self.settings.namespace, build_runner_service(normalized))

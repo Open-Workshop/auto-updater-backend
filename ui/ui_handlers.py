@@ -8,15 +8,25 @@ from urllib.parse import quote, urlencode
 import requests
 from aiohttp import web
 
-from kube.kube_client import delete_instance, delete_secret, get_instance, patch_instance, read_pod_log, read_secret_value
+from core.instance_schema import default_spec
+from kube.kube_client import (
+    delete_instance,
+    delete_secret,
+    get_instance,
+    patch_instance,
+    read_pod_log,
+    read_secret_value,
+    replace_or_create_instance,
+    upsert_secret,
+)
 from kube.mirror_instance import (
     API_VERSION,
-    DEFAULT_SPEC,
     KIND,
     common_labels,
-    deep_merge,
     instance_name,
     managed_credentials_secret_name,
+    managed_secret_names,
+    managed_secret_specs,
     managed_parser_proxy_secret_name,
     managed_runner_proxy_secret_name,
     normalize_instance,
@@ -84,15 +94,6 @@ def _component_label(target: str) -> str:
     if normalized == "tun":
         return "TUN"
     return normalized.title()
-
-
-def _managed_secret_names(name: str) -> set[str]:
-    """Get all managed secret names for an instance."""
-    return {
-        managed_credentials_secret_name(name),
-        managed_parser_proxy_secret_name(name),
-        managed_runner_proxy_secret_name(name),
-    }
 
 
 def _labels_selector(name: str, component: str) -> str:
@@ -382,8 +383,6 @@ async def pod_logs_page(request: web.Request) -> web.Response:
 
 async def save_instance(request: web.Request) -> web.StreamResponse:
     """Save instance handler."""
-    from kube.kube_client import replace_or_create_instance, upsert_secret
-    
     settings: UISettings = request.app["settings"]
     form = await request.post()
     submitted = {key: value for key, value in form.items()}
@@ -459,69 +458,15 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
             )
         return web.Response(text=body, content_type="text/html", status=400)
 
-    normalized_instance = normalize_instance(instance) if instance is not None else {"spec": deep_merge(DEFAULT_SPEC, {})}
+    normalized_instance = normalize_instance(instance) if instance is not None else {"spec": default_spec()}
     sync_spec = _build_sync_spec(dict(normalized_instance["spec"]["sync"]), submitted)
     parser_proxy_pool_value = _validate_proxy_pool(parser_proxy_pool)
     runner_proxy_url_value = _validate_runner_proxy(runner_proxy_url, runner_proxy_type)
     credentials_secret = managed_credentials_secret_name(name)
     parser_proxy_secret = managed_parser_proxy_secret_name(name)
     runner_proxy_secret = managed_runner_proxy_secret_name(name)
+    parser_proxy_ref = parser_proxy_secret if parser_proxy_pool_value else ""
     final_password = password or existing_password
-
-    upsert_secret(
-        settings.namespace,
-        {
-            "apiVersion": "v1",
-            "kind": "Secret",
-            "metadata": {
-                "name": credentials_secret,
-                "namespace": settings.namespace,
-                "labels": {**common_labels(name, "credentials"), "auto-updater.miskler.ru/managed-secret": "true"},
-            },
-            "type": "Opaque",
-            "stringData": {
-                "login": login,
-                "password": final_password,
-            },
-        },
-    )
-    if parser_proxy_pool_value:
-        upsert_secret(
-            settings.namespace,
-            {
-                "apiVersion": "v1",
-                "kind": "Secret",
-                "metadata": {
-                    "name": parser_proxy_secret,
-                    "namespace": settings.namespace,
-                    "labels": {**common_labels(name, "parser-proxies"), "auto-updater.miskler.ru/managed-secret": "true"},
-                },
-                "type": "Opaque",
-                "stringData": {
-                    "proxyPool": parser_proxy_pool_value,
-                },
-            },
-        )
-        parser_proxy_ref = parser_proxy_secret
-    else:
-        parser_proxy_ref = ""
-        delete_secret(settings.namespace, parser_proxy_secret)
-    upsert_secret(
-        settings.namespace,
-        {
-            "apiVersion": "v1",
-            "kind": "Secret",
-            "metadata": {
-                "name": runner_proxy_secret,
-                "namespace": settings.namespace,
-                "labels": {**common_labels(name, "runner-proxy"), "auto-updater.miskler.ru/managed-secret": "true"},
-            },
-            "type": "Opaque",
-            "stringData": {
-                "proxyUrl": runner_proxy_url_value,
-            },
-        },
-    )
     body = {
         "apiVersion": API_VERSION,
         "kind": KIND,
@@ -548,20 +493,81 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
             },
             "storage": {
                 "parser": {
-                    "size": parser_storage_size or "20Gi",
-                    "storageClassName": "local-path",
+                    "size": parser_storage_size or normalized_instance["spec"]["storage"]["parser"]["size"],
+                    "storageClassName": normalized_instance["spec"]["storage"]["parser"]["storageClassName"],
                 },
                 "runner": {
-                    "size": runner_storage_size or "10Gi",
-                    "storageClassName": "local-path",
+                    "size": runner_storage_size or normalized_instance["spec"]["storage"]["runner"]["size"],
+                    "storageClassName": normalized_instance["spec"]["storage"]["runner"]["storageClassName"],
                 },
             },
         },
     }
     replace_or_create_instance(settings.namespace, name, body)
+    saved_instance = get_instance(settings.namespace, name)
+    secret_specs = managed_secret_specs(saved_instance)
+    credentials_metadata = secret_specs["credentials"]
+    parser_proxy_metadata = secret_specs["parser_proxy"]
+    runner_proxy_metadata = secret_specs["runner_proxy"]
+
+    upsert_secret(
+        settings.namespace,
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": credentials_metadata.name,
+                "namespace": credentials_metadata.namespace,
+                "labels": credentials_metadata.labels,
+                "ownerReferences": credentials_metadata.owner_references,
+            },
+            "type": "Opaque",
+            "stringData": {
+                "login": login,
+                "password": final_password,
+            },
+        },
+    )
+    if parser_proxy_pool_value:
+        upsert_secret(
+            settings.namespace,
+            {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {
+                    "name": parser_proxy_metadata.name,
+                    "namespace": parser_proxy_metadata.namespace,
+                    "labels": parser_proxy_metadata.labels,
+                    "ownerReferences": parser_proxy_metadata.owner_references,
+                },
+                "type": "Opaque",
+                "stringData": {
+                    "proxyPool": parser_proxy_pool_value,
+                },
+            },
+        )
+    else:
+        delete_secret(settings.namespace, parser_proxy_metadata.name)
+    upsert_secret(
+        settings.namespace,
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": runner_proxy_metadata.name,
+                "namespace": runner_proxy_metadata.namespace,
+                "labels": runner_proxy_metadata.labels,
+                "ownerReferences": runner_proxy_metadata.owner_references,
+            },
+            "type": "Opaque",
+            "stringData": {
+                "proxyUrl": runner_proxy_url_value,
+            },
+        },
+    )
     if original_name and original_name != name:
         delete_instance(settings.namespace, original_name)
-        for secret_name in _managed_secret_names(original_name):
+        for secret_name in managed_secret_names(original_name):
             delete_secret(settings.namespace, secret_name)
     return _action_response(
         request,
@@ -620,7 +626,7 @@ async def delete_instance_route(request: web.Request) -> web.StreamResponse:
     name = request.match_info["name"]
     await request.post()
     delete_instance(settings.namespace, name)
-    for secret_name in _managed_secret_names(name):
+    for secret_name in managed_secret_names(name):
         delete_secret(settings.namespace, secret_name)
     return _action_response(
         request,

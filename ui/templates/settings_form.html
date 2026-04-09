@@ -111,37 +111,37 @@
       <div class="field-grid">
         <label>
           <span>Poll interval (seconds)</span>
-          <input class="input$poll_interval_seconds_invalid_class" type="number" min="1" name="poll_interval_seconds" value="$poll_interval_seconds_value">
+          <input class="input$poll_interval_seconds_invalid_class" type="number" min="$poll_interval_seconds_min" name="poll_interval_seconds" value="$poll_interval_seconds_value">
           $poll_interval_seconds_error
         </label>
         <label>
           <span>HTTP timeout (seconds)</span>
-          <input class="input$timeout_seconds_invalid_class" type="number" min="1" name="timeout_seconds" value="$timeout_seconds_value">
+          <input class="input$timeout_seconds_invalid_class" type="number" min="$timeout_seconds_min" name="timeout_seconds" value="$timeout_seconds_value">
           $timeout_seconds_error
         </label>
         <label>
           <span>HTTP retries</span>
-          <input class="input$http_retries_invalid_class" type="number" min="0" name="http_retries" value="$http_retries_value">
+          <input class="input$http_retries_invalid_class" type="number" min="$http_retries_min" name="http_retries" value="$http_retries_value">
           $http_retries_error
         </label>
         <label>
           <span>HTTP retry backoff</span>
-          <input class="input$http_retry_backoff_invalid_class" type="number" min="0" step="0.1" name="http_retry_backoff" value="$http_retry_backoff_value">
+          <input class="input$http_retry_backoff_invalid_class" type="number" min="$http_retry_backoff_min" step="0.1" name="http_retry_backoff" value="$http_retry_backoff_value">
           $http_retry_backoff_error
         </label>
         <label>
           <span>Steam HTTP retries</span>
-          <input class="input$steam_http_retries_invalid_class" type="number" min="0" name="steam_http_retries" value="$steam_http_retries_value">
+          <input class="input$steam_http_retries_invalid_class" type="number" min="$steam_http_retries_min" name="steam_http_retries" value="$steam_http_retries_value">
           $steam_http_retries_error
         </label>
         <label>
           <span>Steam HTTP backoff</span>
-          <input class="input$steam_http_backoff_invalid_class" type="number" min="0" step="0.1" name="steam_http_backoff" value="$steam_http_backoff_value">
+          <input class="input$steam_http_backoff_invalid_class" type="number" min="$steam_http_backoff_min" step="0.1" name="steam_http_backoff" value="$steam_http_backoff_value">
           $steam_http_backoff_error
         </label>
         <label>
           <span>Steam request delay</span>
-          <input class="input$steam_request_delay_invalid_class" type="number" min="0" step="0.1" name="steam_request_delay" value="$steam_request_delay_value">
+          <input class="input$steam_request_delay_invalid_class" type="number" min="$steam_request_delay_min" step="0.1" name="steam_request_delay" value="$steam_request_delay_value">
           $steam_request_delay_error
         </label>
         <label>
@@ -156,7 +156,7 @@
         </label>
         <label>
           <span>Max screenshots</span>
-          <input class="input$max_screenshots_invalid_class" type="number" min="0" name="max_screenshots" value="$max_screenshots_value">
+          <input class="input$max_screenshots_invalid_class" type="number" min="$max_screenshots_min" name="max_screenshots" value="$max_screenshots_value">
           $max_screenshots_error
         </label>
       </div>

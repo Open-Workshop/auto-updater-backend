@@ -2,46 +2,17 @@ from dataclasses import dataclass
 import os
 import re
 
-DEFAULT_API_BASE = "https://api.openworkshop.miskler.ru"
-DEFAULT_PAGE_SIZE = 50
-DEFAULT_POLL_INTERVAL = 10
-DEFAULT_TIMEOUT = 60
-DEFAULT_HTTP_RETRIES = 3
-DEFAULT_HTTP_RETRY_BACKOFF = 5.0
-DEFAULT_STEAM_MAX_PAGES = 1000
-DEFAULT_STEAM_START_PAGE = 1
-DEFAULT_STEAM_PAGE_SIZE = 30
-DEFAULT_STEAM_DELAY = 1
-DEFAULT_MAX_SCREENSHOTS = 20
+from core.instance_schema import load_sync_config_from_env
+
 DEFAULT_DEPOTDOWNLOADER_PATH = "/opt/depotdownloader/DepotDownloader"
-DEFAULT_STEAM_HTTP_RETRIES = 2
-DEFAULT_STEAM_HTTP_BACKOFF = 2.0
-DEFAULT_STEAM_REQUEST_DELAY = 1
 DEFAULT_STEAM_PROXY_POOL = ""
-DEFAULT_STEAM_PROXY_SCOPE = "mod_pages" # all / mod_pages / none
-DEFAULT_LOG_LEVEL = "DEBUG"
-
-
-def parse_bool(value: str | None, default: bool = False) -> bool:
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-
+DEFAULT_STEAM_PROXY_SCOPE = "mod_pages"  # all / mod_pages / none
 
 def parse_int(value: str | None, default: int) -> int:
     if value is None or value == "":
         return default
     try:
         return int(value)
-    except ValueError:
-        return default
-
-
-def parse_float(value: str | None, default: float) -> float:
-    if value is None or value == "":
-        return default
-    try:
-        return float(value)
     except ValueError:
         return default
 
@@ -115,7 +86,8 @@ class Config:
 
 
 def load_config() -> Config:
-    api_base = os.environ.get("OW_API_BASE", DEFAULT_API_BASE)
+    sync_cfg = load_sync_config_from_env(os.environ)
+    api_base = str(sync_cfg["api_base"])
     login_name = os.environ.get("OW_LOGIN", "")
     password = os.environ.get("OW_PASSWORD", "")
 
@@ -127,38 +99,17 @@ def load_config() -> Config:
 
     mirror_root = os.environ.get("OW_MIRROR_DIR", "/data/mirror")
     steam_root = os.environ.get("STEAM_ROOT", f"{mirror_root}/steam")
-    page_size = parse_int(os.environ.get("OW_PAGE_SIZE"), DEFAULT_PAGE_SIZE)
-    poll_interval = max(1, parse_int(os.environ.get("OW_POLL_INTERVAL"), DEFAULT_POLL_INTERVAL))
-    timeout = max(1, parse_int(os.environ.get("OW_HTTP_TIMEOUT"), DEFAULT_TIMEOUT))
-    http_retries = max(0, parse_int(os.environ.get("OW_HTTP_RETRIES"), DEFAULT_HTTP_RETRIES))
-    http_retry_backoff = max(
-        0.0,
-        parse_float(os.environ.get("OW_HTTP_RETRY_BACKOFF"), DEFAULT_HTTP_RETRY_BACKOFF),
-    )
-    run_once = parse_bool(os.environ.get("OW_RUN_ONCE"), False)
-    log_level = os.environ.get("OW_LOG_LEVEL", DEFAULT_LOG_LEVEL)
-    log_steam_requests = parse_bool(os.environ.get("OW_LOG_STEAM_REQUESTS"), False)
-    steam_http_retries = max(
-        0,
-        parse_int(
-            os.environ.get("OW_STEAM_HTTP_RETRIES"),
-            DEFAULT_STEAM_HTTP_RETRIES,
-        ),
-    )
-    steam_http_backoff = max(
-        0.0,
-        parse_float(
-            os.environ.get("OW_STEAM_HTTP_BACKOFF"),
-            DEFAULT_STEAM_HTTP_BACKOFF,
-        ),
-    )
-    steam_request_delay = max(
-        0.0,
-        parse_float(
-            os.environ.get("OW_STEAM_REQUEST_DELAY"),
-            DEFAULT_STEAM_REQUEST_DELAY,
-        ),
-    )
+    page_size = int(sync_cfg["page_size"])
+    poll_interval = int(sync_cfg["poll_interval"])
+    timeout = int(sync_cfg["timeout"])
+    http_retries = int(sync_cfg["http_retries"])
+    http_retry_backoff = float(sync_cfg["http_retry_backoff"])
+    run_once = bool(sync_cfg["run_once"])
+    log_level = str(sync_cfg["log_level"])
+    log_steam_requests = bool(sync_cfg["log_steam_requests"])
+    steam_http_retries = int(sync_cfg["steam_http_retries"])
+    steam_http_backoff = float(sync_cfg["steam_http_backoff"])
+    steam_request_delay = float(sync_cfg["steam_request_delay"])
     steam_proxy_pool = parse_list(
         os.environ.get("OW_STEAM_PROXY_POOL", DEFAULT_STEAM_PROXY_POOL)
     )
@@ -166,27 +117,25 @@ def load_config() -> Config:
         os.environ.get("OW_STEAM_PROXY_SCOPE"), DEFAULT_STEAM_PROXY_SCOPE
     )
 
-    steam_max_pages = parse_int(os.environ.get("OW_STEAM_MAX_PAGES"), DEFAULT_STEAM_MAX_PAGES)
-    steam_start_page = parse_int(
-        os.environ.get("OW_STEAM_START_PAGE"), DEFAULT_STEAM_START_PAGE
-    )
-    steam_max_items = parse_int(os.environ.get("OW_STEAM_MAX_ITEMS"), 0)
-    steam_delay = max(0.0, parse_float(os.environ.get("OW_STEAM_DELAY"), DEFAULT_STEAM_DELAY))
-    max_screenshots = max(0, parse_int(os.environ.get("OW_MAX_SCREENSHOTS"), DEFAULT_MAX_SCREENSHOTS))
+    steam_max_pages = int(sync_cfg["steam_max_pages"])
+    steam_start_page = int(sync_cfg["steam_start_page"])
+    steam_max_items = int(sync_cfg["steam_max_items"])
+    steam_delay = float(sync_cfg["steam_delay"])
+    max_screenshots = int(sync_cfg["max_screenshots"])
     depotdownloader_path = os.environ.get("DEPOTDOWNLOADER_PATH", DEFAULT_DEPOTDOWNLOADER_PATH)
-    upload_resource_files = parse_bool(os.environ.get("OW_RESOURCE_UPLOAD_FILES"), True)
-    scrape_preview_images = parse_bool(os.environ.get("OW_SCRAPE_PREVIEW_IMAGES"), True)
-    scrape_required_items = parse_bool(os.environ.get("OW_SCRAPE_REQUIRED_ITEMS"), True)
-    force_required_item_id = os.environ.get("OW_FORCE_REQUIRED_ITEM_ID")
-    public_mode = parse_int(os.environ.get("OW_MOD_PUBLIC"), 0)
-    without_author = parse_bool(os.environ.get("OW_WITHOUT_AUTHOR"), False)
+    upload_resource_files = bool(sync_cfg["upload_resource_files"])
+    scrape_preview_images = bool(sync_cfg["scrape_preview_images"])
+    scrape_required_items = bool(sync_cfg["scrape_required_items"])
+    force_required_item_id = str(sync_cfg["force_required_item_id"]) or None
+    public_mode = int(sync_cfg["public_mode"])
+    without_author = bool(sync_cfg["without_author"])
 
-    sync_tags = parse_bool(os.environ.get("OW_SYNC_TAGS"), True)
-    prune_tags = parse_bool(os.environ.get("OW_PRUNE_TAGS"), True)
-    sync_dependencies = parse_bool(os.environ.get("OW_SYNC_DEPENDENCIES"), True)
-    prune_dependencies = parse_bool(os.environ.get("OW_PRUNE_DEPENDENCIES"), True)
-    sync_resources = parse_bool(os.environ.get("OW_SYNC_RESOURCES"), True)
-    prune_resources = parse_bool(os.environ.get("OW_PRUNE_RESOURCES"), True)
+    sync_tags = bool(sync_cfg["sync_tags"])
+    prune_tags = bool(sync_cfg["prune_tags"])
+    sync_dependencies = bool(sync_cfg["sync_dependencies"])
+    prune_dependencies = bool(sync_cfg["prune_dependencies"])
+    sync_resources = bool(sync_cfg["sync_resources"])
+    prune_resources = bool(sync_cfg["prune_resources"])
     language = os.environ.get("STEAM_LANGUAGE", "english")
     steamcmd_runner_url = os.environ.get("OW_STEAMCMD_RUNNER_URL", "").strip()
     admin_host = os.environ.get("OW_ADMIN_HOST", "0.0.0.0").strip() or "0.0.0.0"

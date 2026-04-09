@@ -2,9 +2,17 @@ import unittest
 from datetime import UTC, datetime
 from unittest.mock import patch
 
-from aiohttp.test_utils import TestClient, TestServer
+from kube.mirror_instance import managed_secret_names
 
-from ui.ui_service import _create_app, _derive_health, load_ui_settings
+try:
+    from aiohttp.test_utils import TestClient, TestServer
+    from ui.ui_service import _create_app, _derive_health, load_ui_settings
+except ModuleNotFoundError:
+    TestClient = None
+    TestServer = None
+    _create_app = None
+    _derive_health = None
+    load_ui_settings = None
 
 
 def _auth_headers() -> dict[str, str]:
@@ -98,6 +106,7 @@ def _sample_instance() -> dict:
         "metadata": {
             "name": "demo",
             "namespace": "auto-updater",
+            "uid": "uid-existing",
         },
         "spec": {
             "enabled": True,
@@ -127,6 +136,7 @@ def _sample_instance() -> dict:
                 "scrapeRequiredItems": True,
                 "maxScreenshots": 20,
                 "pageSize": 77,
+                "customMirrorSetting": {"keep": True},
             },
             "credentials": {"secretRef": "demo-ow-credentials"},
             "parser": {"proxyPoolSecretRef": "demo-parser-proxies"},
@@ -160,6 +170,7 @@ def _secret_value(_: str, __: str, key: str) -> str:
     return values[key]
 
 
+@unittest.skipUnless(_create_app is not None, "aiohttp dependency is not installed")
 class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.env = patch.dict(
@@ -177,7 +188,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
         self.env.stop()
 
     async def test_dashboard_accepts_trailing_slash_under_base_path(self) -> None:
-        with patch("ui.ui_service._load_instance_summaries", return_value=[]):
+        with patch("ui.ui_handlers._load_instance_summaries", return_value=[]):
             app = _create_app(load_ui_settings())
             client = TestClient(TestServer(app))
             await client.start_server()
@@ -209,7 +220,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
             await client.close()
 
     async def test_instances_api_returns_json_under_base_path(self) -> None:
-        with patch("ui.ui_service._load_instance_summaries", return_value=[_sample_summary()]):
+        with patch("ui.ui_handlers._load_instance_summaries", return_value=[_sample_summary()]):
             app = _create_app(load_ui_settings())
             client = TestClient(TestServer(app))
             await client.start_server()
@@ -226,7 +237,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 await client.close()
 
     async def test_detail_page_logs_tab_contains_live_console(self) -> None:
-        with patch("ui.ui_service._load_instance_summary", return_value=_sample_summary()):
+        with patch("ui.ui_handlers._load_instance_summary", return_value=_sample_summary()):
             app = _create_app(load_ui_settings())
             client = TestClient(TestServer(app))
             await client.start_server()
@@ -264,7 +275,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
         summary["syncState"] = "Running"
         summary["lastSyncResult"] = "running"
         summary["lastSyncLabel"] = "Running since 2026-03-26 18:20 UTC"
-        with patch("ui.ui_service._load_instance_summaries", return_value=[summary]):
+        with patch("ui.ui_handlers._load_instance_summaries", return_value=[summary]):
             app = _create_app(load_ui_settings())
             client = TestClient(TestServer(app))
             await client.start_server()
@@ -295,8 +306,8 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
             await client.close()
 
     async def test_settings_tab_renders_expert_mode_collapsed(self) -> None:
-        with patch("ui.ui_service._load_instance_summary", return_value=_sample_summary()):
-            with patch("ui.ui_service.get_instance", return_value=_sample_instance()):
+        with patch("ui.ui_handlers._load_instance_summary", return_value=_sample_summary()):
+            with patch("ui.ui_handlers.get_instance", return_value=_sample_instance()):
                 with patch("ui.ui_forms.read_secret_value", side_effect=_secret_value):
                     app = _create_app(load_ui_settings())
                     client = TestClient(TestServer(app))
@@ -327,8 +338,8 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 "error": "",
             }
         ]
-        with patch("ui.ui_service._load_instance_summary", return_value=_sample_summary()):
-            with patch("ui.ui_service._load_resource_entries", return_value=resources):
+        with patch("ui.ui_handlers._load_instance_summary", return_value=_sample_summary()):
+            with patch("ui.ui_handlers._load_resource_entries", return_value=resources):
                 app = _create_app(load_ui_settings())
                 client = TestClient(TestServer(app))
                 await client.start_server()
@@ -345,17 +356,25 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_save_instance_preserves_unedited_sync_fields(self) -> None:
         captured: dict[str, dict] = {}
+        saved_instance = _sample_instance()
+        saved_instance["metadata"] = dict(saved_instance["metadata"])
+        saved_instance["metadata"]["uid"] = "uid-saved"
+        upserted_secrets: list[dict] = []
 
         def remember_replace(_: str, name: str, body: dict) -> dict:
             captured["name"] = name
             captured["body"] = body
             return body
 
-        with patch("ui.ui_service.get_instance", return_value=_sample_instance()):
-            with patch("ui.ui_service.read_secret_value", side_effect=_secret_value):
-                with patch("ui.ui_service.upsert_secret"):
-                    with patch("ui.ui_service.delete_secret"):
-                        with patch("ui.ui_service.replace_or_create_instance", side_effect=remember_replace):
+        def remember_secret(_: str, body: dict) -> dict:
+            upserted_secrets.append(body)
+            return body
+
+        with patch("ui.ui_handlers.get_instance", side_effect=[_sample_instance(), saved_instance]):
+            with patch("ui.ui_handlers.read_secret_value", side_effect=_secret_value):
+                with patch("ui.ui_handlers.upsert_secret", side_effect=remember_secret):
+                    with patch("ui.ui_handlers.delete_secret"):
+                        with patch("ui.ui_handlers.replace_or_create_instance", side_effect=remember_replace):
                             app = _create_app(load_ui_settings())
                             client = TestClient(TestServer(app))
                             await client.start_server()
@@ -403,11 +422,135 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                                 self.assertEqual(response.status, 302)
                                 self.assertEqual(captured["name"], "demo")
                                 self.assertEqual(captured["body"]["spec"]["sync"]["pageSize"], 77)
+                                self.assertEqual(
+                                    captured["body"]["spec"]["sync"]["customMirrorSetting"],
+                                    {"keep": True},
+                                )
                                 self.assertEqual(captured["body"]["spec"]["sync"]["pollIntervalSeconds"], 600)
+                                self.assertEqual(len(upserted_secrets), 3)
+                                for secret in upserted_secrets:
+                                    self.assertEqual(
+                                        secret["metadata"]["ownerReferences"][0]["uid"],
+                                        "uid-saved",
+                                    )
                             finally:
                                 await client.close()
 
+    async def test_rename_instance_reowns_new_secrets_before_legacy_cleanup(self) -> None:
+        saved_instance = _sample_instance()
+        saved_instance["metadata"] = {
+            "name": "demo-renamed",
+            "namespace": "auto-updater",
+            "uid": "uid-renamed",
+        }
+        events: list[tuple[str, str]] = []
 
+        def remember_secret(_: str, body: dict) -> dict:
+            events.append(("upsert_secret", body["metadata"]["name"]))
+            return body
+
+        def remember_replace(_: str, name: str, body: dict) -> dict:
+            events.append(("replace_instance", name))
+            return body
+
+        def remember_delete_instance(_: str, name: str) -> None:
+            events.append(("delete_instance", name))
+
+        def remember_delete_secret(_: str, name: str) -> None:
+            events.append(("delete_secret", name))
+
+        with patch("ui.ui_handlers.get_instance", side_effect=[_sample_instance(), saved_instance]):
+            with patch("ui.ui_handlers.read_secret_value", side_effect=_secret_value):
+                with patch("ui.ui_handlers.upsert_secret", side_effect=remember_secret):
+                    with patch("ui.ui_handlers.delete_secret", side_effect=remember_delete_secret):
+                        with patch("ui.ui_handlers.delete_instance", side_effect=remember_delete_instance):
+                            with patch("ui.ui_handlers.replace_or_create_instance", side_effect=remember_replace):
+                                app = _create_app(load_ui_settings())
+                                client = TestClient(TestServer(app))
+                                await client.start_server()
+                                try:
+                                    response = await client.post(
+                                        "/auto-updater/instances/save",
+                                        headers=_auth_headers(),
+                                        data={
+                                            "original_name": "demo",
+                                            "name": "demo-renamed",
+                                            "return_path": "/instances/demo?tab=settings",
+                                            "enabled": "on",
+                                            "steam_app_id": "602960",
+                                            "ow_game_id": "3",
+                                            "language": "english",
+                                            "parser_storage_size": "20Gi",
+                                            "runner_storage_size": "10Gi",
+                                            "ow_login": "demo-login",
+                                            "ow_password": "",
+                                            "runner_proxy_type": "socks5",
+                                            "runner_proxy_url": "socks5://runner-user:runner-pass@127.0.0.1:3001",
+                                            "parser_proxy_pool": "socks5://pool-user:pool-pass@127.0.0.1:3001",
+                                            "poll_interval_seconds": "600",
+                                            "timeout_seconds": "60",
+                                            "http_retries": "3",
+                                            "http_retry_backoff": "5.0",
+                                            "steam_http_retries": "2",
+                                            "steam_http_backoff": "2.0",
+                                            "steam_request_delay": "1.0",
+                                            "log_level": "INFO",
+                                            "max_screenshots": "20",
+                                            "sync_json_patch": "",
+                                            "sync_tags": "on",
+                                            "prune_tags": "on",
+                                            "sync_dependencies": "on",
+                                            "prune_dependencies": "on",
+                                            "sync_resources": "on",
+                                            "prune_resources": "on",
+                                            "upload_resource_files": "on",
+                                            "scrape_preview_images": "on",
+                                            "scrape_required_items": "on",
+                                        },
+                                        allow_redirects=False,
+                                    )
+                                    self.assertEqual(response.status, 302)
+                                    delete_index = events.index(("delete_instance", "demo"))
+                                    for expected_name in managed_secret_names("demo-renamed"):
+                                        self.assertIn(("upsert_secret", expected_name), events)
+                                        self.assertLess(events.index(("upsert_secret", expected_name)), delete_index)
+                                    for expected_name in managed_secret_names("demo"):
+                                        self.assertIn(("delete_secret", expected_name), events)
+                                        self.assertGreater(events.index(("delete_secret", expected_name)), delete_index)
+                                finally:
+                                    await client.close()
+
+    async def test_delete_instance_keeps_legacy_secret_cleanup_as_fallback(self) -> None:
+        events: list[tuple[str, str]] = []
+
+        def remember_delete_instance(_: str, name: str) -> None:
+            events.append(("delete_instance", name))
+
+        def remember_delete_secret(_: str, name: str) -> None:
+            events.append(("delete_secret", name))
+
+        with patch("ui.ui_handlers.delete_instance", side_effect=remember_delete_instance):
+            with patch("ui.ui_handlers.delete_secret", side_effect=remember_delete_secret):
+                app = _create_app(load_ui_settings())
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    response = await client.post(
+                        "/auto-updater/instances/demo/delete",
+                        headers=_auth_headers(),
+                        data={},
+                        allow_redirects=False,
+                    )
+                    self.assertEqual(response.status, 302)
+                    self.assertEqual(events[0], ("delete_instance", "demo"))
+                    for expected_name in managed_secret_names("demo"):
+                        self.assertIn(("delete_secret", expected_name), events)
+                        self.assertGreater(events.index(("delete_secret", expected_name)), 0)
+                finally:
+                    await client.close()
+
+
+@unittest.skipUnless(_derive_health is not None, "aiohttp dependency is not installed")
 class UIHealthTests(unittest.TestCase):
     def test_derive_health_variants(self) -> None:
         self.assertEqual(

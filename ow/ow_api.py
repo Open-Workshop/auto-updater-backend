@@ -44,6 +44,15 @@ class StorageUploadResponse:
     headers: Dict[str, str]
 
 
+@dataclass(frozen=True)
+class StorageProgressUpdate:
+    stage: str
+    percent: int | None
+    sent_bytes: int | None
+    total_bytes: int | None
+    explicit_percent: bool
+
+
 class OWLimits:
     def __init__(self, defaults: Dict[str, int]) -> None:
         self._defaults = dict(defaults)
@@ -617,6 +626,40 @@ class OWClient:
             float(self.timeout) * _UPLOAD_WS_IDLE_TIMEOUT_FACTOR,
         )
 
+    @staticmethod
+    def _storage_progress_update(payload: Dict[str, Any]) -> StorageProgressUpdate:
+        stage = str(payload.get("stage") or "").strip().lower()
+
+        explicit_percent = payload.get("percent")
+        try:
+            percent_value = int(explicit_percent) if explicit_percent is not None else None
+        except (TypeError, ValueError):
+            percent_value = None
+        if percent_value is not None:
+            percent_value = max(0, min(100, percent_value))
+
+        total = payload.get("total")
+        sent = payload.get("bytes")
+        try:
+            total_value = int(total) if total is not None else None
+        except (TypeError, ValueError):
+            total_value = None
+        try:
+            sent_value = int(sent) if sent is not None else None
+        except (TypeError, ValueError):
+            sent_value = None
+
+        if percent_value is None and total_value and total_value > 0 and sent_value is not None:
+            percent_value = min(100, int((sent_value * 100) / total_value))
+
+        return StorageProgressUpdate(
+            stage=stage,
+            percent=percent_value,
+            sent_bytes=sent_value,
+            total_bytes=total_value,
+            explicit_percent=explicit_percent is not None,
+        )
+
     async def _upload_file_to_storage_async(
         self,
         transfer: StorageTransfer,
@@ -676,27 +719,39 @@ class OWClient:
                             stage = str(payload.get("stage") or "").strip()
                             if stage and stage != last_stage:
                                 last_stage = stage
+                                last_progress_percent = -1
                                 logging.info("Storage upload stage for %s: %s", file_path.name, stage)
                             if event == "progress":
-                                total = payload.get("total")
-                                sent = payload.get("bytes")
-                                try:
-                                    total_value = int(total)
-                                    sent_value = int(sent)
-                                except (TypeError, ValueError):
-                                    total_value = 0
-                                    sent_value = 0
-                                if total_value > 0:
-                                    percent = min(100, int((sent_value * 100) / total_value))
-                                    if percent >= last_progress_percent + 10 or percent == 100:
-                                        last_progress_percent = percent
-                                        logging.info(
-                                            "Storage upload progress for %s: %s%% (%s/%s bytes)",
-                                            file_path.name,
-                                            percent,
-                                            sent_value,
-                                            total_value,
-                                        )
+                                progress = self._storage_progress_update(payload)
+                                if progress.percent is None:
+                                    continue
+                                should_log = (
+                                    last_progress_percent < 0
+                                    or progress.percent >= last_progress_percent + 10
+                                    or progress.percent == 100
+                                )
+                                if not should_log:
+                                    continue
+                                last_progress_percent = progress.percent
+                                if progress.explicit_percent:
+                                    logging.info(
+                                        "Storage upload progress for %s: stage=%s percent=%s%%",
+                                        file_path.name,
+                                        progress.stage or "unknown",
+                                        progress.percent,
+                                    )
+                                elif (
+                                    progress.sent_bytes is not None
+                                    and progress.total_bytes is not None
+                                    and progress.total_bytes > 0
+                                ):
+                                    logging.info(
+                                        "Storage upload progress for %s: %s%% (%s/%s bytes)",
+                                        file_path.name,
+                                        progress.percent,
+                                        progress.sent_bytes,
+                                        progress.total_bytes,
+                                    )
                             elif event == "complete":
                                 logging.info("Storage upload completed for %s", file_path.name)
                                 return

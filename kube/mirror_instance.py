@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from core.instance_schema import (
+    MirrorInstanceSpecModel,
+    default_spec,
+    deep_merge,
+    normalize_instance_dict,
+)
 
 
 GROUP = "auto-updater.miskler.ru"
@@ -12,88 +20,24 @@ KIND = "MirrorInstance"
 API_VERSION = f"{GROUP}/{VERSION}"
 APP_NAME = "auto-updater"
 DEFAULT_NAMESPACE = "auto-updater"
-DEFAULT_STORAGE_CLASS = "local-path"
-
-DEFAULT_SPEC: dict[str, Any] = {
-    "enabled": True,
-    "source": {
-        "steamAppId": 0,
-        "owGameId": 0,
-        "language": "english",
-    },
-    "sync": {
-        "apiBase": "https://api.openworkshop.miskler.ru",
-        "pageSize": 50,
-        "pollIntervalSeconds": 10,
-        "timeoutSeconds": 60,
-        "httpRetries": 3,
-        "httpRetryBackoff": 5.0,
-        "runOnce": False,
-        "logLevel": "DEBUG",
-        "logSteamRequests": False,
-        "steamHttpRetries": 2,
-        "steamHttpBackoff": 2.0,
-        "steamRequestDelay": 1.0,
-        "steamMaxPages": 1000,
-        "steamStartPage": 1,
-        "steamMaxItems": 0,
-        "steamDelay": 1.0,
-        "maxScreenshots": 20,
-        "uploadResourceFiles": True,
-        "scrapePreviewImages": True,
-        "scrapeRequiredItems": True,
-        "forceRequiredItemId": "",
-        "publicMode": 0,
-        "withoutAuthor": False,
-        "syncTags": True,
-        "pruneTags": True,
-        "syncDependencies": True,
-        "pruneDependencies": True,
-        "syncResources": True,
-        "pruneResources": True,
-    },
-    "credentials": {
-        "secretRef": "",
-    },
-    "parser": {
-        "proxyPoolSecretRef": "",
-    },
-    "steamcmd": {
-        "proxy": {
-            "type": "socks5",
-            "secretRef": "",
-        }
-    },
-    "storage": {
-        "parser": {
-            "size": "20Gi",
-            "storageClassName": DEFAULT_STORAGE_CLASS,
-        },
-        "runner": {
-            "size": "10Gi",
-            "storageClassName": DEFAULT_STORAGE_CLASS,
-        },
-    },
-}
+DEFAULT_SPEC: dict[str, Any] = default_spec()
 
 
 def utcnow_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
-def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    result = deepcopy(base)
-    for key, value in (override or {}).items():
-        if isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
-
-
 def normalize_instance(instance: dict[str, Any]) -> dict[str, Any]:
-    normalized = deepcopy(instance)
-    normalized["spec"] = deep_merge(DEFAULT_SPEC, dict(instance.get("spec") or {}))
+    return normalize_instance_dict(instance)
+
+
+def from_instance_dict(instance: dict[str, Any] | None) -> MirrorInstanceSpecModel:
+    return MirrorInstanceSpecModel.from_instance_dict(instance)
+
+
+def to_instance_dict(instance: dict[str, Any] | None, model: MirrorInstanceSpecModel) -> dict[str, Any]:
+    normalized = deepcopy(dict(instance or {}))
+    normalized["spec"] = model.to_spec_dict()
     return normalized
 
 
@@ -139,6 +83,62 @@ def managed_parser_proxy_secret_name(name: str) -> str:
 
 def managed_runner_proxy_secret_name(name: str) -> str:
     return component_name(name, "steamcmd-proxy")
+
+
+@dataclass(frozen=True)
+class ManagedSecretSpec:
+    name: str
+    namespace: str
+    component: str
+    labels: dict[str, str]
+    owner_references: list[dict[str, Any]]
+
+
+def managed_secret_names(name: str) -> set[str]:
+    return {
+        managed_credentials_secret_name(name),
+        managed_parser_proxy_secret_name(name),
+        managed_runner_proxy_secret_name(name),
+    }
+
+
+def managed_secret_specs(instance: dict[str, Any]) -> dict[str, ManagedSecretSpec]:
+    normalized = normalize_instance(instance)
+    name = instance_name(normalized)
+    namespace = instance_namespace(normalized)
+    refs = owner_reference(instance)
+    return {
+        "credentials": ManagedSecretSpec(
+            name=managed_credentials_secret_name(name),
+            namespace=namespace,
+            component="credentials",
+            labels={
+                **common_labels(name, "credentials"),
+                "auto-updater.miskler.ru/managed-secret": "true",
+            },
+            owner_references=refs,
+        ),
+        "parser_proxy": ManagedSecretSpec(
+            name=managed_parser_proxy_secret_name(name),
+            namespace=namespace,
+            component="parser-proxies",
+            labels={
+                **common_labels(name, "parser-proxies"),
+                "auto-updater.miskler.ru/managed-secret": "true",
+            },
+            owner_references=refs,
+        ),
+        "runner_proxy": ManagedSecretSpec(
+            name=managed_runner_proxy_secret_name(name),
+            namespace=namespace,
+            component="runner-proxy",
+            labels={
+                **common_labels(name, "runner-proxy"),
+                "auto-updater.miskler.ru/managed-secret": "true",
+            },
+            owner_references=refs,
+        ),
+    }
 
 
 def parser_service_url(name: str, namespace: str) -> str:

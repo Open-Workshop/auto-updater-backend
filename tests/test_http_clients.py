@@ -129,6 +129,39 @@ class HttpClientTests(unittest.TestCase):
             f"wss://storage.openworkshop.miskler.ru/transfer/ws/123?token={token}",
         )
 
+    def test_storage_progress_update_uses_repack_percent_field(self) -> None:
+        progress = OWClient._storage_progress_update(
+            {
+                "event": "progress",
+                "stage": "repacking",
+                "bytes": 1048576,
+                "total": 2097152,
+                "percent": 37,
+            }
+        )
+
+        self.assertEqual(progress.stage, "repacking")
+        self.assertEqual(progress.percent, 37)
+        self.assertEqual(progress.sent_bytes, 1048576)
+        self.assertEqual(progress.total_bytes, 2097152)
+        self.assertTrue(progress.explicit_percent)
+
+    def test_storage_progress_update_falls_back_to_bytes_ratio(self) -> None:
+        progress = OWClient._storage_progress_update(
+            {
+                "event": "progress",
+                "stage": "uploading",
+                "bytes": 50,
+                "total": 200,
+            }
+        )
+
+        self.assertEqual(progress.stage, "uploading")
+        self.assertEqual(progress.percent, 25)
+        self.assertEqual(progress.sent_bytes, 50)
+        self.assertEqual(progress.total_bytes, 200)
+        self.assertFalse(progress.explicit_percent)
+
 
 if __name__ == "__main__":
     unittest.main()
