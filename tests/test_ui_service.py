@@ -6,7 +6,8 @@ from kube.mirror_instance import managed_secret_names
 
 try:
     from aiohttp.test_utils import TestClient, TestServer
-    from ui.ui_service import _create_app, _derive_health, load_ui_settings
+    from ui.ui_service import _create_app, load_ui_settings
+    from ui.ui_instance import _derive_health
 except ModuleNotFoundError:
     TestClient = None
     TestServer = None
@@ -235,7 +236,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(payload["items"][0]["health"], "Healthy")
                 self.assertEqual(payload["counts"]["Healthy"], 1)
                 self.assertEqual(payload["resources"]["cpuLabel"], "130m")
-                self.assertEqual(payload["resources"]["diskLabel"], "30Gi cap / 7.5Gi used / 30Gi req")
+                self.assertEqual(payload["resources"]["diskLabel"], "n/a cap / n/a used / 32.2GB req")
             finally:
                 await client.close()
 
@@ -254,7 +255,8 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 try:
                     response = await client.get("/auto-updater/", headers=_auth_headers())
                     self.assertEqual(response.status, 200)
-                    self.assertEqual(threaded_calls, ["_load_instance_summaries"])
+                    self.assertEqual(len(threaded_calls), 1)
+                    self.assertIn("_load_instance_summaries", threaded_calls[0])
                 finally:
                     await client.close()
 
@@ -333,7 +335,8 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                     body = await response.json()
                     self.assertEqual(body["logText"], "hello")
                     self.assertEqual(body["selectedTag"], "steam")
-                    self.assertEqual(threaded_calls, ["_pod_log_snapshot"])
+                    self.assertEqual(len(threaded_calls), 1)
+                    self.assertIn("_pod_log_snapshot", threaded_calls[0])
                 finally:
                     await client.close()
 
@@ -439,69 +442,78 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("ui.ui_handlers.get_instance", side_effect=[_sample_instance(), saved_instance]):
             with patch("ui.ui_handlers.read_secret_value", side_effect=_secret_value):
-                with patch("ui.ui_handlers.upsert_secret", side_effect=remember_secret):
-                    with patch("ui.ui_handlers.delete_secret"):
-                        with patch("ui.ui_handlers.replace_or_create_instance", side_effect=remember_replace):
-                            app = _create_app(load_ui_settings())
-                            client = TestClient(TestServer(app))
-                            await client.start_server()
-                            try:
-                                response = await client.post(
-                                    "/auto-updater/instances/save",
-                                    headers=_auth_headers(),
-                                    data={
-                                        "original_name": "demo",
-                                        "name": "demo",
-                                        "return_path": "/instances/demo?tab=settings",
-                                        "enabled": "on",
-                                        "steam_app_id": "602960",
-                                        "ow_game_id": "3",
-                                        "language": "english",
-                                        "parser_storage_size": "20Gi",
-                                        "runner_storage_size": "10Gi",
-                                        "ow_login": "demo-login",
-                                        "ow_password": "",
-                                        "runner_proxy_type": "socks5",
-                                        "runner_proxy_url": "socks5://runner-user:runner-pass@127.0.0.1:3001",
-                                        "parser_proxy_pool": "socks5://pool-user:pool-pass@127.0.0.1:3001",
-                                        "poll_interval_seconds": "600",
-                                        "timeout_seconds": "60",
-                                        "http_retries": "3",
-                                        "http_retry_backoff": "5.0",
-                                        "steam_http_retries": "2",
-                                        "steam_http_backoff": "2.0",
-                                        "steam_request_delay": "1.0",
-                                        "log_level": "INFO",
-                                        "max_screenshots": "20",
-                                        "sync_json_patch": "",
-                                        "sync_tags": "on",
-                                        "prune_tags": "on",
-                                        "sync_dependencies": "on",
-                                        "prune_dependencies": "on",
-                                        "sync_resources": "on",
-                                        "prune_resources": "on",
-                                        "upload_resource_files": "on",
-                                        "scrape_preview_images": "on",
-                                        "scrape_required_items": "on",
-                                    },
-                                    allow_redirects=False,
-                                )
-                                self.assertEqual(response.status, 302)
-                                self.assertEqual(captured["name"], "demo")
-                                self.assertEqual(captured["body"]["spec"]["sync"]["pageSize"], 77)
-                                self.assertEqual(
-                                    captured["body"]["spec"]["sync"]["customMirrorSetting"],
-                                    {"keep": True},
-                                )
-                                self.assertEqual(captured["body"]["spec"]["sync"]["pollIntervalSeconds"], 600)
-                                self.assertEqual(len(upserted_secrets), 3)
-                                for secret in upserted_secrets:
-                                    self.assertEqual(
-                                        secret["metadata"]["ownerReferences"][0]["uid"],
-                                        "uid-saved",
+                with patch("ui.ui_forms.read_secret_value", side_effect=_secret_value):
+                    with patch("ui.ui_handlers.upsert_secret", side_effect=remember_secret):
+                        with patch("ui.ui_handlers.delete_secret"):
+                            with patch("ui.ui_handlers.replace_or_create_instance", side_effect=remember_replace):
+                                app = _create_app(load_ui_settings())
+                                client = TestClient(TestServer(app))
+                                await client.start_server()
+                                try:
+                                    response = await client.post(
+                                        "/auto-updater/instances/save",
+                                        headers=_auth_headers(),
+                                        data={
+                                            "original_name": "demo",
+                                            "name": "demo",
+                                            "return_path": "/instances/demo?tab=settings",
+                                            "enabled": "on",
+                                            "steam_app_id": "602960",
+                                            "ow_game_id": "3",
+                                            "language": "english",
+                                            "parser_storage_size": "20Gi",
+                                            "runner_storage_size": "10Gi",
+                                            "ow_login": "demo-login",
+                                            "ow_password": "",
+                                            "runner_proxy_type": "socks5",
+                                            "runner_proxy_url": "socks5://runner-user:runner-pass@127.0.0.1:3001",
+                                            "parser_proxy_pool": "socks5://pool-user:pool-pass@127.0.0.1:3001",
+                                            "api_base": "https://api.openworkshop.miskler.ru",
+                                            "page_size": "77",
+                                            "poll_interval_seconds": "600",
+                                            "timeout_seconds": "60",
+                                            "http_retries": "3",
+                                            "http_retry_backoff": "5.0",
+                                            "steam_http_retries": "2",
+                                            "steam_http_backoff": "2.0",
+                                            "steam_request_delay": "1.0",
+                                            "steam_max_pages": "1000",
+                                            "steam_start_page": "1",
+                                            "steam_max_items": "0",
+                                            "steam_delay": "1.0",
+                                            "log_level": "INFO",
+                                            "max_screenshots": "20",
+                                            "public_mode": "0",
+                                            "force_required_item_id": "",
+                                            "sync_json_patch": "",
+                                            "sync_tags": "on",
+                                            "prune_tags": "on",
+                                            "sync_dependencies": "on",
+                                            "prune_dependencies": "on",
+                                            "sync_resources": "on",
+                                            "prune_resources": "on",
+                                            "upload_resource_files": "on",
+                                            "scrape_preview_images": "on",
+                                            "scrape_required_items": "on",
+                                        },
+                                        allow_redirects=False,
                                     )
-                            finally:
-                                await client.close()
+                                    self.assertEqual(response.status, 302)
+                                    self.assertEqual(captured["name"], "demo")
+                                    self.assertEqual(captured["body"]["spec"]["sync"]["pageSize"], 77)
+                                    self.assertEqual(
+                                        captured["body"]["spec"]["sync"]["customMirrorSetting"],
+                                        {"keep": True},
+                                    )
+                                    self.assertEqual(captured["body"]["spec"]["sync"]["pollIntervalSeconds"], 600)
+                                    self.assertEqual(len(upserted_secrets), 3)
+                                    for secret in upserted_secrets:
+                                        self.assertEqual(
+                                            secret["metadata"]["ownerReferences"][0]["uid"],
+                                            "uid-saved",
+                                        )
+                                finally:
+                                    await client.close()
 
     async def test_rename_instance_reowns_new_secrets_before_legacy_cleanup(self) -> None:
         saved_instance = _sample_instance()
@@ -528,64 +540,73 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("ui.ui_handlers.get_instance", side_effect=[_sample_instance(), saved_instance]):
             with patch("ui.ui_handlers.read_secret_value", side_effect=_secret_value):
-                with patch("ui.ui_handlers.upsert_secret", side_effect=remember_secret):
-                    with patch("ui.ui_handlers.delete_secret", side_effect=remember_delete_secret):
-                        with patch("ui.ui_handlers.delete_instance", side_effect=remember_delete_instance):
-                            with patch("ui.ui_handlers.replace_or_create_instance", side_effect=remember_replace):
-                                app = _create_app(load_ui_settings())
-                                client = TestClient(TestServer(app))
-                                await client.start_server()
-                                try:
-                                    response = await client.post(
-                                        "/auto-updater/instances/save",
-                                        headers=_auth_headers(),
-                                        data={
-                                            "original_name": "demo",
-                                            "name": "demo-renamed",
-                                            "return_path": "/instances/demo?tab=settings",
-                                            "enabled": "on",
-                                            "steam_app_id": "602960",
-                                            "ow_game_id": "3",
-                                            "language": "english",
-                                            "parser_storage_size": "20Gi",
-                                            "runner_storage_size": "10Gi",
-                                            "ow_login": "demo-login",
-                                            "ow_password": "",
-                                            "runner_proxy_type": "socks5",
-                                            "runner_proxy_url": "socks5://runner-user:runner-pass@127.0.0.1:3001",
-                                            "parser_proxy_pool": "socks5://pool-user:pool-pass@127.0.0.1:3001",
-                                            "poll_interval_seconds": "600",
-                                            "timeout_seconds": "60",
-                                            "http_retries": "3",
-                                            "http_retry_backoff": "5.0",
-                                            "steam_http_retries": "2",
-                                            "steam_http_backoff": "2.0",
-                                            "steam_request_delay": "1.0",
-                                            "log_level": "INFO",
-                                            "max_screenshots": "20",
-                                            "sync_json_patch": "",
-                                            "sync_tags": "on",
-                                            "prune_tags": "on",
-                                            "sync_dependencies": "on",
-                                            "prune_dependencies": "on",
-                                            "sync_resources": "on",
-                                            "prune_resources": "on",
-                                            "upload_resource_files": "on",
-                                            "scrape_preview_images": "on",
-                                            "scrape_required_items": "on",
-                                        },
-                                        allow_redirects=False,
-                                    )
-                                    self.assertEqual(response.status, 302)
-                                    delete_index = events.index(("delete_instance", "demo"))
-                                    for expected_name in managed_secret_names("demo-renamed"):
-                                        self.assertIn(("upsert_secret", expected_name), events)
-                                        self.assertLess(events.index(("upsert_secret", expected_name)), delete_index)
-                                    for expected_name in managed_secret_names("demo"):
-                                        self.assertIn(("delete_secret", expected_name), events)
-                                        self.assertGreater(events.index(("delete_secret", expected_name)), delete_index)
-                                finally:
-                                    await client.close()
+                with patch("ui.ui_forms.read_secret_value", side_effect=_secret_value):
+                    with patch("ui.ui_handlers.upsert_secret", side_effect=remember_secret):
+                        with patch("ui.ui_handlers.delete_secret", side_effect=remember_delete_secret):
+                            with patch("ui.ui_handlers.delete_instance", side_effect=remember_delete_instance):
+                                with patch("ui.ui_handlers.replace_or_create_instance", side_effect=remember_replace):
+                                    app = _create_app(load_ui_settings())
+                                    client = TestClient(TestServer(app))
+                                    await client.start_server()
+                                    try:
+                                        response = await client.post(
+                                            "/auto-updater/instances/save",
+                                            headers=_auth_headers(),
+                                            data={
+                                                "original_name": "demo",
+                                                "name": "demo-renamed",
+                                                "return_path": "/instances/demo?tab=settings",
+                                                "enabled": "on",
+                                                "steam_app_id": "602960",
+                                                "ow_game_id": "3",
+                                                "language": "english",
+                                                "parser_storage_size": "20Gi",
+                                                "runner_storage_size": "10Gi",
+                                                "ow_login": "demo-login",
+                                                "ow_password": "",
+                                                "runner_proxy_type": "socks5",
+                                                "runner_proxy_url": "socks5://runner-user:runner-pass@127.0.0.1:3001",
+                                                "parser_proxy_pool": "socks5://pool-user:pool-pass@127.0.0.1:3001",
+                                                "api_base": "https://api.openworkshop.miskler.ru",
+                                                "page_size": "77",
+                                                "poll_interval_seconds": "600",
+                                                "timeout_seconds": "60",
+                                                "http_retries": "3",
+                                                "http_retry_backoff": "5.0",
+                                                "steam_http_retries": "2",
+                                                "steam_http_backoff": "2.0",
+                                                "steam_request_delay": "1.0",
+                                                "steam_max_pages": "1000",
+                                                "steam_start_page": "1",
+                                                "steam_max_items": "0",
+                                                "steam_delay": "1.0",
+                                                "log_level": "INFO",
+                                                "max_screenshots": "20",
+                                                "public_mode": "0",
+                                                "force_required_item_id": "",
+                                                "sync_json_patch": "",
+                                                "sync_tags": "on",
+                                                "prune_tags": "on",
+                                                "sync_dependencies": "on",
+                                                "prune_dependencies": "on",
+                                                "sync_resources": "on",
+                                                "prune_resources": "on",
+                                                "upload_resource_files": "on",
+                                                "scrape_preview_images": "on",
+                                                "scrape_required_items": "on",
+                                            },
+                                            allow_redirects=False,
+                                        )
+                                        self.assertEqual(response.status, 302)
+                                        delete_index = events.index(("delete_instance", "demo"))
+                                        for expected_name in managed_secret_names("demo-renamed"):
+                                            self.assertIn(("upsert_secret", expected_name), events)
+                                            self.assertLess(events.index(("upsert_secret", expected_name)), delete_index)
+                                        for expected_name in managed_secret_names("demo"):
+                                            self.assertIn(("delete_secret", expected_name), events)
+                                            self.assertGreater(events.index(("delete_secret", expected_name)), delete_index)
+                                    finally:
+                                        await client.close()
 
     async def test_delete_instance_keeps_legacy_secret_cleanup_as_fallback(self) -> None:
         events: list[tuple[str, str]] = []

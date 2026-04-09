@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from aiohttp import web
 
-from core.config import Config, load_config
-from kube.kube_client import merge_instance_status
+from core.config import Config, load_config, parse_list
+from core.instance_schema import iter_sync_env_items, load_sync_config_from_env
+from kube.kube_client import get_instance, merge_instance_status, read_secret_value
+from kube.mirror_instance import normalize_instance, runner_service_url
 from core.log_tags import parser_log_handler
 from ow.ow_api import ApiClient, load_api_limits, ow_get_game
 from steam.steam_api import (
@@ -24,6 +27,18 @@ from steam.steam_mod import (
 from sync.syncer import ensure_game, sync_mods
 from core.telemetry import init_telemetry, shutdown_telemetry, start_span
 from core.utils import ensure_dir, set_download_request_policy
+
+_CLIENT_REINIT_FIELDS = {
+    "api_base",
+    "login_name",
+    "password",
+    "steam_app_id",
+    "game_id",
+    "timeout",
+    "http_retries",
+    "http_retry_backoff",
+    "language",
+}
 
 
 class ParserRuntime:
@@ -41,7 +56,7 @@ class ParserRuntime:
         self.last_error = ""
         self.syncing = False
 
-    def bootstrap(self) -> int:
+    def _apply_runtime_settings(self) -> None:
         set_steam_request_logging(self.cfg.log_steam_requests)
         set_steam_request_policy(
             self.cfg.steam_http_retries,
@@ -67,12 +82,13 @@ class ParserRuntime:
             self.cfg.steam_request_delay,
         )
 
+    def _reinitialize_client_state(self) -> bool:
         if not self.cfg.login_name or not self.cfg.password:
             logging.error("OW_LOGIN and OW_PASSWORD are required")
-            return 2
+            return False
         if self.cfg.steam_app_id <= 0 and self.cfg.game_id <= 0:
             logging.error("OW_STEAM_APP_ID or OW_GAME_ID is required")
-            return 2
+            return False
 
         api = ApiClient(
             self.cfg.api_base,
@@ -87,7 +103,7 @@ class ParserRuntime:
                 api.login()
         except Exception as exc:
             logging.error("Failed to authenticate: %s", exc)
-            return 2
+            return False
         with start_span("ow.load_api_limits"):
             load_api_limits(api)
 
@@ -98,11 +114,11 @@ class ParserRuntime:
                     game = ow_get_game(api, self.cfg.game_id)
             except Exception as exc:
                 logging.error("Failed to load game %s: %s", self.cfg.game_id, exc)
-                return 2
+                return False
             steam_app_id = int(game.get("source_id") or 0)
             if steam_app_id <= 0:
                 logging.error("OW game has no steam source_id, set OW_STEAM_APP_ID")
-                return 2
+                return False
 
         try:
             with start_span(
@@ -118,7 +134,7 @@ class ParserRuntime:
                 )
         except Exception as exc:
             logging.error("Failed to ensure game: %s", exc)
-            return 2
+            return False
 
         ensure_dir(Path(self.cfg.mirror_root))
         ensure_dir(Path(self.cfg.steam_root))
@@ -126,6 +142,109 @@ class ParserRuntime:
         self.game_id = game_id
         self.steam_app_id = steam_app_id
         logging.info("Using OW game %s for steam app %s", game_id, steam_app_id)
+        return True
+
+    def _refresh_config_from_cluster(self) -> None:
+        if not self.cfg.instance_name or not self.cfg.instance_namespace:
+            return
+        instance = normalize_instance(
+            get_instance(self.cfg.instance_namespace, self.cfg.instance_name)
+        )
+        spec = dict(instance.get("spec") or {})
+        source = dict(spec.get("source") or {})
+        sync = dict(spec.get("sync") or {})
+        credentials = dict(spec.get("credentials") or {})
+        parser = dict(spec.get("parser") or {})
+        sync_cfg = load_sync_config_from_env(dict(iter_sync_env_items(sync)))
+        credentials_secret = str(credentials.get("secretRef") or "").strip()
+        parser_proxy_secret = str(parser.get("proxyPoolSecretRef") or "").strip()
+        proxy_pool_value = ""
+        if parser_proxy_secret:
+            proxy_pool_value = read_secret_value(
+                self.cfg.instance_namespace,
+                parser_proxy_secret,
+                "proxyPool",
+            )
+        candidate_cfg = replace(
+            self.cfg,
+            api_base=str(sync_cfg["api_base"]),
+            login_name=read_secret_value(
+                self.cfg.instance_namespace,
+                credentials_secret,
+                "login",
+            ),
+            password=read_secret_value(
+                self.cfg.instance_namespace,
+                credentials_secret,
+                "password",
+            ),
+            steam_app_id=int(source.get("steamAppId") or 0),
+            game_id=int(source.get("owGameId") or 0),
+            page_size=int(sync_cfg["page_size"]),
+            poll_interval=int(sync_cfg["poll_interval"]),
+            timeout=int(sync_cfg["timeout"]),
+            http_retries=int(sync_cfg["http_retries"]),
+            http_retry_backoff=float(sync_cfg["http_retry_backoff"]),
+            run_once=bool(sync_cfg["run_once"]),
+            log_level=str(sync_cfg["log_level"]),
+            log_steam_requests=bool(sync_cfg["log_steam_requests"]),
+            steam_http_retries=int(sync_cfg["steam_http_retries"]),
+            steam_http_backoff=float(sync_cfg["steam_http_backoff"]),
+            steam_request_delay=float(sync_cfg["steam_request_delay"]),
+            steam_proxy_pool=parse_list(proxy_pool_value),
+            steam_proxy_scope="mod_pages" if parser_proxy_secret else "none",
+            steam_max_pages=int(sync_cfg["steam_max_pages"]),
+            steam_start_page=int(sync_cfg["steam_start_page"]),
+            steam_max_items=int(sync_cfg["steam_max_items"]),
+            steam_delay=float(sync_cfg["steam_delay"]),
+            max_screenshots=int(sync_cfg["max_screenshots"]),
+            upload_resource_files=bool(sync_cfg["upload_resource_files"]),
+            scrape_preview_images=bool(sync_cfg["scrape_preview_images"]),
+            scrape_required_items=bool(sync_cfg["scrape_required_items"]),
+            force_required_item_id=str(sync_cfg["force_required_item_id"]) or None,
+            public_mode=int(sync_cfg["public_mode"]),
+            without_author=bool(sync_cfg["without_author"]),
+            sync_tags=bool(sync_cfg["sync_tags"]),
+            prune_tags=bool(sync_cfg["prune_tags"]),
+            sync_dependencies=bool(sync_cfg["sync_dependencies"]),
+            prune_dependencies=bool(sync_cfg["prune_dependencies"]),
+            sync_resources=bool(sync_cfg["sync_resources"]),
+            prune_resources=bool(sync_cfg["prune_resources"]),
+            language=str(source.get("language") or "english").strip() or "english",
+            steamcmd_runner_url=runner_service_url(
+                self.cfg.instance_name,
+                self.cfg.instance_namespace,
+            ),
+        )
+        changed_fields = sorted(
+            field_name
+            for field_name in self.cfg.__dataclass_fields__
+            if getattr(candidate_cfg, field_name) != getattr(self.cfg, field_name)
+        )
+        if not changed_fields:
+            return
+        previous_cfg = self.cfg
+        self.cfg = candidate_cfg
+        try:
+            self._apply_runtime_settings()
+            if any(field_name in _CLIENT_REINIT_FIELDS for field_name in changed_fields):
+                if not self._reinitialize_client_state():
+                    raise RuntimeError(
+                        "Failed to reinitialize parser runtime from latest MirrorInstance config"
+                    )
+        except Exception:
+            self.cfg = previous_cfg
+            self._apply_runtime_settings()
+            raise
+        logging.info(
+            "Reloaded parser config from MirrorInstance: %s",
+            ", ".join(changed_fields),
+        )
+
+    def bootstrap(self) -> int:
+        self._apply_runtime_settings()
+        if not self._reinitialize_client_state():
+            return 2
         return 0
 
     async def run_forever(self) -> None:
@@ -157,6 +276,7 @@ class ParserRuntime:
             }
         )
         try:
+            await asyncio.to_thread(self._refresh_config_from_cluster)
             await asyncio.to_thread(
                 sync_mods,
                 self.api,
