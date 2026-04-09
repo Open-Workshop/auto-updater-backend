@@ -183,7 +183,7 @@ def _dashboard(
                 _summary_metric("Paused", counts["Disabled"], "muted"),
                 _summary_metric("CPU live", _resource_label(resource_totals, "cpuLabel"), "info"),
                 _summary_metric("Memory live", _resource_label(resource_totals, "memoryLabel"), "info"),
-                _summary_metric("Disk used / req", _resource_label(resource_totals, "diskLabel"), "muted"),
+                _summary_metric("Disk cap / used / req", _resource_label(resource_totals, "diskLabel"), "muted"),
             ]
         ),
         rows_html=_dashboard_rows(settings, items),

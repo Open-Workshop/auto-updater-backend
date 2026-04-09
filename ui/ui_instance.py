@@ -17,8 +17,21 @@ from kube.mirror_instance import (
 )
 from ui.ui_common import UISettings, _format_time, _url
 from ui.ui_formatting import _int_value, _sum_values
-from ui.ui_kube_utils import _get_cluster_cpu_capacity, _get_cluster_memory_capacity, _get_node_cpu_capacity, _get_node_memory_capacity
-from ui.ui_resources import _component_snapshots_for_names, _component_resource_metrics_for_names, _component_state, _resource_usage, _storage_request_bytes
+from ui.ui_kube_utils import (
+    _get_cluster_cpu_capacity,
+    _get_cluster_disk_stats,
+    _get_cluster_memory_capacity,
+    _get_node_cpu_capacity,
+    _get_node_memory_capacity,
+)
+from ui.ui_resources import (
+    _component_resource_metrics_for_names,
+    _component_snapshots_for_names,
+    _component_state,
+    _resource_usage,
+    _storage_capacity_bytes,
+    _storage_request_bytes,
+)
 
 
 def _derive_health(
@@ -127,6 +140,69 @@ def _instance_urls(settings: UISettings, name: str) -> dict[str, str]:
     }
 
 
+def _trusted_persistent_disk_used_bytes(
+    used_bytes: int | None,
+    reported_capacity_bytes: int | None,
+    expected_capacity_bytes: int | None,
+) -> int | None:
+    """Return PVC usage only when kubelet stats look scoped to the actual claim."""
+    if used_bytes is None:
+        return None
+    if expected_capacity_bytes is None or expected_capacity_bytes <= 0:
+        return None
+    if reported_capacity_bytes is None or reported_capacity_bytes <= 0:
+        return None
+    if reported_capacity_bytes > int(expected_capacity_bytes * 1.5):
+        return None
+    if used_bytes > int(expected_capacity_bytes * 1.1):
+        return None
+    return used_bytes
+
+
+def _rollup_component_resources(
+    parser_resources: dict[str, Any],
+    runner_resources: dict[str, Any],
+    *,
+    node_capacity_millicores: int | None,
+    node_capacity_bytes: int | None,
+) -> dict[str, Any]:
+    """Build a consistent total resource block from parser and runner resources."""
+    return _resource_usage(
+        cpu_millicores=_sum_values(
+            [
+                _int_value(parser_resources.get("cpuMilliCores")),
+                _int_value(runner_resources.get("cpuMilliCores")),
+            ]
+        ),
+        memory_bytes=_sum_values(
+            [
+                _int_value(parser_resources.get("memoryBytes")),
+                _int_value(runner_resources.get("memoryBytes")),
+            ]
+        ),
+        disk_capacity_bytes=_sum_values(
+            [
+                _int_value(parser_resources.get("diskCapacityBytes")),
+                _int_value(runner_resources.get("diskCapacityBytes")),
+            ]
+        ),
+        disk_used_bytes=_sum_values(
+            [
+                _int_value(parser_resources.get("diskUsedBytes")),
+                _int_value(runner_resources.get("diskUsedBytes")),
+            ]
+        ),
+        disk_requested_bytes=_sum_values(
+            [
+                _int_value(parser_resources.get("diskRequestedBytes")),
+                _int_value(runner_resources.get("diskRequestedBytes")),
+            ]
+        ),
+        node_capacity_millicores=node_capacity_millicores,
+        node_capacity_bytes=node_capacity_bytes,
+    )
+
+
 def _instance_summary(
     settings: UISettings,
     instance: dict[str, Any],
@@ -155,36 +231,42 @@ def _instance_summary(
     node_capacity_millicores = _get_node_cpu_capacity(node_name) if node_name else None
     node_capacity_bytes = _get_node_memory_capacity(node_name) if node_name else None
     logging.debug("Instance %s: node_capacity_millicores=%r, node_capacity_bytes=%r", name, node_capacity_millicores, node_capacity_bytes)
-    
+
+    parser_disk_capacity_bytes = _storage_capacity_bytes(normalized, "parser")
+    parser_disk_requested_bytes = _storage_request_bytes(normalized, "parser")
+    parser_disk_used_bytes = _trusted_persistent_disk_used_bytes(
+        _int_value(parser_resource_snapshot.get("diskUsedBytes")),
+        _int_value(parser_resource_snapshot.get("diskReportedCapacityBytes")),
+        parser_disk_capacity_bytes,
+    )
     parser_resources = _resource_usage(
         cpu_millicores=_int_value(parser_resource_snapshot.get("cpuMilliCores")),
         memory_bytes=_int_value(parser_resource_snapshot.get("memoryBytes")),
-        disk_used_bytes=_int_value(parser_resource_snapshot.get("diskUsedBytes")),
-        disk_requested_bytes=_storage_request_bytes(normalized, "parser"),
+        disk_capacity_bytes=parser_disk_capacity_bytes,
+        disk_used_bytes=parser_disk_used_bytes,
+        disk_requested_bytes=parser_disk_requested_bytes,
         node_capacity_millicores=node_capacity_millicores,
         node_capacity_bytes=node_capacity_bytes,
+    )
+    runner_disk_capacity_bytes = _storage_capacity_bytes(normalized, "runner")
+    runner_disk_requested_bytes = _storage_request_bytes(normalized, "runner")
+    runner_disk_used_bytes = _trusted_persistent_disk_used_bytes(
+        _int_value(runner_resource_snapshot.get("diskUsedBytes")),
+        _int_value(runner_resource_snapshot.get("diskReportedCapacityBytes")),
+        runner_disk_capacity_bytes,
     )
     runner_resources = _resource_usage(
         cpu_millicores=_int_value(runner_resource_snapshot.get("cpuMilliCores")),
         memory_bytes=_int_value(runner_resource_snapshot.get("memoryBytes")),
-        disk_used_bytes=_int_value(runner_resource_snapshot.get("diskUsedBytes")),
-        disk_requested_bytes=_storage_request_bytes(normalized, "runner"),
+        disk_capacity_bytes=runner_disk_capacity_bytes,
+        disk_used_bytes=runner_disk_used_bytes,
+        disk_requested_bytes=runner_disk_requested_bytes,
         node_capacity_millicores=node_capacity_millicores,
         node_capacity_bytes=node_capacity_bytes,
     )
-    total_resources = _resource_usage(
-        cpu_millicores=_sum_values(
-            [parser_resources["cpuMilliCores"], runner_resources["cpuMilliCores"]]
-        ),
-        memory_bytes=_sum_values(
-            [parser_resources["memoryBytes"], runner_resources["memoryBytes"]]
-        ),
-        disk_used_bytes=_sum_values(
-            [parser_resources["diskUsedBytes"], runner_resources["diskUsedBytes"]]
-        ),
-        disk_requested_bytes=_sum_values(
-            [parser_resources["diskRequestedBytes"], runner_resources["diskRequestedBytes"]]
-        ),
+    total_resources = _rollup_component_resources(
+        parser_resources,
+        runner_resources,
         node_capacity_millicores=node_capacity_millicores,
         node_capacity_bytes=node_capacity_bytes,
     )
@@ -270,27 +352,74 @@ def _load_instance_summary(settings: UISettings, name: str) -> dict[str, Any]:
 def _dashboard_resource_totals(items: list[dict[str, Any]]) -> dict[str, Any]:
     """Calculate total resource usage across all instances."""
     from ui.ui_formatting import _int_value
-    
+
     cpu_millicores = _sum_values(
-        [_int_value(dict(item.get("resources") or {}).get("cpuMilliCores")) for item in items]
+        [
+            _sum_values(
+                [
+                    _int_value(
+                        dict(dict(item.get("parser") or {}).get("resources") or {}).get(
+                            "cpuMilliCores"
+                        )
+                    ),
+                    _int_value(
+                        dict(dict(item.get("runner") or {}).get("resources") or {}).get(
+                            "cpuMilliCores"
+                        )
+                    ),
+                ]
+            )
+            for item in items
+        ]
     )
     memory_bytes = _sum_values(
-        [_int_value(dict(item.get("resources") or {}).get("memoryBytes")) for item in items]
-    )
-    disk_used_bytes = _sum_values(
-        [_int_value(dict(item.get("resources") or {}).get("diskUsedBytes")) for item in items]
+        [
+            _sum_values(
+                [
+                    _int_value(
+                        dict(dict(item.get("parser") or {}).get("resources") or {}).get(
+                            "memoryBytes"
+                        )
+                    ),
+                    _int_value(
+                        dict(dict(item.get("runner") or {}).get("resources") or {}).get(
+                            "memoryBytes"
+                        )
+                    ),
+                ]
+            )
+            for item in items
+        ]
     )
     disk_requested_bytes = _sum_values(
-        [_int_value(dict(item.get("resources") or {}).get("diskRequestedBytes")) for item in items]
+        [
+            _sum_values(
+                [
+                    _int_value(
+                        dict(dict(item.get("parser") or {}).get("resources") or {}).get(
+                            "diskRequestedBytes"
+                        )
+                    ),
+                    _int_value(
+                        dict(dict(item.get("runner") or {}).get("resources") or {}).get(
+                            "diskRequestedBytes"
+                        )
+                    ),
+                ]
+            )
+            for item in items
+        ]
     )
     cluster_capacity_millicores = _get_cluster_cpu_capacity()
     cluster_capacity_bytes = _get_cluster_memory_capacity()
+    cluster_disk_stats = _get_cluster_disk_stats()
     logging.debug("_dashboard_resource_totals: cpu_millicores=%r, memory_bytes=%r, cluster_capacity_millicores=%r, cluster_capacity_bytes=%r",
                   cpu_millicores, memory_bytes, cluster_capacity_millicores, cluster_capacity_bytes)
     return _resource_usage(
         cpu_millicores=cpu_millicores,
         memory_bytes=memory_bytes,
-        disk_used_bytes=disk_used_bytes,
+        disk_capacity_bytes=_int_value(cluster_disk_stats.get("capacityBytes")),
+        disk_used_bytes=_int_value(cluster_disk_stats.get("usedBytes")),
         disk_requested_bytes=disk_requested_bytes,
         node_capacity_millicores=cluster_capacity_millicores,
         node_capacity_bytes=cluster_capacity_bytes,

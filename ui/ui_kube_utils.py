@@ -150,6 +150,55 @@ def _get_cluster_memory_capacity() -> int | None:
         return None
 
 
+def _get_cluster_disk_stats() -> dict[str, int | None]:
+    """Get total filesystem capacity and used bytes across cluster nodes."""
+    total_capacity = 0
+    total_used = 0
+    capacity_seen = False
+    used_seen = False
+    try:
+        nodes = get_kube_clients().core.list_node().items or []
+    except Exception as exc:
+        logging.error("_get_cluster_disk_stats: failed to list nodes: %s", exc)
+        return {"capacityBytes": None, "usedBytes": None}
+    for node in nodes:
+        node_name = str(getattr(getattr(node, "metadata", None), "name", "") or "")
+        if not node_name:
+            continue
+        try:
+            summary = _read_node_stats_summary(node_name)
+        except ApiException as exc:
+            logging.warning(
+                "_get_cluster_disk_stats: ApiException for node %s status=%s body=%r",
+                node_name,
+                exc.status,
+                exc.body,
+            )
+            if exc.status in {403, 404, 503}:
+                continue
+            raise
+        except json.JSONDecodeError:
+            logging.warning(
+                "_get_cluster_disk_stats: failed to decode stats summary for node %s",
+                node_name,
+            )
+            continue
+        node_stats = dict(summary.get("node") or {})
+        fs_stats = dict(node_stats.get("fs") or {})
+        capacity_value = _int_value(fs_stats.get("capacityBytes"))
+        used_value = _int_value(fs_stats.get("usedBytes"))
+        if capacity_value is not None:
+            total_capacity += capacity_value
+            capacity_seen = True
+        if used_value is not None:
+            total_used += used_value
+            used_seen = True
+    return {
+        "capacityBytes": total_capacity if capacity_seen else None,
+        "usedBytes": total_used if used_seen else None,
+    }
+
+
 def _pod_usage_metrics(namespace: str, pod_names: set[str]) -> dict[str, dict[str, int | None]]:
     """Get CPU, memory, and network usage metrics for pods."""
     logging.debug("_pod_usage_metrics: namespace=%s, pod_names=%r", namespace, pod_names)

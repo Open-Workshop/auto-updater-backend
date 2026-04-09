@@ -91,7 +91,10 @@ def _sum_values(values: list[int | None]) -> int | None:
 
 def _format_decimal(value: float, digits: int) -> str:
     """Format a decimal value with specified digits, removing trailing zeros."""
-    return f"{value:.{digits}f}".rstrip("0").rstrip(".")
+    formatted = f"{value:.{digits}f}"
+    if "." not in formatted:
+        return formatted
+    return formatted.rstrip("0").rstrip(".")
 
 
 def _format_cpu_millicores(value: int | None) -> str:
@@ -149,12 +152,27 @@ def _format_memory_percent(memory_bytes: int | None, node_capacity_bytes: int | 
     return f"{_format_bytes(memory_bytes)} ({_format_decimal(percent, 1)}%)"
 
 
-def _format_disk_usage(used_bytes: int | None, requested_bytes: int | None) -> str:
-    """Format disk usage as a human-readable string."""
-    if used_bytes is not None and requested_bytes is not None:
-        return f"{_format_bytes(used_bytes)} / {_format_bytes(requested_bytes)} req"
-    if used_bytes is not None:
-        return f"{_format_bytes(used_bytes)} used"
-    if requested_bytes is not None:
-        return f"{_format_bytes(requested_bytes)} req"
-    return "n/a"
+def _format_disk_usage(
+    capacity_bytes: int | None,
+    used_bytes: int | None,
+    requested_bytes: int | None,
+) -> str:
+    """Format disk capacity, usage, and requested storage as a readable string."""
+    if (
+        capacity_bytes is None
+        and used_bytes is None
+        and requested_bytes is None
+    ):
+        return "n/a"
+    parts = []
+    if capacity_bytes is not None or used_bytes is not None or requested_bytes is not None:
+        parts.append(f"{_format_bytes(capacity_bytes)} cap" if capacity_bytes is not None else "n/a cap")
+    if used_bytes is not None or capacity_bytes is not None or requested_bytes is not None:
+        parts.append(f"{_format_bytes(used_bytes)} used" if used_bytes is not None else "n/a used")
+    if requested_bytes is not None or capacity_bytes is not None or used_bytes is not None:
+        parts.append(
+            f"{_format_bytes(requested_bytes)} req"
+            if requested_bytes is not None
+            else "n/a req"
+        )
+    return " / ".join(parts)

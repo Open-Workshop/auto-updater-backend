@@ -47,11 +47,12 @@ def _sample_summary() -> dict:
             "resources": {
                 "cpuMilliCores": 42,
                 "memoryBytes": 155189248,
+                "diskCapacityBytes": 21474836480,
                 "diskUsedBytes": 7516192768,
                 "diskRequestedBytes": 21474836480,
                 "cpuLabel": "42m",
                 "memoryLabel": "148Mi",
-                "diskLabel": "7Gi / 20Gi req",
+                "diskLabel": "20Gi cap / 7Gi used / 20Gi req",
             },
         },
         "runner": {
@@ -65,21 +66,23 @@ def _sample_summary() -> dict:
             "resources": {
                 "cpuMilliCores": 88,
                 "memoryBytes": 127926272,
+                "diskCapacityBytes": 10737418240,
                 "diskUsedBytes": 536870912,
                 "diskRequestedBytes": 10737418240,
                 "cpuLabel": "88m",
                 "memoryLabel": "122Mi",
-                "diskLabel": "512Mi / 10Gi req",
+                "diskLabel": "10Gi cap / 512Mi used / 10Gi req",
             },
         },
         "resources": {
             "cpuMilliCores": 130,
             "memoryBytes": 283115520,
+            "diskCapacityBytes": 32212254720,
             "diskUsedBytes": 8053063680,
             "diskRequestedBytes": 32212254720,
             "cpuLabel": "130m",
             "memoryLabel": "270Mi",
-            "diskLabel": "7.5Gi / 30Gi req",
+            "diskLabel": "30Gi cap / 7.5Gi used / 30Gi req",
         },
         "conditions": [{"type": "Ready", "status": "True"}],
         "urls": {
@@ -200,7 +203,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Search instances", text)
                 self.assertIn("Running sync", text)
                 self.assertIn("CPU live", text)
-                self.assertIn("Disk used / req", text)
+                self.assertIn("Disk cap / used / req", text)
                 self.assertIn("Resources", text)
                 self.assertIn("/auto-updater/assets/app.css", text)
                 self.assertIn("/auto-updater/assets/dashboard.js", text)
@@ -232,7 +235,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(payload["items"][0]["health"], "Healthy")
                 self.assertEqual(payload["counts"]["Healthy"], 1)
                 self.assertEqual(payload["resources"]["cpuLabel"], "130m")
-                self.assertEqual(payload["resources"]["diskLabel"], "7.5Gi / 30Gi req")
+                self.assertEqual(payload["resources"]["diskLabel"], "30Gi cap / 7.5Gi used / 30Gi req")
             finally:
                 await client.close()
 

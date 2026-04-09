@@ -129,7 +129,7 @@
       metricHtml("Paused", counts.Disabled, "muted"),
       metricHtml("CPU live", resourceLabel(resources, "cpuLabel"), "info"),
       metricHtml("Memory live", resourceLabel(resources, "memoryLabel"), "info"),
-      metricHtml("Disk used / req", resourceLabel(resources, "diskLabel"), "muted"),
+      metricHtml("Disk cap / used / req", resourceLabel(resources, "diskLabel"), "muted"),
     ].join("");
   }
 
