@@ -92,6 +92,16 @@ class ResourceSyncer:
         self.prune = prune
         self.upload_files = upload_files
 
+    def clone(self, api: ApiClient) -> "ResourceSyncer":
+        return ResourceSyncer(
+            api,
+            self.mirror_root,
+            timeout=self.timeout,
+            enabled=self.enabled,
+            prune=self.prune,
+            upload_files=self.upload_files,
+        )
+
     def sync_resources(
         self,
         ow_mod_id: int,

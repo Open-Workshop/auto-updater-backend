@@ -254,6 +254,38 @@
     window.history.replaceState({}, "", url.toString());
   }
 
+  function buildRawPayload(rawText, requestTarget, requestTail, requestTag) {
+    return {
+      target: requestTarget,
+      tailLines: Number(requestTail) || 0,
+      selectedTag: requestTag,
+      availableTags: [],
+      tagOptions: availableTagOptions,
+      logText: rawText,
+      podName: podName.textContent || "n/a",
+      container: containerName.textContent || "n/a",
+      rxBytes: null,
+      txBytes: null,
+    };
+  }
+
+  async function parseLogResponse(response, requestTarget, requestTail, requestTag) {
+    const rawText = await response.text();
+    const contentType = response.headers.get("content-type") || "";
+    const trimmed = rawText.trim();
+    const maybeJson = contentType.includes("application/json")
+      || trimmed.startsWith("{")
+      || trimmed.startsWith("[");
+    if (maybeJson && trimmed) {
+      try {
+        return JSON.parse(rawText);
+      } catch (_error) {
+        // Show the raw upstream response in the log console instead of surfacing a JSON parse error.
+      }
+    }
+    return buildRawPayload(rawText, requestTarget, requestTail, requestTag);
+  }
+
   function setActiveTarget() {
     targetButtons.forEach((button) => {
       button.classList.toggle("active", button.dataset.target === currentTarget);
@@ -323,8 +355,8 @@
         headers: { Accept: "application/json" },
         cache: "no-store",
       });
-      const payload = await response.json();
-      if (!response.ok) {
+      const payload = await parseLogResponse(response, requestTarget, requestTail, requestTag);
+      if (!response.ok && !payload.logText) {
         throw new Error(payload.error || `HTTP ${response.status}`);
       }
       const staleResponse = requestTarget !== currentTarget

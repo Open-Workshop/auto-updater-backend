@@ -43,6 +43,7 @@ from sync.support import (
 CATALOG_BACKPRESSURE_HIGH_WATERMARK = 10
 CATALOG_BACKPRESSURE_LOW_WATERMARK = 5
 CATALOG_BACKPRESSURE_POLL_SECONDS = 0.2
+OW_WORKER_COUNT = 3
 
 
 class ModSyncer:
@@ -78,7 +79,9 @@ class ModSyncer:
         self.steam_mod_cache: Dict[str, SteamMod] = {}
         self.catalog_backpressure_high_watermark = CATALOG_BACKPRESSURE_HIGH_WATERMARK
         self.catalog_backpressure_low_watermark = CATALOG_BACKPRESSURE_LOW_WATERMARK
+        self.ow_worker_count = OW_WORKER_COUNT
         self._catalog_backpressure_active = False
+        self._ow_worker_state = threading.local()
         self.tag_manager = TagManager(
             api,
             game_id,
@@ -129,15 +132,25 @@ class ModSyncer:
             )
             ow_worker = threading.Thread(
                 target=self._run_ow_worker,
-                name="ow-worker",
+                name="ow-worker-1",
             )
+            ow_workers = [ow_worker]
+            for index in range(1, self.ow_worker_count):
+                ow_workers.append(
+                    threading.Thread(
+                        target=self._run_ow_worker,
+                        name=f"ow-worker-{index + 1}",
+                    )
+                )
             try:
                 producer.start()
                 downloader.start()
-                ow_worker.start()
+                for worker in ow_workers:
+                    worker.start()
                 producer.join()
                 downloader.join()
-                ow_worker.join()
+                for worker in ow_workers:
+                    worker.join()
             finally:
                 if self.lookup_api is not None:
                     self.lookup_api.session.close()
@@ -257,7 +270,17 @@ class ModSyncer:
             self.queue.finish_downloader()
 
     def _run_ow_worker(self) -> None:
+        worker_api: ApiClient | None = None
         try:
+            worker_api = self._create_lookup_api()
+            self._ow_worker_state.api = worker_api
+            self._ow_worker_state.tag_manager = self.tag_manager.clone(worker_api)
+            self._ow_worker_state.dependency_manager = self.dependency_manager.clone(
+                worker_api
+            )
+            self._ow_worker_state.resource_syncer = self.resource_syncer.clone(
+                worker_api
+            )
             while not self.stop_requested.is_set():
                 task = self.queue.pop_ready()
                 if task is not None:
@@ -268,6 +291,26 @@ class ModSyncer:
         except Exception as exc:
             OW_LOG.exception("OW worker failed")
             self._record_worker_error(exc)
+        finally:
+            if worker_api is not None:
+                worker_api.session.close()
+            self._ow_worker_state.__dict__.clear()
+
+    def _worker_api(self) -> ApiClient:
+        api = getattr(self._ow_worker_state, "api", None)
+        return api if api is not None else self.api
+
+    def _worker_tag_manager(self) -> TagManager:
+        manager = getattr(self._ow_worker_state, "tag_manager", None)
+        return manager if manager is not None else self.tag_manager
+
+    def _worker_dependency_manager(self) -> DependencyManager:
+        manager = getattr(self._ow_worker_state, "dependency_manager", None)
+        return manager if manager is not None else self.dependency_manager
+
+    def _worker_resource_syncer(self) -> ResourceSyncer:
+        syncer = getattr(self._ow_worker_state, "resource_syncer", None)
+        return syncer if syncer is not None else self.resource_syncer
 
     def _fetch_next_page(self) -> bool:
         with start_span(
@@ -431,11 +474,15 @@ class ModSyncer:
             self._process_metadata_update(task.item_id, task.payload)
         else:
             self._process_file_update(task.item_id, task.payload, task.archive_path)
-        self.dependency_manager.retry_pending()
+        self._worker_dependency_manager().retry_pending()
 
     def _process_metadata_update(self, item_id: str, payload: ModPayload) -> None:
         if payload.ow_mod_id is None:
             return
+        api = self._worker_api()
+        tag_manager = self._worker_tag_manager()
+        dependency_manager = self._worker_dependency_manager()
+        resource_syncer = self._worker_resource_syncer()
         OW_LOG.info("Updating OW mod %s metadata", payload.ow_mod_id)
         with start_span(
             "ow.mod_upsert",
@@ -445,7 +492,7 @@ class ModSyncer:
                 "ow.mode": "metadata_update",
             },
         ):
-            self.api.edit_mod(
+            api.edit_mod(
                 payload.ow_mod_id,
                 payload.title,
                 payload.short_desc,
@@ -456,13 +503,13 @@ class ModSyncer:
                 self.options.public_mode,
                 set_source=False,
             )
-        self.tag_manager.sync_mod_tags(payload.ow_mod_id, payload.tags)
-        self.dependency_manager.sync_dependencies(
+        tag_manager.sync_mod_tags(payload.ow_mod_id, payload.tags)
+        dependency_manager.sync_dependencies(
             payload.ow_mod_id,
             payload.deps,
             payload.deps_ok,
         )
-        self.resource_syncer.sync_resources(
+        resource_syncer.sync_resources(
             payload.ow_mod_id,
             payload.mod,
             payload.images,
@@ -475,10 +522,14 @@ class ModSyncer:
         payload: ModPayload,
         archive_path: Path,
     ) -> None:
+        api = self._worker_api()
+        tag_manager = self._worker_tag_manager()
+        dependency_manager = self._worker_dependency_manager()
+        resource_syncer = self._worker_resource_syncer()
         ow_mod = payload.ow_mod
         ow_mod_id = payload.ow_mod_id
         if ow_mod is None:
-            ow_mod = self.api.get_mod_by_source("steam", int(item_id))
+            ow_mod = api.get_mod_by_source("steam", int(item_id))
             if ow_mod is not None:
                 mod_id = ow_mod.get("id")
                 try:
@@ -512,7 +563,7 @@ class ModSyncer:
                     "ow.mode": "upsert_with_file",
                 },
             ):
-                ow_mod_id, created_now = self.api.upsert_mod_with_file(
+                ow_mod_id, created_now = api.upsert_mod_with_file(
                     payload.title,
                     payload.short_desc,
                     payload.description,
@@ -541,13 +592,13 @@ class ModSyncer:
             if ow_mod_id is None:
                 return
 
-            self.tag_manager.sync_mod_tags(int(ow_mod_id), payload.tags)
-            self.dependency_manager.sync_dependencies(
+            tag_manager.sync_mod_tags(int(ow_mod_id), payload.tags)
+            dependency_manager.sync_dependencies(
                 int(ow_mod_id),
                 payload.deps,
                 payload.deps_ok,
             )
-            self.resource_syncer.sync_resources(
+            resource_syncer.sync_resources(
                 int(ow_mod_id),
                 payload.mod,
                 payload.images,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from core.telemetry import start_span
@@ -16,14 +17,30 @@ class TagManager:
         *,
         enabled: bool,
         prune: bool,
+        name_to_id: Dict[str, int] | None = None,
+        id_to_name: Dict[int, str] | None = None,
+        lock: threading.Lock | None = None,
     ) -> None:
         self.api = api
         self.game_id = game_id
         self.page_size = page_size
         self.enabled = enabled
         self.prune = prune
-        self._name_to_id: Dict[str, int] = {}
-        self._id_to_name: Dict[int, str] = {}
+        self._name_to_id = name_to_id if name_to_id is not None else {}
+        self._id_to_name = id_to_name if id_to_name is not None else {}
+        self._lock = lock or threading.Lock()
+
+    def clone(self, api: ApiClient) -> "TagManager":
+        return TagManager(
+            api,
+            self.game_id,
+            self.page_size,
+            enabled=self.enabled,
+            prune=self.prune,
+            name_to_id=self._name_to_id,
+            id_to_name=self._id_to_name,
+            lock=self._lock,
+        )
 
     def preload(self) -> None:
         if not self.enabled:
@@ -39,8 +56,9 @@ class TagManager:
                 name = tag.get("name") or tag.get("tag_name")
                 tag_id = tag.get("id") or tag.get("tag_id")
                 if name and tag_id:
-                    self._name_to_id[str(name).lower()] = int(tag_id)
-                    self._id_to_name[int(tag_id)] = str(name)
+                    with self._lock:
+                        self._name_to_id[str(name).lower()] = int(tag_id)
+                        self._id_to_name[int(tag_id)] = str(name)
 
     def sync_mod_tags(self, ow_mod_id: int, tag_names: List[str]) -> None:
         if not self.enabled:
@@ -58,13 +76,15 @@ class TagManager:
             missing_tags = [tid for tid in desired_tag_ids if tid not in current_tag_ids]
             extra_tags = [tid for tid in current_tag_ids if tid not in desired_tag_ids]
             if missing_tags or extra_tags:
+                with self._lock:
+                    id_to_name = dict(self._id_to_name)
                 OW_LOG.debug(
                     "OW mod %s tags: current=%s desired=%s add=%s prune=%s",
                     ow_mod_id,
                     len(current_tag_ids),
                     len(desired_tag_ids),
-                    [self._id_to_name.get(tid, tid) for tid in missing_tags],
-                    [self._id_to_name.get(tid, tid) for tid in extra_tags],
+                    [id_to_name.get(tid, tid) for tid in missing_tags],
+                    [id_to_name.get(tid, tid) for tid in extra_tags],
                 )
             for tag_id in desired_tag_ids:
                 if tag_id not in current_tag_ids:
@@ -78,16 +98,17 @@ class TagManager:
         desired_tag_ids: List[int] = []
         for tag_name in tag_names:
             key = tag_name.lower()
-            tag_id = self._name_to_id.get(key)
-            if not tag_id:
-                try:
-                    tag_id = self.api.add_tag(tag_name)
-                except Exception as exc:
-                    OW_LOG.warning("Failed to add tag %s: %s", tag_name, exc)
-                    continue
-                self.api.associate_game_tag(self.game_id, tag_id)
-                self._name_to_id[key] = tag_id
-                self._id_to_name[tag_id] = tag_name
+            with self._lock:
+                tag_id = self._name_to_id.get(key)
+                if not tag_id:
+                    try:
+                        tag_id = self.api.add_tag(tag_name)
+                    except Exception as exc:
+                        OW_LOG.warning("Failed to add tag %s: %s", tag_name, exc)
+                        continue
+                    self.api.associate_game_tag(self.game_id, tag_id)
+                    self._name_to_id[key] = tag_id
+                    self._id_to_name[tag_id] = tag_name
             desired_tag_ids.append(tag_id)
         return desired_tag_ids
 
@@ -102,6 +123,8 @@ class DependencyManager:
         scrape_required_items: bool,
         enqueue_metadata: Callable[[str], None],
         lookup_mod: Callable[[str], Optional[Dict[str, Any]]],
+        pending_dependency_links: Dict[int, Dict[str, Any]] | None = None,
+        lock: threading.Lock | None = None,
     ) -> None:
         self.api = api
         self.enabled = enabled
@@ -109,7 +132,22 @@ class DependencyManager:
         self.scrape_required_items = scrape_required_items
         self.enqueue_metadata = enqueue_metadata
         self.lookup_mod = lookup_mod
-        self.pending_dependency_links: Dict[int, Dict[str, Any]] = {}
+        self.pending_dependency_links = (
+            pending_dependency_links if pending_dependency_links is not None else {}
+        )
+        self._lock = lock or threading.Lock()
+
+    def clone(self, api: ApiClient) -> "DependencyManager":
+        return DependencyManager(
+            api,
+            enabled=self.enabled,
+            prune=self.prune,
+            scrape_required_items=self.scrape_required_items,
+            enqueue_metadata=self.enqueue_metadata,
+            lookup_mod=self.lookup_mod,
+            pending_dependency_links=self.pending_dependency_links,
+            lock=self._lock,
+        )
 
     def queue_missing_sources(self, dep_source_ids: List[str]) -> None:
         if not self.enabled or not self.scrape_required_items:
@@ -162,19 +200,25 @@ class DependencyManager:
                 )
 
             if missing_sources:
-                self.pending_dependency_links[ow_mod_id] = {
-                    "deps": dep_source_ids,
-                    "deps_ok": deps_ok,
-                }
+                with self._lock:
+                    self.pending_dependency_links[ow_mod_id] = {
+                        "deps": dep_source_ids,
+                        "deps_ok": deps_ok,
+                    }
+            else:
+                with self._lock:
+                    self.pending_dependency_links.pop(ow_mod_id, None)
 
     def retry_pending(self) -> None:
-        if not self.pending_dependency_links:
+        with self._lock:
+            pending_items = list(self.pending_dependency_links.items())
+        if not pending_items:
             return
         with start_span(
             "dependencies.retry_pending",
-            {"deps.pending_mods": len(self.pending_dependency_links)},
+            {"deps.pending_mods": len(pending_items)},
         ):
-            for ow_mod_id, info in list(self.pending_dependency_links.items()):
+            for ow_mod_id, info in pending_items:
                 dep_source_ids = [str(dep) for dep in info.get("deps", [])]
                 deps_ok = bool(info.get("deps_ok", True))
                 desired_dep_ids: List[int] = []
@@ -194,4 +238,6 @@ class DependencyManager:
                         if dep_id not in desired_dep_ids:
                             self.api.delete_mod_dependency(ow_mod_id, dep_id)
                 if not missing_sources:
-                    self.pending_dependency_links.pop(ow_mod_id, None)
+                    with self._lock:
+                        if self.pending_dependency_links.get(ow_mod_id) == info:
+                            self.pending_dependency_links.pop(ow_mod_id, None)
