@@ -43,6 +43,7 @@ from sync.support import (
 CATALOG_BACKPRESSURE_HIGH_WATERMARK = 10
 CATALOG_BACKPRESSURE_LOW_WATERMARK = 5
 CATALOG_BACKPRESSURE_POLL_SECONDS = 0.2
+STEAM_DOWNLOADER_WORKER_COUNT = 2
 OW_WORKER_COUNT = 3
 
 
@@ -79,6 +80,9 @@ class ModSyncer:
         self.steam_mod_cache: Dict[str, SteamMod] = {}
         self.catalog_backpressure_high_watermark = CATALOG_BACKPRESSURE_HIGH_WATERMARK
         self.catalog_backpressure_low_watermark = CATALOG_BACKPRESSURE_LOW_WATERMARK
+        self.download_worker_count = (
+            STEAM_DOWNLOADER_WORKER_COUNT if self.steamcmd_runner_url else 1
+        )
         self.ow_worker_count = OW_WORKER_COUNT
         self._catalog_backpressure_active = False
         self._ow_worker_state = threading.local()
@@ -122,14 +126,18 @@ class ModSyncer:
             steam_stats_reset()
             self.tag_manager.preload()
             self.lookup_api = self._create_lookup_api()
+            self.queue.configure_downloaders(self.download_worker_count)
             producer = threading.Thread(
                 target=self._run_producer,
                 name="steam-producer",
             )
-            downloader = threading.Thread(
-                target=self._run_downloader,
-                name="steam-downloader",
-            )
+            downloaders = [
+                threading.Thread(
+                    target=self._run_downloader,
+                    name=f"steam-downloader-{index + 1}",
+                )
+                for index in range(self.download_worker_count)
+            ]
             ow_worker = threading.Thread(
                 target=self._run_ow_worker,
                 name="ow-worker-1",
@@ -144,11 +152,13 @@ class ModSyncer:
                 )
             try:
                 producer.start()
-                downloader.start()
+                for downloader in downloaders:
+                    downloader.start()
                 for worker in ow_workers:
                     worker.start()
                 producer.join()
-                downloader.join()
+                for downloader in downloaders:
+                    downloader.join()
                 for worker in ow_workers:
                     worker.join()
             finally:

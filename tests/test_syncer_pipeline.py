@@ -117,6 +117,7 @@ class SyncerPipelineTests(unittest.TestCase):
         syncer = self._make_syncer()
         self.assertEqual(syncer.catalog_backpressure_high_watermark, 10)
         self.assertEqual(syncer.catalog_backpressure_low_watermark, 5)
+        self.assertEqual(syncer.download_worker_count, 1)
         self.assertEqual(syncer.ow_worker_count, 3)
 
     def _payload(self, item_id: str):
@@ -310,6 +311,87 @@ class SyncerPipelineTests(unittest.TestCase):
         allow_finish.set()
         runner.join(timeout=2)
         self.assertFalse(runner.is_alive(), "syncer.run should complete")
+
+    def test_download_workers_can_overlap_archive_tasks(self) -> None:
+        syncer = self._make_syncer()
+        syncer.steamcmd_runner_url = "http://runner"
+        syncer.download_worker_count = 2
+        first_started = threading.Event()
+        second_started = threading.Event()
+        overlap_detected = threading.Event()
+        second_ready_processed = threading.Event()
+        allow_first_finish = threading.Event()
+        processed: list[str] = []
+        active: set[str] = set()
+        active_lock = threading.Lock()
+        fetch_calls = {"count": 0}
+
+        def fetch_next_page() -> bool:
+            fetch_calls["count"] += 1
+            if fetch_calls["count"] == 1:
+                syncer.queue.enqueue_metadata("1")
+                syncer.queue.enqueue_metadata("2")
+                return True
+            return False
+
+        syncer._fetch_next_page = fetch_next_page
+        syncer._fetch_existing_ow_mods = lambda ids: {
+            str(item_id): {"id": int(item_id), "source_id": int(item_id)}
+            for item_id in ids
+        }
+        syncer.mod_loader.load_batch = lambda ids: {
+            str(item_id): types.SimpleNamespace(item_id=str(item_id))
+            for item_id in ids
+        }
+        syncer._build_payload = lambda mod, workshop_id: self._payload(str(workshop_id))
+        syncer._needs_file_update = lambda _mod, _ow_mod: True
+
+        def process_download_task(task) -> None:
+            with active_lock:
+                active.add(task.item_id)
+                if task.item_id == "1":
+                    first_started.set()
+                if task.item_id == "2":
+                    second_started.set()
+                if len(active) >= 2:
+                    overlap_detected.set()
+            try:
+                if task.item_id == "1":
+                    if not allow_first_finish.wait(timeout=2):
+                        raise AssertionError("test did not release first archive task")
+                syncer.queue.enqueue_ready(
+                    task.item_id,
+                    task.payload,
+                    archive_path=Path(f"/tmp/{task.item_id}.zip"),
+                )
+            finally:
+                with active_lock:
+                    active.discard(task.item_id)
+
+        def process_ready_task(task) -> None:
+            processed.append(task.item_id)
+            if task.item_id == "2":
+                second_ready_processed.set()
+
+        syncer._process_download_task = process_download_task
+        syncer._process_ready_task = process_ready_task
+
+        runner = threading.Thread(target=syncer.run, name="test-syncer-run")
+        runner.start()
+        self.assertTrue(first_started.wait(timeout=1))
+        self.assertTrue(second_started.wait(timeout=1))
+        self.assertTrue(
+            overlap_detected.wait(timeout=1),
+            "download workers should overlap while the first archive task is still running",
+        )
+        self.assertTrue(
+            second_ready_processed.wait(timeout=1),
+            "second archive task should complete while the first one is still blocked",
+        )
+        allow_first_finish.set()
+        runner.join(timeout=2)
+        self.assertFalse(runner.is_alive(), "syncer.run should complete")
+        self.assertCountEqual(processed, ["1", "2"])
 
     def test_catalog_producer_waits_for_backlog_to_drop_below_low_watermark(self) -> None:
         syncer = self._make_syncer()

@@ -73,6 +73,8 @@ class WorkQueue:
         self._lock = threading.Lock()
         self._producer_done = threading.Event()
         self._downloader_done = threading.Event()
+        self._downloader_workers_total = 1
+        self._downloader_workers_done = 0
 
     def enqueue_metadata(self, item_id: str) -> None:
         item_id = str(item_id)
@@ -137,8 +139,17 @@ class WorkQueue:
     def producer_finished(self) -> bool:
         return self._producer_done.is_set()
 
+    def configure_downloaders(self, worker_count: int) -> None:
+        with self._lock:
+            self._downloader_workers_total = max(1, int(worker_count))
+            self._downloader_workers_done = 0
+            self._downloader_done.clear()
+
     def finish_downloader(self) -> None:
-        self._downloader_done.set()
+        with self._lock:
+            self._downloader_workers_done += 1
+            if self._downloader_workers_done >= self._downloader_workers_total:
+                self._downloader_done.set()
 
     def downloader_finished(self) -> bool:
         return self._downloader_done.is_set()
