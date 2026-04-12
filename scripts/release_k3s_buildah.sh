@@ -191,6 +191,9 @@ if count != 1:
 values_path.write_text(updated)
 PY
 
+echo "==> Applying MirrorInstance CRD"
+"${KUBE_CLI_ARR[@]}" apply -f "$CHART_PATH/crds/mirrorinstances.yaml"
+
 echo "==> Helm upgrade ${RELEASE_NAME}"
 export KUBECONFIG="$KUBECONFIG_PATH"
 helm upgrade "$RELEASE_NAME" "$CHART_PATH" -n "$NAMESPACE" -f "$VALUES_FILE"
@@ -214,6 +217,11 @@ for statefulset in "${MANAGED_STATEFULSETS[@]}"; do
   fi
   "${KUBE_CLI_ARR[@]}" -n "$NAMESPACE" rollout status "statefulset/${statefulset}" --timeout=240s
 done
+
+echo "==> Migrating MirrorInstance resources to canonical schema"
+python3 "$ROOT_DIR/scripts/migrate_mirrorinstances.py" \
+  --namespace "$NAMESPACE" \
+  --kube-cli "$KUBE_CLI"
 
 echo "==> Current workload status"
 "${KUBE_CLI_ARR[@]}" -n "$NAMESPACE" get deploy,sts,pod -o wide

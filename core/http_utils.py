@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Iterable
 from urllib.parse import urlparse
 import random
+import time
 
 DEFAULT_RETRY_STATUSES = {429, 500, 502, 503, 504}
 _DNS_ERROR_TOKENS = (
@@ -33,16 +34,57 @@ class ProxyPool:
     def __init__(self, proxies: Iterable[str] | None = None) -> None:
         self._proxies = clean_proxy_list(proxies)
         self._index = 0
+        self._reserved_until: dict[str, float] = {}
 
     def set(self, proxies: Iterable[str] | None) -> None:
         self._proxies = clean_proxy_list(proxies)
         self._index = 0
+        allowed = set(self._proxies)
+        self._reserved_until = {
+            proxy: reserved_until
+            for proxy, reserved_until in self._reserved_until.items()
+            if proxy in allowed
+        }
 
-    def next(self) -> str | None:
+    def reserve(
+        self,
+        proxy: str | None,
+        cooldown_seconds: float,
+        *,
+        now: float | None = None,
+    ) -> None:
+        if not proxy:
+            return
+        delay = max(0.0, float(cooldown_seconds))
+        if delay <= 0:
+            return
+        current_now = time.monotonic() if now is None else float(now)
+        reserved_until = current_now + delay
+        previous = self._reserved_until.get(proxy, 0.0)
+        if reserved_until > previous:
+            self._reserved_until[proxy] = reserved_until
+
+    def next(self, *, now: float | None = None) -> str | None:
         if not self._proxies:
             return None
-        proxy = self._proxies[self._index % len(self._proxies)]
-        self._index += 1
+        current_now = time.monotonic() if now is None else float(now)
+        fallback_index: int | None = None
+        fallback_until = 0.0
+        total = len(self._proxies)
+        for offset in range(total):
+            index = (self._index + offset) % total
+            proxy = self._proxies[index]
+            reserved_until = self._reserved_until.get(proxy, 0.0)
+            if reserved_until <= current_now:
+                self._index = index + 1
+                return proxy
+            if fallback_index is None or reserved_until < fallback_until:
+                fallback_index = index
+                fallback_until = reserved_until
+        if fallback_index is None:
+            return None
+        proxy = self._proxies[fallback_index]
+        self._index = fallback_index + 1
         return proxy
 
     def snapshot(self) -> list[str]:

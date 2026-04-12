@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 from aiohttp_socks import ProxyConnector
-from aiohttp_socks._errors import ProxyError
+from aiohttp_socks._errors import ProxyConnectionError, ProxyError, ProxyTimeoutError
 from selectolax.parser import HTMLParser
 
 from ow.bbcode import html_to_bbcode
@@ -24,6 +24,7 @@ from core.utils import dedupe_images, ensure_dir, normalize_image_url, extension
 DEFAULT_TIMEOUT = 20
 DEFAULT_IMAGE_CONCURRENCY = 6
 DEFAULT_RETRY_POLICY = RetryPolicy(retries=2, backoff=1.0, request_delay=0.0)
+PROXY_RESERVE_SECONDS = 120.0
 
 ImageTarget = Tuple[str, str, str]
 ImageDownload = Tuple[str, str, Path, str]
@@ -254,6 +255,24 @@ class SteamWorkshopClient:
     def set_proxy_images(self, enabled: bool) -> None:
         self.proxy_images = bool(enabled)
 
+    def _reserve_proxy(
+        self,
+        proxy: str | None,
+        exc: Exception,
+        *,
+        url: str,
+    ) -> None:
+        if not proxy:
+            return
+        self.proxy_pool.reserve(proxy, PROXY_RESERVE_SECONDS)
+        logging.warning(
+            "Steam proxy reserved for %.0fs after %s via %s url=%s",
+            PROXY_RESERVE_SECONDS,
+            type(exc).__name__,
+            mask_proxy(proxy),
+            url,
+        )
+
     @asynccontextmanager
     async def _session_for_request(
         self,
@@ -336,8 +355,16 @@ class SteamWorkshopClient:
                             return None
                         html_text = await response.text()
                         break
-            except (aiohttp.ClientError, asyncio.TimeoutError, ProxyError) as exc:
+            except (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                ProxyConnectionError,
+                ProxyError,
+                ProxyTimeoutError,
+            ) as exc:
                 last_exc = exc
+                if isinstance(exc, (ProxyTimeoutError, ProxyConnectionError)):
+                    self._reserve_proxy(chosen_proxy, exc, url=url)
                 if chosen_proxy and is_dns_error(exc) and attempt < attempts:
                     logging.warning(
                         "Steam proxy DNS error for url=%s via %s: %s",
@@ -502,8 +529,16 @@ class SteamWorkshopClient:
                                     temp_path.replace(path)
                                     temp_path = None
                                     return (res_type, url, path, digest.hexdigest())
-                        except (aiohttp.ClientError, asyncio.TimeoutError, ProxyError) as exc:
+                        except (
+                            aiohttp.ClientError,
+                            asyncio.TimeoutError,
+                            ProxyConnectionError,
+                            ProxyError,
+                            ProxyTimeoutError,
+                        ) as exc:
                             last_exc = exc
+                            if isinstance(exc, (ProxyTimeoutError, ProxyConnectionError)):
+                                self._reserve_proxy(chosen_proxy, exc, url=url)
                             if chosen_proxy and is_dns_error(exc) and attempt < attempts:
                                 logging.warning(
                                     "Steam proxy DNS error for %s via %s: %s",

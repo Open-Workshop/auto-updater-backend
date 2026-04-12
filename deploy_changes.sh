@@ -68,6 +68,9 @@ values_path.write_text(updated)
 PY
 
 # Helm upgrade
+echo "==> Applying MirrorInstance CRD..."
+k3s kubectl apply -f charts/auto-updater/crds/mirrorinstances.yaml
+
 echo "==> Running Helm upgrade..."
 helm upgrade auto-updater charts/auto-updater -n auto-updater -f "${VALUES_FILE}"
 
@@ -93,6 +96,11 @@ for statefulset in "${MANAGED_STATEFULSETS[@]}"; do
     fi
     k3s kubectl -n auto-updater rollout status "statefulset/${statefulset}" --timeout=240s
 done
+
+echo "==> Migrating MirrorInstance resources to canonical schema..."
+python3 scripts/migrate_mirrorinstances.py \
+    --namespace auto-updater \
+    --kube-cli "k3s kubectl"
 
 echo "==> Deployment completed successfully!"
 echo "==> Current workload status:"

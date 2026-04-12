@@ -81,7 +81,9 @@ helm upgrade --install auto-updater ./charts/auto-updater \
 - собирает образ через `buildah bud --layers`;
 - упаковывает образ в `docker-archive` вне build context и импортирует в `containerd`;
 - обновляет `image.tag` в values-файле;
+- явно применяет `MirrorInstance` CRD до `helm upgrade`, потому что Helm не обновляет CRD из каталога `crds/` сам;
 - делает `helm upgrade` и дожидается rollout у `operator`, `ui` и managed `StatefulSet`.
+- переводит существующие `MirrorInstance` в канонический `parser.*`-формат после релиза.
 
 Пример для нашего k3s-сценария:
 

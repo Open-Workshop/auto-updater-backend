@@ -40,10 +40,12 @@
 6. Собранный образ экспортируется в `docker-archive`.
 7. Архив импортируется в `containerd` k3s через `ctr`.
 8. В `/root/auto-updater-values.yaml` обновляется `image.tag`.
-9. Выполняется `helm upgrade`.
-10. Скрипт ждёт rollout `operator` и `ui`.
-11. Затем скрипт ждёт rollout managed `StatefulSet` для parser/runner инстансов.
-12. После rollout проверяются pod'ы, statefulset'ы и UI.
+9. Явно применяется `MirrorInstance` CRD через `kubectl apply`, потому что Helm не обновляет CRD из каталога `crds/` автоматически.
+10. Выполняется `helm upgrade`.
+11. Скрипт ждёт rollout `operator` и `ui`.
+12. Затем скрипт ждёт rollout managed `StatefulSet` для parser/runner инстансов.
+13. После rollout выполняется миграция существующих `MirrorInstance` в канонический `parser.*`-формат.
+14. После этого проверяются pod'ы, statefulset'ы и UI.
 
 ## 3. Подготовка изменений
 
