@@ -2,16 +2,84 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 try:
-    from ui.ui_proxy_stats import _load_proxy_statistics
+    from ui.ui_proxy_stats import _fetch_proxy_snapshot, _load_proxy_statistics
 except ModuleNotFoundError:
+    _fetch_proxy_snapshot = None
     _load_proxy_statistics = None
 
 
-@unittest.skipUnless(_load_proxy_statistics is not None, "ui dependencies are not installed")
+@unittest.skipUnless(
+    _load_proxy_statistics is not None and _fetch_proxy_snapshot is not None,
+    "ui dependencies are not installed",
+)
 class UIProxyStatsTests(unittest.TestCase):
+    def test_fetch_proxy_snapshot_normalizes_flat_proxy_payload(self) -> None:
+        settings = SimpleNamespace(namespace="auto-updater")
+        summary = {"name": "demo-a", "parser": {"podName": "demo-parser-0"}}
+        raw_payload = {
+            "generatedAt": "2026-04-29T11:15:00+00:00",
+            "windowSeconds": 3600.0,
+            "windowLabel": "1h",
+            "instanceName": "demo-a",
+            "workloadId": "parser",
+            "podName": "demo-parser-0",
+            "proxyConfigured": True,
+            "proxyPoolSize": 1,
+            "proxyScope": "mod_pages",
+            "stats": {
+                "windowSeconds": 3600.0,
+                "windowLabel": "1h",
+                "totalCalls": 3,
+                "successCalls": 2,
+                "failureCalls": 1,
+                "totalElapsedSeconds": 1.5,
+                "averageResponseMs": 500.0,
+                "recentRequests": 3,
+                "recentWindowSeconds": 3600.0,
+                "requestsPerSecond": 3 / 3600.0,
+                "requestsPerMinute": 3 / 60.0,
+                "errorCounts": {"ProxyError": 1},
+                "proxyCount": 1,
+            },
+            "proxies": [
+                {
+                    "proxyKey": "socks5://10.0.0.9:3001",
+                    "proxyLabel": "socks5://10.0.0.9:3001",
+                    "totalCalls": 3,
+                    "successCalls": 2,
+                    "failureCalls": 1,
+                    "totalElapsedSeconds": 1.5,
+                    "averageResponseMs": 500.0,
+                    "recentRequests": 3,
+                    "recentWindowSeconds": 3600.0,
+                    "windowSeconds": 3600.0,
+                    "windowLabel": "1h",
+                    "requestsPerSecond": 3 / 3600.0,
+                    "requestsPerMinute": 3 / 60.0,
+                    "errorCounts": {"ProxyError": 1},
+                }
+            ],
+        }
+        response = Mock()
+        response.ok = True
+        response.json.return_value = raw_payload
+
+        with patch("ui.ui_proxy_stats.requests.get", return_value=response):
+            payload = _fetch_proxy_snapshot(
+                settings,
+                summary,
+                window_spec="1h",
+                window_seconds=3600.0,
+            )
+
+        self.assertEqual(payload["proxyCount"], 1)
+        self.assertEqual(payload["stats"]["totalCalls"], 3)
+        self.assertEqual(payload["proxies"][0]["stats"]["totalCalls"], 3)
+        self.assertEqual(payload["proxies"][0]["stats"]["failureCalls"], 1)
+
     def test_merge_same_proxy_across_multiple_pods(self) -> None:
         settings = SimpleNamespace(namespace="auto-updater")
         summaries = [
@@ -57,7 +125,7 @@ class UIProxyStatsTests(unittest.TestCase):
                     {
                         "proxyKey": "socks5://10.0.0.9:3001",
                         "proxyLabel": "socks5://10.0.0.9:3001",
-                        "stats": proxy_stats,
+                        **proxy_stats,
                     }
                 ],
                 "error": "",

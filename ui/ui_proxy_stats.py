@@ -61,6 +61,13 @@ def _sort_error_counts(error_counts: dict[str, int]) -> dict[str, int]:
     }
 
 
+def _stats_payload(item: dict[str, Any]) -> dict[str, Any]:
+    stats = item.get("stats")
+    if isinstance(stats, dict):
+        return dict(stats)
+    return dict(item)
+
+
 def _normalize_stats(stats: dict[str, Any], window_seconds: float) -> dict[str, Any]:
     total_calls = int(stats.get("totalCalls") or stats.get("recentRequests") or 0)
     success_calls = int(stats.get("successCalls") or 0)
@@ -99,7 +106,7 @@ def _normalize_stats(stats: dict[str, Any], window_seconds: float) -> dict[str, 
 
 
 def _normalize_source_entry(item: dict[str, Any], window_seconds: float) -> dict[str, Any]:
-    stats = _normalize_stats(dict(item.get("stats") or {}), window_seconds)
+    stats = _normalize_stats(_stats_payload(item), window_seconds)
     pod_name = str(item.get("podName") or "").strip()
     instance_name = str(item.get("instanceName") or "").strip()
     proxy_count = int(item.get("proxyCount") or len(list(item.get("proxies") or [])))
@@ -159,7 +166,10 @@ def _fetch_proxy_snapshot(
     stats = _normalize_stats(dict(payload.get("stats") or {}), window_seconds or 3600.0)
     proxy_items: list[dict[str, Any]] = []
     for proxy in list(payload.get("proxies") or []):
-        proxy_stats = _normalize_stats(dict(proxy.get("stats") or {}), window_seconds or stats["windowSeconds"])
+        proxy_stats = _normalize_stats(
+            _stats_payload(dict(proxy or {})),
+            window_seconds or stats["windowSeconds"],
+        )
         proxy_key = str(proxy.get("proxyKey") or proxy.get("proxyLabel") or "").strip()
         proxy_label = str(proxy.get("proxyLabel") or proxy_key or "proxy").strip() or "proxy"
         proxy_items.append(
@@ -288,7 +298,8 @@ def _merge_proxy_sources(items: list[dict[str, Any]], window_seconds: float) -> 
         pod_name = str(item.get("podName") or "").strip()
         instance_name = str(item.get("instanceName") or "").strip()
         for proxy in list(item.get("proxies") or []):
-            stats = _normalize_stats(dict(proxy.get("stats") or {}), window_seconds)
+            proxy_data = dict(proxy or {})
+            stats = _normalize_stats(_stats_payload(proxy_data), window_seconds)
             proxy_key = str(proxy.get("proxyKey") or proxy.get("proxyLabel") or "").strip()
             if not proxy_key:
                 continue
