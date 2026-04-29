@@ -164,6 +164,94 @@ def _sample_instance() -> dict:
     }
 
 
+def _sample_proxy_payload() -> dict:
+    return {
+        "generatedAt": "2026-04-29T11:15:00+00:00",
+        "summary": {
+            "podsTotal": 2,
+            "podsReachable": 2,
+            "podsConfigured": 2,
+            "podsWorking": 2,
+            "totalCalls": 12,
+            "successCalls": 9,
+            "failureCalls": 3,
+            "averageResponseMs": 321.5,
+            "recentRequests": 6,
+            "recentWindowSeconds": 60.0,
+            "requestsPerSecond": 0.1,
+            "requestsPerMinute": 6.0,
+        },
+        "errorBreakdown": [
+            {"label": "ProxyTimeoutError", "count": 2},
+            {"label": "DNSError", "count": 1},
+        ],
+        "pods": [
+            {
+                "name": "demo",
+                "parserPod": "demo-parser-0",
+                "health": "Healthy",
+                "healthTone": "healthy",
+                "enabled": True,
+                "reachable": True,
+                "proxyConfigured": True,
+                "proxyPoolSize": 5,
+                "proxyScope": "mod_pages",
+                "statusLabel": "Working",
+                "statusTone": "healthy",
+                "generatedAt": "2026-04-29T11:15:00+00:00",
+                "stats": {
+                    "totalCalls": 8,
+                    "successCalls": 7,
+                    "failureCalls": 1,
+                    "totalElapsedSeconds": 2.25,
+                    "averageResponseMs": 281.25,
+                    "recentRequests": 4,
+                    "recentWindowSeconds": 60.0,
+                    "requestsPerSecond": 0.0667,
+                    "requestsPerMinute": 4.0,
+                    "errorCounts": {"ProxyTimeoutError": 1},
+                    "topError": {"label": "ProxyTimeoutError", "count": 1},
+                },
+                "urls": {
+                    "detail": "/auto-updater/instances/demo",
+                },
+                "error": "",
+            },
+            {
+                "name": "demo-2",
+                "parserPod": "demo-2-parser-0",
+                "health": "Degraded",
+                "healthTone": "warning",
+                "enabled": True,
+                "reachable": True,
+                "proxyConfigured": True,
+                "proxyPoolSize": 4,
+                "proxyScope": "mod_pages",
+                "statusLabel": "Degraded",
+                "statusTone": "warning",
+                "generatedAt": "2026-04-29T11:15:00+00:00",
+                "stats": {
+                    "totalCalls": 4,
+                    "successCalls": 2,
+                    "failureCalls": 2,
+                    "totalElapsedSeconds": 1.75,
+                    "averageResponseMs": 437.5,
+                    "recentRequests": 2,
+                    "recentWindowSeconds": 60.0,
+                    "requestsPerSecond": 0.0333,
+                    "requestsPerMinute": 2.0,
+                    "errorCounts": {"DNSError": 1, "ProxyTimeoutError": 1},
+                    "topError": {"label": "DNSError", "count": 1},
+                },
+                "urls": {
+                    "detail": "/auto-updater/instances/demo-2",
+                },
+                "error": "",
+            },
+        ],
+    }
+
+
 def _secret_value(_: str, __: str, key: str) -> str:
     values = {
         "login": "demo-login",
@@ -206,6 +294,8 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("CPU live", text)
                 self.assertIn("Disk cap / used / req", text)
                 self.assertIn("Resources", text)
+                self.assertIn("Proxy stats", text)
+                self.assertIn("/auto-updater/proxy-stats", text)
                 self.assertIn("/auto-updater/assets/app.css", text)
                 self.assertIn("/auto-updater/assets/dashboard.js", text)
             finally:
@@ -237,6 +327,39 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(payload["counts"]["Healthy"], 1)
                 self.assertEqual(payload["resources"]["cpuLabel"], "130m")
                 self.assertEqual(payload["resources"]["diskLabel"], "n/a cap / n/a used / 32.2GB req")
+            finally:
+                await client.close()
+
+    async def test_proxy_stats_page_renders_under_base_path(self) -> None:
+        with patch("ui.ui_handlers._load_proxy_statistics", return_value=_sample_proxy_payload()):
+            app = _create_app(load_ui_settings())
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                response = await client.get("/auto-updater/proxy-stats", headers=_auth_headers())
+                self.assertEqual(response.status, 200)
+                text = await response.text()
+                self.assertIn("Proxy Observatory", text)
+                self.assertIn("Pods with working proxy", text)
+                self.assertIn("Proxy calls", text)
+                self.assertIn("proxy_stats.js", text)
+                self.assertIn("proxy-chart-total", text)
+            finally:
+                await client.close()
+
+    async def test_proxy_stats_api_returns_json_under_base_path(self) -> None:
+        with patch("ui.ui_handlers._load_proxy_statistics", return_value=_sample_proxy_payload()):
+            app = _create_app(load_ui_settings())
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                response = await client.get("/auto-updater/api/proxy-stats", headers=_auth_headers())
+                self.assertEqual(response.status, 200)
+                payload = await response.json()
+                self.assertEqual(payload["summary"]["podsWorking"], 2)
+                self.assertEqual(payload["summary"]["failureCalls"], 3)
+                self.assertEqual(payload["errorBreakdown"][0]["label"], "ProxyTimeoutError")
+                self.assertEqual(payload["pods"][0]["statusLabel"], "Working")
             finally:
                 await client.close()
 

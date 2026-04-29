@@ -18,6 +18,7 @@ from aiohttp_socks._errors import ProxyConnectionError, ProxyError, ProxyTimeout
 from selectolax.parser import HTMLParser
 
 from ow.bbcode import html_to_bbcode
+from core.proxy_stats import proxy_error_type, record_proxy_request
 from core.http_utils import ProxyPool, RetryPolicy, is_dns_error, mask_proxy, parse_proxy_url
 from core.utils import dedupe_images, ensure_dir, normalize_image_url, extension_from_headers
 
@@ -320,6 +321,7 @@ class SteamWorkshopClient:
             chosen_proxy = proxy if proxy is not None else self.proxy_pool.next()
             last_proxy = chosen_proxy
             await self._throttle.wait()
+            start = time.monotonic()
             try:
                 async with self._session_for_request(
                     timeout_value,
@@ -333,6 +335,13 @@ class SteamWorkshopClient:
                         timeout=timeout_value,
                     ) as response:
                         if response.status in self.policy.retry_statuses and attempt < attempts:
+                            if chosen_proxy:
+                                record_proxy_request(
+                                    proxy=chosen_proxy,
+                                    success=False,
+                                    elapsed_seconds=time.monotonic() - start,
+                                    error_type=proxy_error_type(status_code=response.status),
+                                )
                             retry_after = response.headers.get("retry-after")
                             if retry_after:
                                 try:
@@ -347,6 +356,13 @@ class SteamWorkshopClient:
                             )
                             continue
                         if response.status != 200:
+                            if chosen_proxy:
+                                record_proxy_request(
+                                    proxy=chosen_proxy,
+                                    success=False,
+                                    elapsed_seconds=time.monotonic() - start,
+                                    error_type=proxy_error_type(status_code=response.status),
+                                )
                             logging.warning(
                                 "Steam page fetch failed for %s: HTTP %s",
                                 item_id,
@@ -354,6 +370,12 @@ class SteamWorkshopClient:
                             )
                             return None
                         html_text = await response.text()
+                        if chosen_proxy:
+                            record_proxy_request(
+                                proxy=chosen_proxy,
+                                success=True,
+                                elapsed_seconds=time.monotonic() - start,
+                            )
                         break
             except (
                 aiohttp.ClientError,
@@ -364,6 +386,13 @@ class SteamWorkshopClient:
                 ProxyTimeoutError,
             ) as exc:
                 last_exc = exc
+                if chosen_proxy:
+                    record_proxy_request(
+                        proxy=chosen_proxy,
+                        success=False,
+                        elapsed_seconds=time.monotonic() - start,
+                        error_type=proxy_error_type(exc),
+                    )
                 if isinstance(
                     exc,
                     (ProxyTimeoutError, ProxyConnectionError, asyncio.IncompleteReadError),
@@ -482,6 +511,7 @@ class SteamWorkshopClient:
                             chosen_proxy = None
                         last_proxy = chosen_proxy
                         await self._throttle.wait()
+                        start = time.monotonic()
                         try:
                             async with self._session_for_request(
                                 timeout_value,
@@ -498,6 +528,15 @@ class SteamWorkshopClient:
                                         response.status in self.policy.retry_statuses
                                         and attempt < attempts
                                     ):
+                                        if chosen_proxy:
+                                            record_proxy_request(
+                                                proxy=chosen_proxy,
+                                                success=False,
+                                                elapsed_seconds=time.monotonic() - start,
+                                                error_type=proxy_error_type(
+                                                    status_code=response.status
+                                                ),
+                                            )
                                         retry_after = response.headers.get("retry-after")
                                         if retry_after:
                                             try:
@@ -512,6 +551,15 @@ class SteamWorkshopClient:
                                         )
                                         continue
                                     if response.status != 200:
+                                        if chosen_proxy:
+                                            record_proxy_request(
+                                                proxy=chosen_proxy,
+                                                success=False,
+                                                elapsed_seconds=time.monotonic() - start,
+                                                error_type=proxy_error_type(
+                                                    status_code=response.status
+                                                ),
+                                            )
                                         logging.warning(
                                             "Steam image fetch failed for %s: HTTP %s",
                                             url,
@@ -532,6 +580,12 @@ class SteamWorkshopClient:
                                             digest.update(chunk)
                                     temp_path.replace(path)
                                     temp_path = None
+                                    if chosen_proxy:
+                                        record_proxy_request(
+                                            proxy=chosen_proxy,
+                                            success=True,
+                                            elapsed_seconds=time.monotonic() - start,
+                                        )
                                     return (res_type, url, path, digest.hexdigest())
                         except (
                             aiohttp.ClientError,
@@ -542,6 +596,13 @@ class SteamWorkshopClient:
                             ProxyTimeoutError,
                         ) as exc:
                             last_exc = exc
+                            if chosen_proxy:
+                                record_proxy_request(
+                                    proxy=chosen_proxy,
+                                    success=False,
+                                    elapsed_seconds=time.monotonic() - start,
+                                    error_type=proxy_error_type(exc),
+                                )
                             if isinstance(
                                 exc,
                                 (

@@ -173,6 +173,27 @@ class ParserRuntimeConfigReloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sync_mods.call_args.args[7], 3000)
         reinitialize.assert_not_called()
 
+    def test_proxy_snapshot_includes_pod_and_stats_metadata(self) -> None:
+        runtime = ParserRuntime(
+            _config(
+                steam_proxy_pool=["socks5://user:pass@46.8.223.44:3001"],
+                steam_proxy_scope="mod_pages",
+                instance_name="demo",
+            )
+        )
+        with (
+            patch.dict("os.environ", {"HOSTNAME": "demo-parser-0"}, clear=False),
+            patch("services.parser_service.snapshot_proxy_stats", return_value={"totalCalls": 7}),
+        ):
+            snapshot = runtime.proxy_snapshot()
+
+        self.assertEqual(snapshot["instanceName"], "demo")
+        self.assertEqual(snapshot["podName"], "demo-parser-0")
+        self.assertEqual(snapshot["proxyConfigured"], True)
+        self.assertEqual(snapshot["proxyPoolSize"], 1)
+        self.assertEqual(snapshot["proxyScope"], "mod_pages")
+        self.assertEqual(snapshot["stats"]["totalCalls"], 7)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -269,6 +269,87 @@ h1, h2, h3, p { margin: 0; }
   font-weight: 700;
   margin-bottom: 14px;
 }
+.proxy-chart-card {
+  display: grid;
+  gap: 16px;
+}
+.proxy-chart-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: center;
+}
+.pie-chart {
+  position: relative;
+  width: min(100%, 280px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(circle at center, rgba(255, 255, 255, 0.98), rgba(255, 255, 255, 0.82));
+  box-shadow:
+    inset 0 0 0 1px rgba(220, 207, 191, 0.8),
+    0 18px 36px rgba(22, 32, 42, 0.08);
+}
+.pie-center {
+  position: absolute;
+  inset: 22%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: inset 0 0 0 1px rgba(220, 207, 191, 0.65);
+}
+.pie-center strong {
+  font-size: 30px;
+  line-height: 1;
+}
+.pie-center span {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.legend-list {
+  display: grid;
+  gap: 10px;
+}
+.legend-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(220, 207, 191, 0.7);
+  background: rgba(255, 255, 255, 0.72);
+}
+.legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  flex: none;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.65);
+}
+.legend-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 700;
+}
+.proxy-metric-stack {
+  display: grid;
+  gap: 4px;
+}
+.proxy-metric-stack strong {
+  font-size: 20px;
+  line-height: 1.1;
+}
+.proxy-table {
+  min-width: 1200px;
+}
 .tabs {
   display: flex;
   flex-wrap: wrap;
@@ -516,4 +597,13 @@ code {
   .toolbar-left, .toolbar-right { width: 100%; }
   .page-top { align-items: stretch; }
   .actions-cell { min-width: 0; }
+  .proxy-chart-layout {
+    grid-template-columns: 1fr;
+  }
+  .pie-chart {
+    justify-self: center;
+  }
+  .proxy-table {
+    min-width: 980px;
+  }
 }

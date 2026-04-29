@@ -57,7 +57,8 @@ from ui.ui_logs import (
     _pod_log_snapshot,
     _tail_lines_from_request,
 )
-from ui.ui_pages import _dashboard, _dashboard_counts, _detail_page, _new_instance_page
+from ui.ui_pages import _dashboard, _dashboard_counts, _detail_page, _new_instance_page, _proxy_stats_page
+from ui.ui_proxy_stats import _load_proxy_statistics
 
 
 async def _run_blocking(func: Any, /, *args: Any, **kwargs: Any) -> Any:
@@ -93,6 +94,29 @@ async def instances_api(request: web.Request) -> web.Response:
             "resources": _dashboard_resource_totals(items),
         }
     )
+
+
+async def proxy_stats_page(request: web.Request) -> web.Response:
+    """Proxy statistics page handler."""
+    settings: UISettings = request.app["settings"]
+    flash, flash_kind = _flash_from_request(request)
+    payload = await _run_blocking(_load_proxy_statistics, settings)
+    return web.Response(
+        text=_proxy_stats_page(settings, payload, flash, flash_kind),
+        content_type="text/html",
+    )
+
+
+async def proxy_stats_api(request: web.Request) -> web.Response:
+    """Proxy statistics API endpoint."""
+    settings: UISettings = request.app["settings"]
+    try:
+        payload = await _run_blocking(_load_proxy_statistics, settings)
+    except web.HTTPException:
+        raise
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=502)
+    return web.json_response(payload)
 
 
 async def instance_summary_api(request: web.Request) -> web.Response:

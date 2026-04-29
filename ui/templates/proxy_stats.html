@@ -1,0 +1,65 @@
+<section class="page-top">
+  <div>
+    <div class="eyebrow">Proxy Observatory</div>
+    <h1>$title</h1>
+    <div class="subtitle">$subtitle</div>
+  </div>
+  <div class="page-actions">
+    <a class="button secondary" href="$dashboard_url">Back to dashboard</a>
+  </div>
+</section>
+
+<section class="metrics-grid" id="proxy-metrics">
+  $metrics_html
+</section>
+
+<section class="panel-section">
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <div class="toolbar-note" id="proxy-sync-state">$toolbar_note</div>
+    </div>
+    <div class="toolbar-right">
+      <button type="button" class="button secondary" id="proxy-refresh">Refresh now</button>
+    </div>
+  </div>
+  <div class="proxy-chart-card">
+    <div class="section-title">Proxy calls</div>
+    <div class="proxy-chart-layout">
+      <div class="pie-chart" id="proxy-pie-chart">
+        <div class="pie-center">
+          <strong id="proxy-chart-total">$chart_total</strong>
+          <span><span id="proxy-chart-success">$chart_success</span> successful</span>
+        </div>
+      </div>
+      <div class="legend-list" id="proxy-chart-legend">
+        $chart_legend_html
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="panel-section">
+  <div class="section-title">Pods</div>
+  <div class="table-wrap">
+    <table class="ops-table proxy-table">
+      <thead>
+        <tr>
+          <th>Instance</th>
+          <th>Status</th>
+          <th>Success</th>
+          <th>Failures</th>
+          <th>Avg response</th>
+          <th>RPS / RPM</th>
+          <th>Top error</th>
+        </tr>
+      </thead>
+      <tbody id="proxy-pods-body">
+        $pods_rows_html
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<script id="proxy-payload" type="application/json">$proxy_stats_payload_json</script>
+<script id="proxy-config" type="application/json">$proxy_stats_config_json</script>
+<script src="$proxy_stats_js_href"></script>

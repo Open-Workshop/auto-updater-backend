@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import requests
 
+from core.proxy_stats import proxy_error_type, record_proxy_request
 from core.http_utils import ProxyPool, RetryPolicy, mask_proxy, is_dns_error
 
 
@@ -97,6 +98,13 @@ class SteamClient:
                 response = requests.request(method, url, timeout=timeout, **kwargs)
             except requests.RequestException as exc:
                 last_exc = exc
+                if proxy:
+                    record_proxy_request(
+                        proxy=proxy,
+                        success=False,
+                        elapsed_seconds=time.monotonic() - start,
+                        error_type=proxy_error_type(exc),
+                    )
                 self.stats.record(endpoint, False)
                 if proxy and is_dns_error(exc) and not self.log_requests:
                     logging.warning(
@@ -134,6 +142,15 @@ class SteamClient:
                 self._last_request_ts = time.monotonic()
 
             ok = response.status_code < 400
+            if proxy:
+                record_proxy_request(
+                    proxy=proxy,
+                    success=ok,
+                    elapsed_seconds=time.monotonic() - start,
+                    error_type=proxy_error_type(
+                        status_code=response.status_code if not ok else None
+                    ),
+                )
             self.stats.record(endpoint, ok)
             if self.log_requests:
                 elapsed = time.monotonic() - start

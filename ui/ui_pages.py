@@ -5,7 +5,7 @@ from typing import Any
 from urllib.parse import quote
 
 from ui.ui_assets import render_template
-from ui.ui_common import UISettings, _escape, _json_dump_default, _json_script, _url
+from ui.ui_common import UISettings, _escape, _format_time, _json_dump_default, _json_script, _url
 from ui.ui_forms import _settings_form
 from ui.ui_shell import _layout
 
@@ -184,6 +184,7 @@ def _dashboard(
             "Fast operational view of all mirror instances, with filters, live actions, and quick access to logs and investigations."
         ),
         new_instance_url=_escape(_url(settings, "/instances/new")),
+        proxy_stats_url=_escape(_url(settings, "/proxy-stats")),
         metrics_html="".join(
             [
                 _summary_metric("All instances", counts["All"], "muted"),
@@ -201,6 +202,170 @@ def _dashboard(
         dashboard_payload_json=_json_script({"items": items, "counts": counts, "resources": resource_totals}),
         dashboard_config_json=_json_script({"apiUrl": _url(settings, "/api/instances")}),
         dashboard_js_href=_escape(_url(settings, "/assets/dashboard.js")),
+    )
+    return _layout(settings, body, flash=flash, flash_kind=flash_kind, page_title=settings.title)
+
+
+def _proxy_latency_label(value_ms: Any) -> str:
+    try:
+        numeric = float(value_ms)
+    except (TypeError, ValueError):
+        return "n/a"
+    if numeric < 0:
+        return "n/a"
+    if numeric >= 1000.0:
+        return f"{numeric / 1000.0:.2f}s"
+    if numeric >= 100.0:
+        return f"{numeric:.0f}ms"
+    return f"{numeric:.1f}ms"
+
+
+def _proxy_metric_value(value: Any) -> str:
+    if value is None:
+        return "0"
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return f"{value:.1f}"
+    return str(value)
+
+
+def _proxy_pod_rows(items: list[dict[str, Any]]) -> str:
+    rows = []
+    for item in items:
+        stats = dict(item.get("stats") or {})
+        success_calls = int(stats.get("successCalls") or 0)
+        failure_calls = int(stats.get("failureCalls") or 0)
+        total_calls = success_calls + failure_calls
+        top_error = dict(stats.get("topError") or {})
+        top_error_label = str(top_error.get("label") or "")
+        top_error_count = int(top_error.get("count") or 0)
+        proxy_scope = str(item.get("proxyScope") or "").strip() or "n/a"
+        proxy_pool_size = int(item.get("proxyPoolSize") or 0)
+        status_label = str(item.get("statusLabel") or "Unknown")
+        status_tone = str(item.get("statusTone") or "muted")
+        pods_state = (
+            f"{_escape(proxy_scope)} · {proxy_pool_size} proxies"
+            if proxy_pool_size > 0
+            else _escape(proxy_scope)
+        )
+        rows.append(
+            f"""
+            <tr data-proxy-status="{_escape(status_label)}" data-instance="{_escape(item.get('name') or '')}">
+              <td>
+                <div class="primary-cell">
+                  <a class="row-link" href="{_escape(item.get('urls', {}).get('detail') or '#')}">{_escape(item.get('name') or '')}</a>
+                  <div class="cell-subtle">{_escape(item.get('parserPod') or 'n/a')} · {pods_state}</div>
+                </div>
+              </td>
+              <td><span class="pill tone-{_escape(status_tone)}">{_escape(status_label)}</span></td>
+              <td>
+                <div class="proxy-metric-stack">
+                  <strong>{_escape(success_calls)}</strong>
+                  <div class="cell-subtle">{_escape(total_calls)} total</div>
+                </div>
+              </td>
+              <td>
+                <div class="proxy-metric-stack">
+                  <strong>{_escape(failure_calls)}</strong>
+                  <div class="cell-subtle">{_escape(int(100 * failure_calls / total_calls)) + '%' if total_calls else '0%'}</div>
+                </div>
+              </td>
+              <td>{_escape(_proxy_latency_label(stats.get("averageResponseMs")))}</td>
+              <td>{_escape(f"{stats.get('requestsPerSecond', 0.0):.1f} / {stats.get('requestsPerMinute', 0.0):.0f}")}</td>
+              <td>{_escape(f"{top_error_label} × {top_error_count}" if top_error_label else "—")}</td>
+            </tr>
+            """
+        )
+    return "".join(rows) or """
+        <tr>
+          <td colspan="7">
+            <div class="empty-state">No proxy telemetry is available yet.</div>
+          </td>
+        </tr>
+    """
+
+
+def _proxy_stats_page(
+    settings: UISettings,
+    payload: dict[str, Any],
+    flash: str,
+    flash_kind: str,
+) -> str:
+    summary = dict(payload.get("summary") or {})
+    items = list(payload.get("pods") or [])
+    pods_total = int(summary.get("podsTotal") or 0)
+    pods_reachable = int(summary.get("podsReachable") or 0)
+    generated_at = str(payload.get("generatedAt") or "")
+    generated_at_label = _format_time(generated_at) if generated_at else "just now"
+    error_entries = list(payload.get("errorBreakdown") or [])
+    pods_working = int(summary.get("podsWorking") or 0)
+    working_tone = "muted" if pods_total <= 0 else "healthy" if pods_working >= pods_total else "warning" if pods_working > 0 else "error"
+    metrics_html = "".join(
+        [
+            _summary_metric(
+                "Pods with working proxy",
+                f"{pods_working} / {pods_total}",
+                working_tone,
+            ),
+            _summary_metric("Success calls", _proxy_metric_value(summary.get("successCalls")), "healthy"),
+            _summary_metric("Failures", _proxy_metric_value(summary.get("failureCalls")), "error"),
+            _summary_metric("Avg response", _proxy_latency_label(summary.get("averageResponseMs")), "info"),
+            _summary_metric(
+                "RPS / RPM",
+                f"{float(summary.get('requestsPerSecond') or 0.0):.1f} / {float(summary.get('requestsPerMinute') or 0.0):.0f}",
+                "muted",
+            ),
+        ]
+    )
+    chart_entries = [
+        {
+            "label": "Success",
+            "count": int(summary.get("successCalls") or 0),
+            "color": "var(--healthy)",
+        }
+    ]
+    chart_entries.extend(
+        {
+            "label": str(entry.get("label") or "Error"),
+            "count": int(entry.get("count") or 0),
+            "color": f"var({['--warning', '--error', '--info', '--accent', '--muted'][index % 5]})",
+        }
+        for index, entry in enumerate(error_entries)
+        if int(entry.get("count") or 0) > 0
+    )
+    chart_legend_html = "".join(
+        f"""
+        <div class="legend-item">
+          <span class="legend-swatch" style="background:{_escape(entry['color'])};"></span>
+          <span class="legend-label">{_escape(entry['label'])}</span>
+          <strong>{_escape(_proxy_metric_value(entry['count']))}</strong>
+        </div>
+        """
+        for entry in chart_entries
+        if int(entry.get("count") or 0) > 0
+    )
+    body = render_template(
+        "proxy_stats.html",
+        title=_escape(settings.title),
+        subtitle=_escape(
+            "Cluster-wide proxy observability for parser pods. Working means the pod has recorded at least one successful proxied request."
+        ),
+        dashboard_url=_escape(_url(settings, "/")),
+        metrics_html=metrics_html,
+        chart_total=_escape(summary.get("totalCalls") or 0),
+        chart_success=_escape(summary.get("successCalls") or 0),
+        chart_legend_html=chart_legend_html
+        or "<div class='empty-state'>No proxy calls have been observed yet.</div>",
+        toolbar_note=_escape(
+            f"{pods_reachable} / {pods_total} pods responded · updated {generated_at_label}"
+            if pods_total
+            else "Waiting for proxy telemetry..."
+        ),
+        pods_rows_html=_proxy_pod_rows(items),
+        proxy_stats_payload_json=_json_script(payload),
+        proxy_stats_config_json=_json_script({"apiUrl": _url(settings, "/api/proxy-stats")}),
+        proxy_stats_js_href=_escape(_url(settings, "/assets/proxy_stats.js")),
     )
     return _layout(settings, body, flash=flash, flash_kind=flash_kind, page_title=settings.title)
 

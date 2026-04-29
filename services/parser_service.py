@@ -27,6 +27,7 @@ from steam.steam_mod import (
 )
 from sync.syncer import ensure_game, sync_mods
 from core.telemetry import init_telemetry, shutdown_telemetry, start_span
+from core.proxy_stats import snapshot_proxy_stats
 from core.utils import ensure_dir, set_download_request_policy
 
 _CLIENT_REINIT_FIELDS = {
@@ -356,6 +357,19 @@ class ParserRuntime:
             "lastSyncFinishedAt": self.last_sync_finished_at,
             "lastSyncResult": self.last_sync_result,
             "lastError": self.last_error,
+            "proxyStats": self.proxy_snapshot(),
+        }
+
+    def proxy_snapshot(self) -> dict[str, Any]:
+        return {
+            "generatedAt": _utcnow_iso(),
+            "instanceName": self.cfg.instance_name,
+            "workloadId": _workload_id_from_env(),
+            "podName": os.environ.get("HOSTNAME", "").strip(),
+            "proxyConfigured": bool(self.cfg.steam_proxy_pool),
+            "proxyPoolSize": len(self.cfg.steam_proxy_pool),
+            "proxyScope": self.cfg.steam_proxy_scope,
+            "stats": snapshot_proxy_stats(),
         }
 
 
@@ -373,6 +387,11 @@ async def _healthz(request: web.Request) -> web.Response:
 async def _status(request: web.Request) -> web.Response:
     runtime: ParserRuntime = request.app["runtime"]
     return web.json_response(runtime.snapshot())
+
+
+async def _proxy_stats(request: web.Request) -> web.Response:
+    runtime: ParserRuntime = request.app["runtime"]
+    return web.json_response(runtime.proxy_snapshot())
 
 
 async def _sync(request: web.Request) -> web.Response:
@@ -400,6 +419,7 @@ def _create_app(runtime: ParserRuntime) -> web.Application:
     app["runtime"] = runtime
     app.router.add_get("/healthz", _healthz)
     app.router.add_get("/api/v1/status", _status)
+    app.router.add_get("/api/v1/proxy-stats", _proxy_stats)
     app.router.add_post("/api/v1/sync", _sync)
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
