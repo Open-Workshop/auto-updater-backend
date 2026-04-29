@@ -17,13 +17,13 @@ from core.telemetry import start_span
 from core.utils import truncate
 
 _DEFAULT_LIMITS: Dict[str, int] = {
-    "game_name": 127,
-    "game_short_desc": 255,
-    "game_desc": 9999,
-    "mod_name": 127,
-    "mod_short_description": 255,
-    "mod_description": 9999,
-    "tag_name": 127,
+    "game_name": 128,
+    "game_short_desc": 256,
+    "game_desc": 10000,
+    "mod_name": 128,
+    "mod_short_description": 256,
+    "mod_description": 10000,
+    "tag_name": 128,
 }
 
 _UPLOAD_WS_IDLE_TIMEOUT_MIN = 300.0
@@ -117,27 +117,18 @@ _GLOBAL_LIMITS = OWLimits(_DEFAULT_LIMITS)
 
 
 def _extract_limits(openapi: Dict[str, Any]) -> Dict[str, int]:
-    wanted = {
-        "game_name",
-        "game_short_desc",
-        "game_desc",
-        "mod_name",
-        "mod_short_description",
-        "mod_description",
-        "tag_name",
-    }
     found: Dict[str, int] = {}
     schemas = openapi.get("components", {}).get("schemas", {})
     if not isinstance(schemas, dict):
         return found
-    for schema in schemas.values():
+    for schema_name, schema in schemas.items():
         if not isinstance(schema, dict):
             continue
         props = schema.get("properties", {})
         if not isinstance(props, dict):
             continue
         for key, prop in props.items():
-            if key not in wanted or not isinstance(prop, dict):
+            if not isinstance(prop, dict):
                 continue
             limit = prop.get("maxLength")
             try:
@@ -146,10 +137,73 @@ def _extract_limits(openapi: Dict[str, Any]) -> Dict[str, int]:
                 continue
             if limit_value <= 0:
                 continue
-            current = found.get(key)
+
+            mapped_key: str | None = None
+            if schema_name.startswith("Game"):
+                if key == "name":
+                    mapped_key = "game_name"
+                elif key == "short_description":
+                    mapped_key = "game_short_desc"
+                elif key == "description":
+                    mapped_key = "game_desc"
+            elif schema_name.startswith("Mod"):
+                if key == "name":
+                    mapped_key = "mod_name"
+                elif key == "short_description":
+                    mapped_key = "mod_short_description"
+                elif key == "description":
+                    mapped_key = "mod_description"
+            elif schema_name.startswith("Tag") and key == "name":
+                mapped_key = "tag_name"
+
+            if mapped_key is None:
+                continue
+            current = found.get(mapped_key)
             if current is None or limit_value < current:
-                found[key] = limit_value
+                found[mapped_key] = limit_value
     return found
+
+
+def _response_items(payload: Any) -> list[Any]:
+    if isinstance(payload, dict):
+        items = payload.get("items")
+        if isinstance(items, list):
+            return items
+        results = payload.get("results")
+        if isinstance(results, list):
+            return results
+    if isinstance(payload, list):
+        return payload
+    return []
+
+
+def _response_total(payload: Any) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    pagination = payload.get("pagination")
+    if isinstance(pagination, dict):
+        total = pagination.get("total")
+        try:
+            if total is None:
+                return None
+            return int(total)
+        except (TypeError, ValueError):
+            return None
+    total = payload.get("database_size")
+    try:
+        if total is None:
+            return None
+        return int(total)
+    except (TypeError, ValueError):
+        return None
+
+
+def _clamp_page_size(page_size: int) -> int:
+    try:
+        value = int(page_size)
+    except (TypeError, ValueError):
+        value = 1
+    return max(1, min(value, 50))
 
 
 class OWClient:
@@ -178,10 +232,10 @@ class OWClient:
     def login(self) -> None:
         if not self.login_name or not self.password:
             raise RuntimeError("Missing OW_LOGIN or OW_PASSWORD environment variables")
-        url = f"{self.base_url}/session/password"
+        url = f"{self.base_url}/sessions"
         response = self.session.post(
             url,
-            data={"login": self.login_name, "password": self.password},
+            json={"method": "password", "login": self.login_name, "password": self.password},
             timeout=self.timeout,
         )
         if response.status_code != 200:
@@ -348,37 +402,33 @@ class OWClient:
     def list_mods(self, game_id: int, page_size: int) -> List[Dict[str, Any]]:
         def fetch(page: int) -> Dict[str, Any]:
             params = {
-                "page_size": page_size,
+                "page_size": _clamp_page_size(page_size),
                 "page": page,
-                "general": "true",
-                "dates": "true",
-                "game": game_id,
-                "primary_sources": json.dumps(["steam"]),
+                "game_id": game_id,
+                "include": ["dates"],
             }
             response = self.request("get", "/mods", params=params)
-            if response.status_code >= 500:
-                params.pop("primary_sources", None)
-                response = self.request("get", "/mods", params=params)
             response.raise_for_status()
             return response.json()
 
-        return list_all_pages(fetch)
+        return [item for item in list_all_pages(fetch) if isinstance(item, dict)]
 
     def get_mod_by_source(self, source: str, source_id: int) -> Optional[Dict[str, Any]]:
-        params = {
-            "page_size": 10,
-            "page": 0,
-            "general": "true",
-            "dates": "true",
-            "primary_sources": json.dumps([source]),
-            "allowed_sources_ids": json.dumps([source_id]),
-        }
-        response = self.request("get", "/mods", params=params)
+        response = self.request(
+            "get",
+            "/mods",
+            params={
+                "page_size": 1,
+                "page": 0,
+                "sources": [source],
+                "source_ids": [source_id],
+                "include": ["dates"],
+            },
+        )
         if not self.is_success(response):
             return None
         payload = response.json()
-        results = payload.get("results", []) if isinstance(payload, dict) else []
-        for item in results:
+        for item in _response_items(payload):
             if not isinstance(item, dict):
                 continue
             if str(item.get("source_id")) == str(source_id):
@@ -390,50 +440,37 @@ class OWClient:
     ) -> List[Dict[str, Any]]:
         if not source_ids:
             return []
-        size = max(page_size, len(source_ids))
-        params = {
-            "page_size": size,
-            "page": 0,
-            "general": "true",
-            "dates": "true",
-            "primary_sources": json.dumps([source]),
-            "allowed_sources_ids": json.dumps(source_ids),
-        }
-        response = self.request("get", "/mods", params=params)
-        if response.status_code >= 500:
-            params.pop("primary_sources", None)
-            response = self.request("get", "/mods", params=params)
-        if not self.is_success(response):
-            return []
-        payload = response.json()
-        results = payload.get("results", []) if isinstance(payload, dict) else []
-        return [item for item in results if isinstance(item, dict)]
+        size = _clamp_page_size(max(page_size, len(source_ids)))
+
+        def fetch(page: int) -> Dict[str, Any]:
+            response = self.request(
+                "get",
+                "/mods",
+                params={
+                    "page_size": size,
+                    "page": page,
+                    "sources": [source],
+                    "source_ids": source_ids,
+                    "include": ["dates"],
+                },
+            )
+            if not self.is_success(response):
+                return {"items": []}
+            return response.json()
+
+        return [item for item in list_all_pages(fetch) if isinstance(item, dict)]
 
     def find_mod_by_source(self, source: str, source_id: int) -> Optional[int]:
-        params = {
-            "page_size": 10,
-            "page": 0,
-            "general": "true",
-            "dates": "true",
-            "primary_sources": json.dumps([source]),
-            "allowed_sources_ids": json.dumps([source_id]),
-        }
-        response = self.request("get", "/mods", params=params)
-        if not self.is_success(response):
+        mod = self.get_mod_by_source(source, source_id)
+        if mod is None:
             return None
-        payload = response.json()
-        results = payload.get("results", []) if isinstance(payload, dict) else []
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("source_id")) == str(source_id):
-                mod_id = item.get("id")
-                if mod_id is not None:
-                    try:
-                        return int(mod_id)
-                    except (TypeError, ValueError):
-                        return None
-        return None
+        mod_id = mod.get("id")
+        if mod_id is None:
+            return None
+        try:
+            return int(mod_id)
+        except (TypeError, ValueError):
+            return None
 
     def list_games_by_source(self, app_id: int, page_size: int) -> List[Dict[str, Any]]:
         def fetch(page: int) -> Dict[str, Any]:
@@ -441,16 +478,16 @@ class OWClient:
                 "get",
                 "/games",
                 params={
-                    "page_size": page_size,
+                    "page_size": _clamp_page_size(page_size),
                     "page": page,
-                    "primary_sources": json.dumps(["steam"]),
-                    "allowed_sources_ids": json.dumps([app_id]),
+                    "sources": ["steam"],
+                    "source_ids": [app_id],
                 },
             )
             response.raise_for_status()
             return response.json()
 
-        return list_all_pages(fetch)
+        return [item for item in list_all_pages(fetch) if isinstance(item, dict)]
 
     def get_game(self, game_id: int) -> Dict[str, Any]:
         response = self.request("get", f"/games/{game_id}")
@@ -463,11 +500,12 @@ class OWClient:
         name, short_desc, desc = self.limits.limit_game_fields(name, short_desc, desc)
         response = self.request(
             "post",
-            "/add/game",
-            data={
-                "game_name": name,
-                "game_short_desc": short_desc,
-                "game_desc": desc,
+            "/games",
+            json={
+                "name": name,
+                "short_description": short_desc,
+                "description": desc,
+                "type": "game",
             },
         )
         if not self.is_success(response):
@@ -481,12 +519,11 @@ class OWClient:
 
     def edit_game_source(self, game_id: int, source: str, source_id: int) -> None:
         response = self.request(
-            "post",
-            "/edit/game",
-            data={
-                "game_id": game_id,
-                "game_source": source,
-                "game_source_id": source_id,
+            "patch",
+            f"/games/{game_id}",
+            json={
+                "source": source,
+                "source_id": source_id,
             },
         )
         if not self.is_success(response):
@@ -501,10 +538,12 @@ class OWClient:
             "get",
             f"/mods/{mod_id}",
             params={
-                "short_description": "true",
-                "description": "true",
-                "general": "true",
-                "game": "true",
+                "include": [
+                    "short_description",
+                    "description",
+                    "dates",
+                    "game",
+                ],
             },
         )
         response.raise_for_status()
@@ -934,24 +973,23 @@ class OWClient:
 
         def send(mod_name: str) -> requests.Response:
             data = {
-                "mod_name": mod_name,
-                "mod_short_description": short_desc,
-                "mod_description": desc,
-                "mod_source": source,
-                "mod_source_id": source_id,
-                "mod_game": game_id,
-                "mod_public": public_mode,
-                "without_author": "true" if without_author else "false",
+                "name": mod_name,
+                "short_description": short_desc,
+                "description": desc,
+                "source": source,
+                "source_id": source_id,
+                "game_id": game_id,
+                "public": public_mode,
+                "without_author": bool(without_author),
             }
             return self.request(
                 "post",
-                "/mods/from-file",
-                data=data,
-                allow_redirects=False,
+                "/mods",
+                json=data,
             )
 
         response = send(name)
-        if response.status_code == 412:
+        if response.status_code in (409, 412):
             existing_id = self._find_mod_by_source_with_wait(source, source_id)
             if existing_id is not None:
                 return _result(existing_id, False)
@@ -959,26 +997,42 @@ class OWClient:
                 f"Failed to add mod: {response.status_code} {response.text}"
             )
         response = self._retry_mod_name(send, name, response)
-        if response.status_code == 412:
+        if response.status_code in (409, 412):
             existing_id = self._find_mod_by_source_with_wait(source, source_id)
             if existing_id is not None:
                 return _result(existing_id, False)
             raise RuntimeError(
                 f"Failed to add mod: {response.status_code} {response.text}"
             )
-        if response.status_code == 307 or self.is_success(response):
-            upload_response = self._upload_file_to_storage(response, file_path)
-            if not self.is_success(upload_response):
-                raise RuntimeError(
-                    "Failed to upload mod file: "
-                    f"{upload_response.status_code} {upload_response.text}"
-                )
-        else:
+        if not self.is_success(response):
             raise RuntimeError(
                 f"Failed to add mod: {response.status_code} {response.text}"
             )
         mod_id = self.extract_id(response)
         if mod_id is not None:
+            upload_response = self.request(
+                "post",
+                "/uploads",
+                json={
+                    "kind": "mod_archive",
+                    "owner_type": "mod",
+                    "owner_id": mod_id,
+                    "mode": "create",
+                    "format": Path(file_path).suffix.lstrip(".").lower() or "zip",
+                },
+                allow_redirects=False,
+            )
+            if not self.is_success(upload_response):
+                raise RuntimeError(
+                    "Failed to create mod upload job: "
+                    f"{upload_response.status_code} {upload_response.text}"
+                )
+            upload_result = self._upload_file_to_storage(upload_response, file_path)
+            if not self.is_success(upload_result):
+                raise RuntimeError(
+                    "Failed to upload mod file: "
+                    f"{upload_result.status_code} {upload_result.text}"
+                )
             return _result(mod_id, True)
         mod_id = self._find_mod_by_source_with_wait(source, source_id)
         if mod_id is not None:
@@ -1065,16 +1119,16 @@ class OWClient:
 
         def send(mod_name: str) -> requests.Response:
             data = {
-                "mod_name": mod_name,
-                "mod_short_description": short_desc,
-                "mod_description": desc,
-                "mod_game": game_id,
-                "mod_public": public_mode,
+                "name": mod_name,
+                "short_description": short_desc,
+                "description": desc,
+                "game_id": game_id,
+                "public": public_mode,
             }
             if set_source:
-                data["mod_source"] = source
-                data["mod_source_id"] = source_id
-            return self.request("patch", f"/mods/{mod_id}", data=data)
+                data["source"] = source
+                data["source_id"] = source_id
+            return self.request("patch", f"/mods/{mod_id}", json=data)
 
         response = send(name)
         response = self._retry_mod_name(send, name, response)
@@ -1085,21 +1139,26 @@ class OWClient:
         if file_path:
             file_response = self.request(
                 "post",
-                f"/mods/{mod_id}/file",
-                data={},
+                "/uploads",
+                json={
+                    "kind": "mod_archive",
+                    "owner_type": "mod",
+                    "owner_id": mod_id,
+                    "mode": "replace",
+                    "format": Path(file_path).suffix.lstrip(".").lower() or "zip",
+                },
                 allow_redirects=False,
             )
-            if file_response.status_code == 307 or self.is_success(file_response):
-                upload_response = self._upload_file_to_storage(file_response, file_path)
-                if not self.is_success(upload_response):
-                    raise RuntimeError(
-                        f"Failed to update mod file {mod_id}: "
-                        f"{upload_response.status_code} {upload_response.text}"
-                    )
-            else:
+            if not self.is_success(file_response):
                 raise RuntimeError(
                     f"Failed to start mod file update {mod_id}: "
                     f"{file_response.status_code} {file_response.text}"
+                )
+            upload_response = self._upload_file_to_storage(file_response, file_path)
+            if not self.is_success(upload_response):
+                raise RuntimeError(
+                    f"Failed to update mod file {mod_id}: "
+                    f"{upload_response.status_code} {upload_response.text}"
                 )
 
     def list_tags(self, game_id: int, page_size: int) -> List[Dict[str, Any]]:
@@ -1109,20 +1168,20 @@ class OWClient:
                 "/tags",
                 params={
                     "game_id": game_id,
-                    "page_size": page_size,
+                    "page_size": _clamp_page_size(page_size),
                     "page": page,
                 },
             )
             response.raise_for_status()
             return response.json()
 
-        return list_all_pages(fetch)
+        return [item for item in list_all_pages(fetch) if isinstance(item, dict)]
 
     def add_tag(self, name: str) -> int:
         response = self.request(
             "post",
-            "/add/tag",
-            data={"tag_name": self.limits.limit_tag_name(name)},
+            "/tags",
+            json={"name": self.limits.limit_tag_name(name)},
         )
         if not self.is_success(response):
             raise RuntimeError(
@@ -1136,8 +1195,7 @@ class OWClient:
     def associate_game_tag(self, game_id: int, tag_id: int) -> None:
         response = self.request(
             "post",
-            "/association/game/tag",
-            data={"game_id": game_id, "tag_id": tag_id, "mode": "true"},
+            f"/games/{game_id}/tags/{tag_id}",
         )
         if not self.is_success(response) and response.status_code != 409:
             logging.warning(
@@ -1149,20 +1207,26 @@ class OWClient:
             )
 
     def get_mod_tags(self, mod_id: int) -> List[int]:
-        response = self.request("get", f"/mods/{mod_id}/tags")
-        if response.status_code == 404:
-            return []
-        response.raise_for_status()
-        payload = response.json()
+        def fetch(page: int) -> Dict[str, Any]:
+            response = self.request(
+                "get",
+                f"/mods/{mod_id}/tags",
+                params={"page_size": 50, "page": page},
+            )
+            if response.status_code == 404:
+                return {"items": []}
+            response.raise_for_status()
+            return response.json()
+
         tag_ids: List[int] = []
-        if isinstance(payload, list):
-            for item in payload:
-                if isinstance(item, dict):
-                    tag_id = item.get("id") or item.get("tag_id")
-                else:
-                    tag_id = item
-                if tag_id is not None:
-                    tag_ids.append(int(tag_id))
+        for item in list_all_pages(fetch):
+            if isinstance(item, dict):
+                tag_id = item.get("id") or item.get("tag_id")
+            else:
+                tag_id = item
+            if tag_id is None:
+                continue
+            tag_ids.append(int(tag_id))
         return tag_ids
 
     def add_mod_tag(self, mod_id: int, tag_id: int) -> None:
@@ -1193,11 +1257,10 @@ class OWClient:
             return []
         response.raise_for_status()
         payload = response.json()
-        results = payload.get("results", []) if isinstance(payload, dict) else []
         dep_ids: List[int] = []
-        for item in results:
+        for item in _response_items(payload):
             if isinstance(item, dict):
-                dep_id = item.get("id") or item.get("mod_id") or item.get("dependencie")
+                dep_id = item.get("id") or item.get("mod_id") or item.get("dependence")
             else:
                 dep_id = item
             if dep_id is not None:
@@ -1232,18 +1295,23 @@ class OWClient:
         def fetch(page: int) -> Dict[str, Any]:
             response = self.request(
                 "get",
-                f"/mods/{mod_id}/resources",
-                params={"page_size": 50, "page": page},
+                "/resources",
+                params={
+                    "owner_type": "mods",
+                    "owner_id": mod_id,
+                    "page_size": 50,
+                    "page": page,
+                },
             )
             if response.status_code == 404:
-                return {"database_size": 0, "results": []}
+                return {"items": []}
             response.raise_for_status()
             payload = response.json()
             if isinstance(payload, dict):
                 return payload
             if isinstance(payload, list):
-                return {"database_size": len(payload), "results": payload}
-            return {"database_size": 0, "results": []}
+                return {"items": payload, "pagination": {"total": len(payload)}}
+            return {"items": []}
 
         results = list_all_pages(fetch)
         return [item for item in results if isinstance(item, dict)]
@@ -1254,11 +1322,11 @@ class OWClient:
         response = self.request(
             "post",
             "/resources",
-            data={
+            json={
                 "owner_type": owner_type,
-                "resource_type": res_type,
-                "resource_url": url,
-                "resource_owner_id": owner_id,
+                "type": res_type,
+                "url": url,
+                "owner_id": owner_id,
             },
         )
         if not self.is_success(response):
@@ -1280,15 +1348,18 @@ class OWClient:
     ) -> bool:
         init_response = self.request(
             "post",
-            "/resources/upload-init",
-            data={
-                "owner_type": owner_type,
-                "resource_type": res_type,
+            "/uploads",
+            json={
+                "kind": "resource_image",
+                "owner_type": "resource",
+                "mode": "create",
+                "resource_owner_type": owner_type,
                 "resource_owner_id": owner_id,
+                "resource_type": res_type,
             },
             allow_redirects=False,
         )
-        if init_response.status_code == 307 or self.is_success(init_response):
+        if self.is_success(init_response):
             try:
                 upload_response = self._upload_file_to_storage(init_response, file_path)
             except Exception as exc:
@@ -1311,20 +1382,8 @@ class OWClient:
                 (upload_response.text or "")[:200],
             )
             return False
-        if init_response.status_code == 409:
-            return True
-        if not self.is_success(init_response):
-            logging.warning(
-                "Failed to add resource file %s to %s %s: %s %s",
-                file_path,
-                owner_type,
-                owner_id,
-                init_response.status_code,
-                (init_response.text or "")[:200],
-            )
-            return False
         logging.warning(
-            "Unexpected resource upload init response for %s to %s %s: %s %s",
+            "Failed to add resource file %s to %s %s: %s %s",
             file_path,
             owner_type,
             owner_id,
@@ -1403,14 +1462,14 @@ def ow_limit_mod_fields(
     return _GLOBAL_LIMITS.limit_mod_fields(name, short_desc, description)
 
 
-def list_all_pages(fetch_page: callable) -> List[Dict[str, Any]]:
-    results: List[Dict[str, Any]] = []
+def list_all_pages(fetch_page: Callable[[int], Dict[str, Any]]) -> List[Any]:
+    results: List[Any] = []
     page = 0
     while True:
         payload = fetch_page(page)
-        page_results = payload.get("results", [])
+        page_results = _response_items(payload)
         results.extend(page_results)
-        total = payload.get("database_size")
+        total = _response_total(payload)
         if not page_results:
             break
         if total is not None and len(results) >= int(total):

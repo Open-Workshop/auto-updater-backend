@@ -136,13 +136,19 @@ def ow_last_edit_ts(ow_mod: Optional[Dict[str, Any]]) -> int:
     if not ow_mod:
         return 0
     latest = 0
-    for key in ("date_edit", "date_update_file", "date_creation"):
-        value = ow_mod.get(key)
-        if not isinstance(value, str):
-            continue
-        ts = parse_ow_datetime(value)
-        if ts > latest:
-            latest = ts
+    for keys in (
+        ("updated_at", "date_edit"),
+        ("file_updated_at", "date_update_file"),
+        ("created_at", "date_creation"),
+    ):
+        for key in keys:
+            value = ow_mod.get(key)
+            if not isinstance(value, str):
+                continue
+            ts = parse_ow_datetime(value)
+            if ts > latest:
+                latest = ts
+            break
     return latest
 
 

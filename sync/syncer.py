@@ -584,14 +584,14 @@ class ModSyncer:
                     self.options.without_author,
                     archive_path,
                 )
+            now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
             self.mod_index.set(
                 str(item_id),
                 {
                     "id": int(ow_mod_id),
                     "source_id": int(item_id),
-                    "date_update_file": datetime.now(timezone.utc).isoformat(
-                        timespec="seconds"
-                    ),
+                    "file_updated_at": now_iso,
+                    "date_update_file": now_iso,
                 },
             )
             if created_now:
@@ -764,15 +764,11 @@ class ModSyncer:
             if ow_mod is None:
                 return True
             steam_latest_ts = max(mod.updated_ts, mod.created_ts)
-            ow_updated_file_ts = _parse_ow_datetime(
-                (ow_mod.get("date_update_file") or ow_mod.get("date_creation"))
-                if ow_mod
-                else None
+            ow_latest_ts = max(
+                _parse_ow_datetime(ow_mod.get("file_updated_at") or ow_mod.get("date_update_file")),
+                _parse_ow_datetime(ow_mod.get("updated_at") or ow_mod.get("date_edit")),
+                _parse_ow_datetime(ow_mod.get("created_at") or ow_mod.get("date_creation")),
             )
-            ow_created_ts = _parse_ow_datetime(
-                ow_mod.get("date_creation") if ow_mod else None
-            )
-            ow_latest_ts = max(ow_updated_file_ts, ow_created_ts)
             return steam_latest_ts > ow_latest_ts
 
     def _download_mod_archive(self, item_id: str) -> Optional[Path]:

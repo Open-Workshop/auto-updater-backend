@@ -9,14 +9,27 @@ from steam.steam_api import RetryPolicy, SteamClient
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, *, headers: dict[str, str] | None = None, text: str = "") -> None:
+    def __init__(
+        self,
+        status_code: int,
+        *,
+        headers: dict[str, str] | None = None,
+        text: str = "",
+        payload: object | None = None,
+    ) -> None:
         self.status_code = status_code
         self.headers = headers or {}
         self.text = text
+        self._payload = payload
         self.closed = False
 
     def close(self) -> None:
         self.closed = True
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no json payload")
+        return self._payload
 
 
 class _FakeSession:
@@ -25,6 +38,16 @@ class _FakeSession:
 
     def request(self, method: str, url: str, timeout: int, **kwargs):  # noqa: ANN001
         return self._responses.pop(0)
+
+
+class _RecordingSession(_FakeSession):
+    def __init__(self, responses: list[_FakeResponse]) -> None:
+        super().__init__(responses)
+        self.calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def request(self, method: str, url: str, timeout: int, **kwargs):  # noqa: ANN001
+        self.calls.append((method, url, dict(kwargs)))
+        return super().request(method, url, timeout, **kwargs)
 
 
 def _fake_token(payload: dict) -> str:
@@ -37,7 +60,7 @@ class _InitResponse:
     def __init__(
         self,
         *,
-        url: str = "https://api.openworkshop.miskler.ru/resources/upload-init",
+        url: str = "https://api.openworkshop.miskler.ru/uploads",
         headers: dict[str, str] | None = None,
         payload: dict | None = None,
         status_code: int = 200,
@@ -90,6 +113,108 @@ class HttpClientTests(unittest.TestCase):
         self.assertIs(response, success)
         self.assertTrue(unauthorized.closed)
         client.login.assert_called_once()
+
+    def test_ow_client_finds_mod_by_source_using_manager_filters(self) -> None:
+        client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
+        client.session = _RecordingSession(
+            [
+                _FakeResponse(
+                    200,
+                    payload={
+                        "items": [
+                            {
+                                "id": 17,
+                                "source_id": 294100,
+                                "updated_at": "2026-04-29T12:00:00",
+                            }
+                        ],
+                        "pagination": {"total": 1},
+                    },
+                )
+            ]
+        )
+
+        mod_id = client.find_mod_by_source("steam", 294100)
+
+        self.assertEqual(mod_id, 17)
+        method, url, kwargs = client.session.calls[0]
+        self.assertEqual(method, "get")
+        self.assertEqual(url, "https://example.com/mods")
+        self.assertEqual(kwargs["params"]["sources"], ["steam"])
+        self.assertEqual(kwargs["params"]["source_ids"], [294100])
+        self.assertEqual(kwargs["params"]["include"], ["dates"])
+
+    def test_ow_client_add_mod_uses_manager_create_and_upload_contract(self) -> None:
+        client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
+        client.session = _RecordingSession(
+            [
+                _FakeResponse(201, payload={"id": 101}),
+                _FakeResponse(
+                    201,
+                    payload={
+                        "id": "job-1",
+                        "transfer_url": "https://storage.example.com/transfer/upload?token=t",
+                        "ws_url": "https://storage.example.com/transfer/ws/job-1?token=t",
+                    },
+                ),
+            ]
+        )
+        client._upload_file_to_storage = Mock(return_value=_FakeResponse(200))  # type: ignore[method-assign]
+
+        mod_id = client.add_mod(
+            "Example",
+            "Short",
+            "Long",
+            "steam",
+            294100,
+            123,
+            0,
+            False,
+            "archive.zip",
+        )
+
+        self.assertEqual(mod_id, 101)
+        self.assertEqual(len(client.session.calls), 2)
+        create_method, create_url, create_kwargs = client.session.calls[0]
+        upload_method, upload_url, upload_kwargs = client.session.calls[1]
+        self.assertEqual((create_method, create_url), ("post", "https://example.com/mods"))
+        self.assertEqual(create_kwargs["json"]["game_id"], 123)
+        self.assertEqual(create_kwargs["json"]["name"], "Example")
+        self.assertEqual(create_kwargs["json"]["without_author"], False)
+        self.assertEqual((upload_method, upload_url), ("post", "https://example.com/uploads"))
+        self.assertEqual(upload_kwargs["json"]["kind"], "mod_archive")
+        self.assertEqual(upload_kwargs["json"]["owner_type"], "mod")
+        self.assertEqual(upload_kwargs["json"]["owner_id"], 101)
+        self.assertEqual(upload_kwargs["json"]["mode"], "create")
+
+    def test_ow_client_add_resource_file_uses_manager_upload_contract(self) -> None:
+        client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
+        client.session = _RecordingSession(
+            [
+                _FakeResponse(
+                    201,
+                    payload={
+                        "id": "job-2",
+                        "transfer_url": "https://storage.example.com/transfer/upload?token=t",
+                        "ws_url": "https://storage.example.com/transfer/ws/job-2?token=t",
+                    },
+                )
+            ]
+        )
+        client._upload_file_to_storage = Mock(return_value=_FakeResponse(200))  # type: ignore[method-assign]
+
+        result = client.add_resource_file("mods", 123, "logo", "logo.webp")
+
+        self.assertTrue(result)
+        self.assertEqual(len(client.session.calls), 1)
+        method, url, kwargs = client.session.calls[0]
+        self.assertEqual((method, url), ("post", "https://example.com/uploads"))
+        self.assertEqual(kwargs["json"]["kind"], "resource_image")
+        self.assertEqual(kwargs["json"]["owner_type"], "resource")
+        self.assertEqual(kwargs["json"]["resource_owner_type"], "mods")
+        self.assertEqual(kwargs["json"]["resource_owner_id"], 123)
+        self.assertEqual(kwargs["json"]["resource_type"], "logo")
+        self.assertEqual(kwargs["json"]["mode"], "create")
 
     def test_transfer_from_init_uses_explicit_ws_url(self) -> None:
         client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
