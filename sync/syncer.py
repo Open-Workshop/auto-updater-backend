@@ -583,6 +583,7 @@ class ModSyncer:
                     self.options.public_mode,
                     self.options.without_author,
                     archive_path,
+                    existing_id=ow_mod_id,
                 )
             now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
             self.mod_index.set(

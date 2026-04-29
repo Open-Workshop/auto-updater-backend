@@ -1050,8 +1050,11 @@ class OWClient:
         public_mode: int,
         without_author: bool,
         file_path,
+        *,
+        existing_id: int | None = None,
     ) -> tuple[int, bool]:
-        existing_id = self.find_mod_by_source(source, source_id)
+        if existing_id is None:
+            existing_id = self.find_mod_by_source(source, source_id)
         if existing_id is not None:
             self.edit_mod(
                 existing_id,
@@ -1086,7 +1089,7 @@ class OWClient:
         if created:
             return int(mod_id), True
 
-        # If add hit source conflict (412), ensure file is uploaded to the existing mod.
+        # If add hit a source conflict, ensure the file is uploaded to the existing mod.
         self.edit_mod(
             int(mod_id),
             name,

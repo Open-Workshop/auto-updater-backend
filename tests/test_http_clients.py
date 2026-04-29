@@ -203,6 +203,48 @@ class HttpClientTests(unittest.TestCase):
         self.assertEqual(upload_kwargs["json"]["owner_id"], 101)
         self.assertEqual(upload_kwargs["json"]["mode"], "create")
 
+    def test_ow_client_upsert_mod_with_existing_id_uses_edit_path(self) -> None:
+        client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
+        client.session = _RecordingSession(
+            [
+                _FakeResponse(200, payload={"id": 17}),
+                _FakeResponse(
+                    201,
+                    payload={
+                        "id": "job-3",
+                        "transfer_url": "https://storage.example.com/transfer/upload?token=t",
+                        "ws_url": "https://storage.example.com/transfer/ws/job-3?token=t",
+                    },
+                ),
+            ]
+        )
+        client._upload_file_to_storage = Mock(return_value=_FakeResponse(200))  # type: ignore[method-assign]
+
+        mod_id, created = client.upsert_mod_with_file(
+            "Example",
+            "Short",
+            "Long",
+            "steam",
+            294100,
+            123,
+            0,
+            False,
+            "archive.zip",
+            existing_id=17,
+        )
+
+        self.assertEqual(mod_id, 17)
+        self.assertFalse(created)
+        self.assertEqual(len(client.session.calls), 2)
+        patch_method, patch_url, patch_kwargs = client.session.calls[0]
+        upload_method, upload_url, upload_kwargs = client.session.calls[1]
+        self.assertEqual((patch_method, patch_url), ("patch", "https://example.com/mods/17"))
+        self.assertEqual(patch_kwargs["json"]["game_id"], 123)
+        self.assertEqual(patch_kwargs["json"]["name"], "Example")
+        self.assertNotIn("source_id", patch_kwargs["json"])
+        self.assertEqual((upload_method, upload_url), ("post", "https://example.com/uploads"))
+        self.assertEqual(upload_kwargs["json"]["mode"], "replace")
+
     def test_ow_client_add_resource_file_uses_manager_upload_contract(self) -> None:
         client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
         client.session = _RecordingSession(

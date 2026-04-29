@@ -455,6 +455,42 @@ class SyncerPipelineTests(unittest.TestCase):
             ["https://cdn/logo.png", "https://cdn/1.png"],
         )
 
+    def test_file_update_passes_known_mod_id_to_upsert(self) -> None:
+        syncer = self._make_syncer()
+        recorded: dict[str, object] = {}
+
+        class ApiStub:
+            def upsert_mod_with_file(
+                self,
+                name,
+                short_desc,
+                desc,
+                source,
+                source_id,
+                game_id,
+                public_mode,
+                without_author,
+                file_path,
+                *,
+                existing_id=None,
+            ):
+                recorded["name"] = name
+                recorded["source"] = source
+                recorded["source_id"] = source_id
+                recorded["existing_id"] = existing_id
+                return 42, False
+
+        syncer._worker_api = lambda: ApiStub()
+        syncer._worker_tag_manager = lambda: types.SimpleNamespace(sync_mod_tags=lambda *args, **kwargs: None)
+        syncer._worker_dependency_manager = lambda: types.SimpleNamespace(sync_dependencies=lambda *args, **kwargs: None, retry_pending=lambda: None)
+        syncer._worker_resource_syncer = lambda: types.SimpleNamespace(sync_resources=lambda *args, **kwargs: None)
+
+        syncer._process_file_update("42", self._payload("42"), Path("/tmp/42.zip"))
+
+        self.assertEqual(recorded["source"], "steam")
+        self.assertEqual(recorded["source_id"], 42)
+        self.assertEqual(recorded["existing_id"], 42)
+
 
 if __name__ == "__main__":
     unittest.main()
