@@ -189,10 +189,12 @@ class ParserRuntimeConfigReloadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(snapshot["instanceName"], "demo")
         self.assertEqual(snapshot["podName"], "demo-parser-0")
+        self.assertEqual(snapshot["windowLabel"], "1h")
         self.assertEqual(snapshot["proxyConfigured"], True)
         self.assertEqual(snapshot["proxyPoolSize"], 1)
         self.assertEqual(snapshot["proxyScope"], "mod_pages")
         self.assertEqual(snapshot["stats"]["totalCalls"], 7)
+        self.assertEqual(snapshot["proxies"], [])
 
 
 if __name__ == "__main__":

@@ -1,60 +1,85 @@
-<section class="page-top">
-  <div>
-    <div class="eyebrow">Proxy Observatory</div>
+<section class="page-top proxy-hero">
+  <div class="proxy-hero-copy">
+    <div class="eyebrow">Proxy Control Room</div>
     <h1>$title</h1>
     <div class="subtitle">$subtitle</div>
+    <div class="hero-note">$hero_note</div>
   </div>
-  <div class="page-actions">
+  <div class="proxy-hero-actions">
+    <label class="inline-field">
+      <span class="meta-label">Window</span>
+      <select id="proxy-window-select" class="input proxy-window-select">
+        $window_options_html
+      </select>
+    </label>
     <a class="button secondary" href="$dashboard_url">Back to dashboard</a>
   </div>
 </section>
 
-<section class="metrics-grid" id="proxy-metrics">
+<section class="metrics-grid proxy-summary-grid" id="proxy-metrics">
   $metrics_html
 </section>
 
-<section class="panel-section">
-  <div class="toolbar">
+<section class="panel-section proxy-analytics">
+  <div class="toolbar proxy-toolbar">
     <div class="toolbar-left">
-      <div class="toolbar-note" id="proxy-sync-state">$toolbar_note</div>
+      <input id="proxy-search" class="input search-input" type="search" placeholder="Search endpoint, instance, or error">
+      <select id="proxy-sort" class="input sort-select">
+        $sort_options_html
+      </select>
+      <div class="filter-row" id="proxy-status-filters">
+        $status_filters_html
+      </div>
     </div>
     <div class="toolbar-right">
+      <div class="toolbar-note" id="proxy-sync-state">$toolbar_note</div>
       <button type="button" class="button secondary" id="proxy-refresh">Refresh now</button>
     </div>
   </div>
-  <div class="proxy-chart-card">
-    <div class="section-title">Proxy calls</div>
-    <div class="proxy-chart-layout">
-      <div class="pie-chart" id="proxy-pie-chart">
-        <div class="pie-center">
-          <strong id="proxy-chart-total">$chart_total</strong>
-          <span><span id="proxy-chart-success">$chart_success</span> successful</span>
+  <div class="proxy-chart-grid">
+    <section class="proxy-chart-card proxy-donut-card">
+      <div class="section-title">Outcome mix</div>
+      <div class="proxy-chart-subtitle">Success and failure buckets for proxy endpoints over the selected window.</div>
+      <div class="proxy-donut-layout">
+        <div class="pie-chart proxy-pie-chart" id="proxy-pie-chart">
+          <div class="pie-center">
+            <strong id="proxy-chart-total">$chart_total</strong>
+            <span id="proxy-chart-success-rate">$chart_success_rate</span>
+          </div>
+        </div>
+        <div class="proxy-chart-meta">
+          <div class="chart-meta-title">Read this first</div>
+          <div class="chart-meta-copy">The table below is sorted by badness first, so broken proxies float up immediately.</div>
         </div>
       </div>
+    </section>
+    <section class="proxy-chart-card proxy-legend-card">
+      <div class="section-title">Failure breakdown</div>
       <div class="legend-list" id="proxy-chart-legend">
         $chart_legend_html
       </div>
-    </div>
+    </section>
   </div>
 </section>
 
 <section class="panel-section">
-  <div class="section-title">Pods</div>
+  <div class="section-title">Proxy endpoints</div>
   <div class="table-wrap">
     <table class="ops-table proxy-table">
       <thead>
         <tr>
-          <th>Instance</th>
+          <th>Proxy endpoint</th>
           <th>Status</th>
+          <th>Coverage</th>
           <th>Success</th>
           <th>Failures</th>
-          <th>Avg response</th>
+          <th>Avg latency</th>
           <th>RPS / RPM</th>
           <th>Top error</th>
         </tr>
       </thead>
-      <tbody id="proxy-pods-body">
-        $pods_rows_html
+      <tbody id="proxy-table-body">
+        $proxy_rows_html
       </tbody>
     </table>
   </div>

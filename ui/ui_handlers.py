@@ -59,11 +59,19 @@ from ui.ui_logs import (
 )
 from ui.ui_pages import _dashboard, _dashboard_counts, _detail_page, _new_instance_page, _proxy_stats_page
 from ui.ui_proxy_stats import _load_proxy_statistics
+from core.proxy_stats import DEFAULT_PROXY_WINDOW_SPEC, PROXY_WINDOW_PRESETS, parse_proxy_window_spec
 
 
 async def _run_blocking(func: Any, /, *args: Any, **kwargs: Any) -> Any:
     """Run synchronous control-plane I/O away from the aiohttp event loop."""
     return await asyncio.to_thread(func, *args, **kwargs)
+
+
+def _proxy_window_from_request(request: web.Request) -> str:
+    raw = str(request.query.get("window") or "").strip()
+    _, selected = parse_proxy_window_spec(raw or DEFAULT_PROXY_WINDOW_SPEC)
+    valid = {spec for spec, _seconds in PROXY_WINDOW_PRESETS}
+    return selected if selected in valid else DEFAULT_PROXY_WINDOW_SPEC
 
 
 async def healthz(_: web.Request) -> web.Response:
@@ -100,9 +108,10 @@ async def proxy_stats_page(request: web.Request) -> web.Response:
     """Proxy statistics page handler."""
     settings: UISettings = request.app["settings"]
     flash, flash_kind = _flash_from_request(request)
-    payload = await _run_blocking(_load_proxy_statistics, settings)
+    selected_window = _proxy_window_from_request(request)
+    payload = await _run_blocking(_load_proxy_statistics, settings, window_spec=selected_window)
     return web.Response(
-        text=_proxy_stats_page(settings, payload, flash, flash_kind),
+        text=_proxy_stats_page(settings, payload, flash, flash_kind, selected_window=selected_window),
         content_type="text/html",
     )
 
@@ -111,7 +120,8 @@ async def proxy_stats_api(request: web.Request) -> web.Response:
     """Proxy statistics API endpoint."""
     settings: UISettings = request.app["settings"]
     try:
-        payload = await _run_blocking(_load_proxy_statistics, settings)
+        selected_window = _proxy_window_from_request(request)
+        payload = await _run_blocking(_load_proxy_statistics, settings, window_spec=selected_window)
     except web.HTTPException:
         raise
     except Exception as exc:

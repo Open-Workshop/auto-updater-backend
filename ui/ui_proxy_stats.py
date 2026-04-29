@@ -9,6 +9,7 @@ from typing import Any
 
 import requests
 
+from core.proxy_stats import format_proxy_window_label, parse_proxy_window_spec
 from kube.mirror_instance import parser_service_url
 from ui.ui_common import UISettings
 from ui.ui_instance import _load_instance_summaries
@@ -21,7 +22,7 @@ def _utcnow_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
-def _empty_proxy_stats() -> dict[str, Any]:
+def _empty_proxy_stats(window_seconds: float = 3600.0) -> dict[str, Any]:
     return {
         "totalCalls": 0,
         "successCalls": 0,
@@ -29,35 +30,101 @@ def _empty_proxy_stats() -> dict[str, Any]:
         "totalElapsedSeconds": 0.0,
         "averageResponseMs": None,
         "recentRequests": 0,
-        "recentWindowSeconds": 60.0,
+        "recentWindowSeconds": window_seconds,
+        "windowSeconds": window_seconds,
+        "windowLabel": format_proxy_window_label(window_seconds),
         "requestsPerSecond": 0.0,
         "requestsPerMinute": 0.0,
         "errorCounts": {},
+        "healthyProxies": 0,
+        "degradedProxies": 0,
+        "brokenProxies": 0,
+        "proxyCount": 0,
+        "proxies": [],
     }
 
 
-def _proxy_status(
-    *,
-    reachable: bool,
-    proxy_configured: bool,
-    total_calls: int,
-    success_calls: int,
-    failure_calls: int,
-) -> tuple[str, str]:
-    if not reachable:
-        return "Offline", "muted"
-    if not proxy_configured:
-        return "No proxy", "muted"
+def _status_for_proxy(*, total_calls: int, success_calls: int, failure_calls: int) -> tuple[str, str, int]:
     if total_calls <= 0:
-        return "Idle", "info"
+        return "Idle", "muted", 20
+    if success_calls <= 0 and failure_calls > 0:
+        return "Broken", "error", 40
     if success_calls > 0 and failure_calls > 0:
-        return "Degraded", "warning"
-    if success_calls > 0:
-        return "Working", "healthy"
-    return "Broken", "error"
+        return "Degraded", "warning", 30
+    return "Healthy", "healthy", 10
 
 
-def _fetch_proxy_snapshot(settings: UISettings, summary: dict[str, Any]) -> dict[str, Any]:
+def _sort_error_counts(error_counts: dict[str, int]) -> dict[str, int]:
+    return {
+        key: value
+        for key, value in sorted(error_counts.items(), key=lambda item: (-int(item[1]), item[0]))
+    }
+
+
+def _normalize_stats(stats: dict[str, Any], window_seconds: float) -> dict[str, Any]:
+    total_calls = int(stats.get("totalCalls") or stats.get("recentRequests") or 0)
+    success_calls = int(stats.get("successCalls") or 0)
+    failure_calls = int(stats.get("failureCalls") or 0)
+    total_elapsed_seconds = float(stats.get("totalElapsedSeconds") or 0.0)
+    average_response_ms = (
+        float(stats["averageResponseMs"])
+        if stats.get("averageResponseMs") is not None
+        else None
+    )
+    requests_per_second = float(stats.get("requestsPerSecond") or 0.0)
+    if not requests_per_second and window_seconds > 0:
+        requests_per_second = total_calls / window_seconds
+    requests_per_minute = float(stats.get("requestsPerMinute") or requests_per_second * 60.0)
+    error_counts = _sort_error_counts({str(key): int(value) for key, value in dict(stats.get("errorCounts") or {}).items()})
+    top_error = next(iter(error_counts.items()), (None, 0))
+    return {
+        "totalCalls": total_calls,
+        "successCalls": success_calls,
+        "failureCalls": failure_calls,
+        "totalElapsedSeconds": total_elapsed_seconds,
+        "averageResponseMs": average_response_ms,
+        "recentRequests": total_calls,
+        "recentWindowSeconds": window_seconds,
+        "windowSeconds": window_seconds,
+        "windowLabel": stats.get("windowLabel") or format_proxy_window_label(window_seconds),
+        "requestsPerSecond": requests_per_second,
+        "requestsPerMinute": requests_per_minute,
+        "errorCounts": error_counts,
+        "failureRate": (failure_calls / total_calls) if total_calls else 0.0,
+        "topError": {
+            "label": top_error[0] or "",
+            "count": int(top_error[1] or 0),
+        },
+    }
+
+
+def _normalize_source_entry(item: dict[str, Any], window_seconds: float) -> dict[str, Any]:
+    stats = _normalize_stats(dict(item.get("stats") or {}), window_seconds)
+    pod_name = str(item.get("podName") or "").strip()
+    instance_name = str(item.get("instanceName") or "").strip()
+    proxy_count = int(item.get("proxyCount") or len(list(item.get("proxies") or [])))
+    return {
+        "instanceName": instance_name,
+        "podName": pod_name,
+        "reachable": bool(item.get("reachable")),
+        "proxyConfigured": bool(item.get("proxyConfigured")),
+        "proxyCount": proxy_count,
+        "error": str(item.get("error") or ""),
+        "windowSeconds": window_seconds,
+        "windowLabel": str(item.get("windowLabel") or stats["windowLabel"]),
+        "stats": stats,
+        "proxies": list(item.get("proxies") or []),
+        "generatedAt": str(item.get("generatedAt") or _utcnow_iso()),
+    }
+
+
+def _fetch_proxy_snapshot(
+    settings: UISettings,
+    summary: dict[str, Any],
+    *,
+    window_spec: str,
+    window_seconds: float,
+) -> dict[str, Any]:
     name = str(summary.get("name") or "")
     parser_info = dict(summary.get("parser") or {})
     pod_name = str(parser_info.get("podName") or "")
@@ -65,6 +132,7 @@ def _fetch_proxy_snapshot(settings: UISettings, summary: dict[str, Any]) -> dict
     try:
         response = requests.get(
             url,
+            params={"window": window_spec},
             timeout=PROXY_STATS_TIMEOUT_SECONDS,
             headers={"Accept": "application/json"},
         )
@@ -73,183 +141,258 @@ def _fetch_proxy_snapshot(settings: UISettings, summary: dict[str, Any]) -> dict
             raise RuntimeError(str(payload.get("error") or f"HTTP {response.status_code}"))
     except Exception as exc:
         return {
-            "name": name,
-            "parserPod": pod_name,
-            "health": str(summary.get("health") or ""),
-            "healthTone": str(summary.get("healthTone") or "muted"),
-            "enabled": bool(summary.get("enabled")),
+            "instanceName": name,
+            "podName": pod_name,
             "reachable": False,
             "proxyConfigured": False,
-            "proxyPoolSize": 0,
-            "proxyScope": "",
+            "proxyCount": 0,
+            "windowSeconds": window_seconds,
+            "windowLabel": window_spec,
+            "stats": _empty_proxy_stats(window_seconds),
+            "proxies": [],
             "error": str(exc),
-            "stats": _empty_proxy_stats(),
-            "urls": dict(summary.get("urls") or {}),
+            "generatedAt": _utcnow_iso(),
         }
 
-    stats = dict(payload.get("stats") or {})
-    total_calls = int(stats.get("totalCalls") or 0)
-    success_calls = int(stats.get("successCalls") or 0)
-    failure_calls = int(stats.get("failureCalls") or 0)
-    total_elapsed_seconds = float(stats.get("totalElapsedSeconds") or 0.0)
-    recent_requests = int(stats.get("recentRequests") or 0)
-    recent_window_seconds = float(stats.get("recentWindowSeconds") or 60.0) or 60.0
-    requests_per_second = recent_requests / recent_window_seconds
-    requests_per_minute = requests_per_second * 60.0
-    proxy_configured = bool(payload.get("proxyConfigured"))
-    status_label, status_tone = _proxy_status(
-        reachable=True,
-        proxy_configured=proxy_configured,
-        total_calls=total_calls,
-        success_calls=success_calls,
-        failure_calls=failure_calls,
-    )
-    error_counts = dict(stats.get("errorCounts") or {})
-    sorted_errors = {
-        key: value
-        for key, value in sorted(
-            error_counts.items(),
-            key=lambda item: (-int(item[1]), item[0]),
-        )
-    }
-    top_error = next(iter(sorted_errors.items()), (None, 0))
-    average_response_ms = (
-        float(stats["averageResponseMs"])
-        if stats.get("averageResponseMs") is not None
-        else None
-    )
-    return {
-        "name": name,
-        "parserPod": str(payload.get("podName") or pod_name or ""),
-        "health": str(summary.get("health") or ""),
-        "healthTone": str(summary.get("healthTone") or "muted"),
-        "enabled": bool(summary.get("enabled")),
-        "reachable": True,
-        "proxyConfigured": proxy_configured,
-        "proxyPoolSize": int(payload.get("proxyPoolSize") or 0),
-        "proxyScope": str(payload.get("proxyScope") or ""),
-        "statusLabel": status_label,
-        "statusTone": status_tone,
-        "statusSeverity": {
-            "Offline": 50,
-            "Broken": 40,
-            "Degraded": 30,
-            "Idle": 20,
-            "No proxy": 10,
-            "Working": 0,
-        }.get(status_label, 20),
-        "stats": {
-            "totalCalls": total_calls,
-            "successCalls": success_calls,
-            "failureCalls": failure_calls,
-            "totalElapsedSeconds": total_elapsed_seconds,
-            "averageResponseMs": average_response_ms,
-            "recentRequests": recent_requests,
-            "recentWindowSeconds": recent_window_seconds,
-            "requestsPerSecond": requests_per_second,
-            "requestsPerMinute": requests_per_minute,
-            "errorCounts": sorted_errors,
-            "topError": {
-                "label": top_error[0],
-                "count": int(top_error[1] or 0),
+    window_seconds = float(payload.get("windowSeconds") or 0.0)
+    window_label = str(payload.get("windowLabel") or window_spec)
+    stats = _normalize_stats(dict(payload.get("stats") or {}), window_seconds or 3600.0)
+    proxy_items: list[dict[str, Any]] = []
+    for proxy in list(payload.get("proxies") or []):
+        proxy_stats = _normalize_stats(dict(proxy.get("stats") or {}), window_seconds or stats["windowSeconds"])
+        proxy_key = str(proxy.get("proxyKey") or proxy.get("proxyLabel") or "").strip()
+        proxy_label = str(proxy.get("proxyLabel") or proxy_key or "proxy").strip() or "proxy"
+        proxy_items.append(
+            {
+                "proxyKey": proxy_key or proxy_label,
+                "proxyLabel": proxy_label,
+                "stats": proxy_stats,
             }
-            if top_error[0]
-            else {"label": "", "count": 0},
-        },
-        "urls": dict(summary.get("urls") or {}),
+        )
+    return {
+        "instanceName": name,
+        "podName": str(payload.get("podName") or pod_name or ""),
+        "reachable": True,
+        "proxyConfigured": bool(payload.get("proxyConfigured")),
+        "proxyCount": int(payload.get("proxyCount") or len(proxy_items)),
+        "windowSeconds": window_seconds or stats["windowSeconds"],
+        "windowLabel": window_label,
+        "stats": stats,
+        "proxies": proxy_items,
         "error": "",
         "generatedAt": str(payload.get("generatedAt") or _utcnow_iso()),
     }
 
 
-def _aggregate_proxy_stats(items: list[dict[str, Any]]) -> dict[str, Any]:
-    total_pods = len(items)
-    configured_pods = 0
-    working_pods = 0
-    reachable_pods = 0
+def _aggregate_proxy_stats(
+    proxies: list[dict[str, Any]],
+    *,
+    source_total: int,
+    source_responded: int,
+    window_seconds: float,
+) -> dict[str, Any]:
     total_calls = 0
     success_calls = 0
     failure_calls = 0
     total_elapsed_seconds = 0.0
-    recent_requests = 0
-    recent_window_seconds = 60.0
     error_counts: Counter[str] = Counter()
+    pods_with_success: set[str] = set()
+    pods_with_traffic: set[str] = set()
+    healthy_proxies = 0
+    degraded_proxies = 0
+    broken_proxies = 0
 
-    for item in items:
-        stats = dict(item.get("stats") or {})
-        if bool(item.get("reachable")):
-            reachable_pods += 1
-        if bool(item.get("proxyConfigured")):
-            configured_pods += 1
-        status_label = str(item.get("statusLabel") or "")
-        if status_label in {"Working", "Degraded"}:
-            working_pods += 1
+    for proxy in proxies:
+        stats = dict(proxy.get("stats") or {})
         total_calls += int(stats.get("totalCalls") or 0)
         success_calls += int(stats.get("successCalls") or 0)
         failure_calls += int(stats.get("failureCalls") or 0)
         total_elapsed_seconds += float(stats.get("totalElapsedSeconds") or 0.0)
-        recent_requests += int(stats.get("recentRequests") or 0)
-        recent_window_seconds = float(stats.get("recentWindowSeconds") or recent_window_seconds)
         error_counts.update(dict(stats.get("errorCounts") or {}))
+        pods_with_success.update(set(proxy.get("podsWorking") or []))
+        pods_with_traffic.update(set(proxy.get("podsSeen") or []))
+
+        status = str(proxy.get("statusLabel") or "")
+        if status == "Healthy":
+            healthy_proxies += 1
+        elif status == "Degraded":
+            degraded_proxies += 1
+        elif status == "Broken":
+            broken_proxies += 1
 
     average_response_ms = (
         (total_elapsed_seconds / total_calls) * 1000.0 if total_calls else None
     )
-    requests_per_second = recent_requests / recent_window_seconds if recent_window_seconds else 0.0
+    requests_per_second = total_calls / window_seconds if window_seconds else 0.0
     requests_per_minute = requests_per_second * 60.0
+    failure_rate = (failure_calls / total_calls) if total_calls else 0.0
     error_breakdown = [
         {"label": label, "count": count}
-        for label, count in sorted(
-            error_counts.items(), key=lambda item: (-item[1], item[0])
-        )
+        for label, count in sorted(error_counts.items(), key=lambda item: (-item[1], item[0]))
     ]
     return {
-        "podsTotal": total_pods,
-        "podsReachable": reachable_pods,
-        "podsConfigured": configured_pods,
-        "podsWorking": working_pods,
+        "proxyCount": len(proxies),
+        "sourcePodsTotal": source_total,
+        "sourcePodsResponded": source_responded,
+        "sourcePodsMissing": max(0, source_total - source_responded),
+        "podsWithSuccess": len(pods_with_success),
+        "podsWithTraffic": len(pods_with_traffic),
         "totalCalls": total_calls,
         "successCalls": success_calls,
         "failureCalls": failure_calls,
+        "failureRate": failure_rate,
         "averageResponseMs": average_response_ms,
-        "recentRequests": recent_requests,
-        "recentWindowSeconds": recent_window_seconds,
+        "recentRequests": total_calls,
+        "recentWindowSeconds": window_seconds,
         "requestsPerSecond": requests_per_second,
         "requestsPerMinute": requests_per_minute,
         "errorCounts": dict(error_counts),
         "errorBreakdown": error_breakdown,
+        "healthyProxies": healthy_proxies,
+        "degradedProxies": degraded_proxies,
+        "brokenProxies": broken_proxies,
     }
 
 
-def _load_proxy_statistics(settings: UISettings) -> dict[str, Any]:
-    summaries = _load_instance_summaries(settings)
-    if not summaries:
-        return {
-            "generatedAt": _utcnow_iso(),
-            "summary": _aggregate_proxy_stats([]),
-            "pods": [],
-            "errorBreakdown": [],
-        }
+def _finalize_proxy_bucket(
+    bucket: dict[str, Any],
+    *,
+    window_seconds: float,
+) -> dict[str, Any]:
+    stats = _normalize_stats(dict(bucket.get("stats") or {}), window_seconds)
+    pods_seen = sorted(set(bucket.get("podsSeen") or []))
+    pods_working = sorted(set(bucket.get("podsWorking") or []))
+    status_label, status_tone, status_severity = _status_for_proxy(
+        total_calls=int(stats.get("totalCalls") or 0),
+        success_calls=int(stats.get("successCalls") or 0),
+        failure_calls=int(stats.get("failureCalls") or 0),
+    )
+    return {
+        "proxyKey": str(bucket.get("proxyKey") or ""),
+        "proxyLabel": str(bucket.get("proxyLabel") or bucket.get("proxyKey") or ""),
+        "statusLabel": status_label,
+        "statusTone": status_tone,
+        "statusSeverity": status_severity,
+        "podsSeen": pods_seen,
+        "podsWorking": pods_working,
+        "podCount": len(pods_seen),
+        "workingPodCount": len(pods_working),
+        "sources": list(bucket.get("sources") or []),
+        "stats": stats,
+    }
 
-    items: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=max(1, min(8, len(summaries)))) as executor:
-        futures = {
-            executor.submit(_fetch_proxy_snapshot, settings, summary): summary
-            for summary in summaries
-        }
-        for future in as_completed(futures):
-            items.append(future.result())
 
-    items.sort(
+def _merge_proxy_sources(items: list[dict[str, Any]], window_seconds: float) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for item in items:
+        pod_name = str(item.get("podName") or "").strip()
+        instance_name = str(item.get("instanceName") or "").strip()
+        for proxy in list(item.get("proxies") or []):
+            stats = _normalize_stats(dict(proxy.get("stats") or {}), window_seconds)
+            proxy_key = str(proxy.get("proxyKey") or proxy.get("proxyLabel") or "").strip()
+            if not proxy_key:
+                continue
+            proxy_label = str(proxy.get("proxyLabel") or proxy_key).strip() or proxy_key
+            bucket = buckets.setdefault(
+                proxy_key,
+                {
+                    "proxyKey": proxy_key,
+                    "proxyLabel": proxy_label,
+                    "stats": {
+                        "totalCalls": 0,
+                        "successCalls": 0,
+                        "failureCalls": 0,
+                        "totalElapsedSeconds": 0.0,
+                        "errorCounts": Counter(),
+                    },
+                    "podsSeen": set(),
+                    "podsWorking": set(),
+                    "sources": [],
+                },
+            )
+            bucket["proxyLabel"] = proxy_label
+            bucket["stats"]["totalCalls"] += int(stats.get("totalCalls") or 0)
+            bucket["stats"]["successCalls"] += int(stats.get("successCalls") or 0)
+            bucket["stats"]["failureCalls"] += int(stats.get("failureCalls") or 0)
+            bucket["stats"]["totalElapsedSeconds"] += float(stats.get("totalElapsedSeconds") or 0.0)
+            bucket["stats"]["errorCounts"].update(dict(stats.get("errorCounts") or {}))
+            if pod_name:
+                bucket["podsSeen"].add(pod_name)
+                if int(stats.get("successCalls") or 0) > 0:
+                    bucket["podsWorking"].add(pod_name)
+            bucket["sources"].append(
+                {
+                    "instanceName": instance_name,
+                    "podName": pod_name,
+                    "windowSeconds": window_seconds,
+                    "windowLabel": str(item.get("windowLabel") or stats.get("windowLabel") or "1h"),
+                    "stats": stats,
+                }
+            )
+
+    proxies = []
+    for bucket in buckets.values():
+        proxies.append(
+            {
+                **_finalize_proxy_bucket(bucket, window_seconds=window_seconds),
+            }
+        )
+    proxies.sort(
         key=lambda item: (
             -int(item.get("statusSeverity") or 20),
-            str(item.get("name") or "").lower(),
+            -int((dict(item.get("stats") or {})).get("failureCalls") or 0),
+            -int((dict(item.get("stats") or {})).get("totalCalls") or 0),
+            str(item.get("proxyLabel") or "").lower(),
         )
     )
-    summary = _aggregate_proxy_stats(items)
+    return proxies
+
+
+def _load_proxy_statistics(
+    settings: UISettings,
+    *,
+    window_spec: str | None = None,
+) -> dict[str, Any]:
+    summaries = _load_instance_summaries(settings)
+    selected_window_seconds, selected_window_label = parse_proxy_window_spec(window_spec)
+    items: list[dict[str, Any]] = []
+    if summaries:
+        with ThreadPoolExecutor(max_workers=max(1, min(8, len(summaries)))) as executor:
+            futures = {
+                executor.submit(
+                    _fetch_proxy_snapshot,
+                    settings,
+                    summary,
+                    window_spec=selected_window_label,
+                    window_seconds=selected_window_seconds,
+                ): summary
+                for summary in summaries
+            }
+            for future in as_completed(futures):
+                items.append(_normalize_source_entry(future.result(), selected_window_seconds))
+
+    source_total = len(summaries)
+    source_responded = sum(1 for item in items if bool(item.get("reachable")))
+    proxies = _merge_proxy_sources(items, selected_window_seconds)
+    summary = _aggregate_proxy_stats(
+        proxies,
+        source_total=source_total,
+        source_responded=source_responded,
+        window_seconds=selected_window_seconds,
+    )
     return {
         "generatedAt": _utcnow_iso(),
+        "window": {
+            "spec": selected_window_label,
+            "seconds": selected_window_seconds,
+            "label": selected_window_label,
+        },
         "summary": summary,
-        "pods": items,
+        "proxies": proxies,
         "errorBreakdown": summary["errorBreakdown"],
+        "sources": {
+            "total": source_total,
+            "responded": source_responded,
+            "missing": summary["sourcePodsMissing"],
+        },
     }

@@ -167,91 +167,195 @@ def _sample_instance() -> dict:
 def _sample_proxy_payload() -> dict:
     return {
         "generatedAt": "2026-04-29T11:15:00+00:00",
+        "window": {
+            "spec": "1h",
+            "seconds": 3600.0,
+            "label": "1h",
+        },
         "summary": {
-            "podsTotal": 2,
-            "podsReachable": 2,
-            "podsConfigured": 2,
-            "podsWorking": 2,
-            "totalCalls": 12,
-            "successCalls": 9,
-            "failureCalls": 3,
+            "proxyCount": 2,
+            "sourcePodsTotal": 3,
+            "sourcePodsResponded": 2,
+            "sourcePodsMissing": 1,
+            "healthyProxies": 1,
+            "degradedProxies": 1,
+            "brokenProxies": 0,
+            "podsWithSuccess": 2,
+            "podsWithTraffic": 2,
+            "totalCalls": 120,
+            "successCalls": 96,
+            "failureCalls": 24,
+            "failureRate": 0.2,
             "averageResponseMs": 321.5,
-            "recentRequests": 6,
-            "recentWindowSeconds": 60.0,
-            "requestsPerSecond": 0.1,
-            "requestsPerMinute": 6.0,
+            "recentRequests": 120,
+            "recentWindowSeconds": 3600.0,
+            "requestsPerSecond": 0.0333333333,
+            "requestsPerMinute": 2.0,
+            "errorCounts": {
+                "ProxyTimeoutError": 12,
+                "DNSError": 8,
+                "HTTP_503": 4,
+            },
         },
         "errorBreakdown": [
-            {"label": "ProxyTimeoutError", "count": 2},
-            {"label": "DNSError", "count": 1},
+            {"label": "ProxyTimeoutError", "count": 12},
+            {"label": "DNSError", "count": 8},
+            {"label": "HTTP_503", "count": 4},
         ],
-        "pods": [
+        "proxies": [
             {
-                "name": "demo",
-                "parserPod": "demo-parser-0",
-                "health": "Healthy",
-                "healthTone": "healthy",
-                "enabled": True,
-                "reachable": True,
-                "proxyConfigured": True,
-                "proxyPoolSize": 5,
-                "proxyScope": "mod_pages",
-                "statusLabel": "Working",
-                "statusTone": "healthy",
-                "generatedAt": "2026-04-29T11:15:00+00:00",
-                "stats": {
-                    "totalCalls": 8,
-                    "successCalls": 7,
-                    "failureCalls": 1,
-                    "totalElapsedSeconds": 2.25,
-                    "averageResponseMs": 281.25,
-                    "recentRequests": 4,
-                    "recentWindowSeconds": 60.0,
-                    "requestsPerSecond": 0.0667,
-                    "requestsPerMinute": 4.0,
-                    "errorCounts": {"ProxyTimeoutError": 1},
-                    "topError": {"label": "ProxyTimeoutError", "count": 1},
-                },
-                "urls": {
-                    "detail": "/auto-updater/instances/demo",
-                },
-                "error": "",
-            },
-            {
-                "name": "demo-2",
-                "parserPod": "demo-2-parser-0",
-                "health": "Degraded",
-                "healthTone": "warning",
-                "enabled": True,
-                "reachable": True,
-                "proxyConfigured": True,
-                "proxyPoolSize": 4,
-                "proxyScope": "mod_pages",
+                "proxyKey": "socks5://10.0.0.2:3001",
+                "proxyLabel": "socks5://10.0.0.2:3001",
                 "statusLabel": "Degraded",
                 "statusTone": "warning",
-                "generatedAt": "2026-04-29T11:15:00+00:00",
+                "statusSeverity": 30,
+                "podsSeen": ["demo-parser-0", "demo-parser-1"],
+                "podsWorking": ["demo-parser-0"],
+                "podCount": 2,
+                "workingPodCount": 1,
+                "sources": [
+                    {
+                        "instanceName": "demo",
+                        "podName": "demo-parser-0",
+                        "windowSeconds": 3600.0,
+                        "windowLabel": "1h",
+                        "stats": {
+                            "totalCalls": 18,
+                            "successCalls": 18,
+                            "failureCalls": 0,
+                            "totalElapsedSeconds": 5.94,
+                            "averageResponseMs": 330.0,
+                            "recentRequests": 18,
+                            "recentWindowSeconds": 3600.0,
+                            "windowSeconds": 3600.0,
+                            "windowLabel": "1h",
+                            "requestsPerSecond": 0.005,
+                            "requestsPerMinute": 0.3,
+                            "errorCounts": {},
+                            "failureRate": 0.0,
+                            "topError": {"label": "", "count": 0},
+                        },
+                    },
+                    {
+                        "instanceName": "demo",
+                        "podName": "demo-parser-1",
+                        "windowSeconds": 3600.0,
+                        "windowLabel": "1h",
+                        "stats": {
+                            "totalCalls": 6,
+                            "successCalls": 0,
+                            "failureCalls": 6,
+                            "totalElapsedSeconds": 2.34,
+                            "averageResponseMs": 390.0,
+                            "recentRequests": 6,
+                            "recentWindowSeconds": 3600.0,
+                            "windowSeconds": 3600.0,
+                            "windowLabel": "1h",
+                            "requestsPerSecond": 0.0017,
+                            "requestsPerMinute": 0.1,
+                            "errorCounts": {"ProxyTimeoutError": 6},
+                            "failureRate": 1.0,
+                            "topError": {"label": "ProxyTimeoutError", "count": 6},
+                        },
+                    },
+                ],
                 "stats": {
-                    "totalCalls": 4,
-                    "successCalls": 2,
-                    "failureCalls": 2,
-                    "totalElapsedSeconds": 1.75,
-                    "averageResponseMs": 437.5,
-                    "recentRequests": 2,
-                    "recentWindowSeconds": 60.0,
-                    "requestsPerSecond": 0.0333,
-                    "requestsPerMinute": 2.0,
-                    "errorCounts": {"DNSError": 1, "ProxyTimeoutError": 1},
-                    "topError": {"label": "DNSError", "count": 1},
+                    "totalCalls": 24,
+                    "successCalls": 18,
+                    "failureCalls": 6,
+                    "totalElapsedSeconds": 8.28,
+                    "averageResponseMs": 345.0,
+                    "recentRequests": 24,
+                    "recentWindowSeconds": 3600.0,
+                    "windowSeconds": 3600.0,
+                    "windowLabel": "1h",
+                    "requestsPerSecond": 0.0067,
+                    "requestsPerMinute": 0.4,
+                    "errorCounts": {"ProxyTimeoutError": 6},
+                    "failureRate": 0.25,
+                    "topError": {"label": "ProxyTimeoutError", "count": 6},
                 },
-                "urls": {
-                    "detail": "/auto-updater/instances/demo-2",
+            },
+            {
+                "proxyKey": "socks5://10.0.0.1:3001",
+                "proxyLabel": "socks5://10.0.0.1:3001",
+                "statusLabel": "Healthy",
+                "statusTone": "healthy",
+                "statusSeverity": 10,
+                "podsSeen": ["demo-parser-0", "demo-parser-1"],
+                "podsWorking": ["demo-parser-0", "demo-parser-1"],
+                "podCount": 2,
+                "workingPodCount": 2,
+                "sources": [
+                    {
+                        "instanceName": "demo",
+                        "podName": "demo-parser-0",
+                        "windowSeconds": 3600.0,
+                        "windowLabel": "1h",
+                        "stats": {
+                            "totalCalls": 48,
+                            "successCalls": 48,
+                            "failureCalls": 0,
+                            "totalElapsedSeconds": 14.4,
+                            "averageResponseMs": 300.0,
+                            "recentRequests": 48,
+                            "recentWindowSeconds": 3600.0,
+                            "windowSeconds": 3600.0,
+                            "windowLabel": "1h",
+                            "requestsPerSecond": 0.0133,
+                            "requestsPerMinute": 0.8,
+                            "errorCounts": {},
+                            "failureRate": 0.0,
+                            "topError": {"label": "", "count": 0},
+                        },
+                    },
+                    {
+                        "instanceName": "demo",
+                        "podName": "demo-parser-1",
+                        "windowSeconds": 3600.0,
+                        "windowLabel": "1h",
+                        "stats": {
+                            "totalCalls": 48,
+                            "successCalls": 48,
+                            "failureCalls": 0,
+                            "totalElapsedSeconds": 14.88,
+                            "averageResponseMs": 310.0,
+                            "recentRequests": 48,
+                            "recentWindowSeconds": 3600.0,
+                            "windowSeconds": 3600.0,
+                            "windowLabel": "1h",
+                            "requestsPerSecond": 0.0133,
+                            "requestsPerMinute": 0.8,
+                            "errorCounts": {},
+                            "failureRate": 0.0,
+                            "topError": {"label": "", "count": 0},
+                        },
+                    },
+                ],
+                "stats": {
+                    "totalCalls": 96,
+                    "successCalls": 96,
+                    "failureCalls": 0,
+                    "totalElapsedSeconds": 29.28,
+                    "averageResponseMs": 305.0,
+                    "recentRequests": 96,
+                    "recentWindowSeconds": 3600.0,
+                    "windowSeconds": 3600.0,
+                    "windowLabel": "1h",
+                    "requestsPerSecond": 0.0267,
+                    "requestsPerMinute": 1.6,
+                    "errorCounts": {},
+                    "failureRate": 0.0,
+                    "topError": {"label": "", "count": 0},
                 },
-                "error": "",
             },
         ],
+        "sources": {
+            "total": 3,
+            "responded": 2,
+            "missing": 1,
+        },
     }
-
-
 def _secret_value(_: str, __: str, key: str) -> str:
     values = {
         "login": "demo-login",
@@ -294,7 +398,7 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("CPU live", text)
                 self.assertIn("Disk cap / used / req", text)
                 self.assertIn("Resources", text)
-                self.assertIn("Proxy stats", text)
+                self.assertIn("Proxy health", text)
                 self.assertIn("/auto-updater/proxy-stats", text)
                 self.assertIn("/auto-updater/assets/app.css", text)
                 self.assertIn("/auto-updater/assets/dashboard.js", text)
@@ -339,9 +443,12 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 response = await client.get("/auto-updater/proxy-stats", headers=_auth_headers())
                 self.assertEqual(response.status, 200)
                 text = await response.text()
-                self.assertIn("Proxy Observatory", text)
-                self.assertIn("Pods with working proxy", text)
-                self.assertIn("Proxy calls", text)
+                self.assertIn("Proxy Health", text)
+                self.assertIn("Proxy endpoints", text)
+                self.assertIn("Broken proxies", text)
+                self.assertIn("Outcome mix", text)
+                self.assertIn("Coverage", text)
+                self.assertIn("Proxy sources", text)
                 self.assertIn("proxy_stats.js", text)
                 self.assertIn("proxy-chart-total", text)
             finally:
@@ -356,10 +463,14 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 response = await client.get("/auto-updater/api/proxy-stats", headers=_auth_headers())
                 self.assertEqual(response.status, 200)
                 payload = await response.json()
-                self.assertEqual(payload["summary"]["podsWorking"], 2)
-                self.assertEqual(payload["summary"]["failureCalls"], 3)
+                self.assertEqual(payload["window"]["label"], "1h")
+                self.assertEqual(payload["summary"]["proxyCount"], 2)
+                self.assertEqual(payload["summary"]["healthyProxies"], 1)
+                self.assertEqual(payload["summary"]["degradedProxies"], 1)
+                self.assertEqual(payload["summary"]["podsWithSuccess"], 2)
                 self.assertEqual(payload["errorBreakdown"][0]["label"], "ProxyTimeoutError")
-                self.assertEqual(payload["pods"][0]["statusLabel"], "Working")
+                self.assertEqual(payload["proxies"][0]["statusLabel"], "Degraded")
+                self.assertEqual(payload["proxies"][1]["statusLabel"], "Healthy")
             finally:
                 await client.close()
 

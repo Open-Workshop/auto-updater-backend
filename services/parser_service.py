@@ -27,7 +27,7 @@ from steam.steam_mod import (
 )
 from sync.syncer import ensure_game, sync_mods
 from core.telemetry import init_telemetry, shutdown_telemetry, start_span
-from core.proxy_stats import snapshot_proxy_stats
+from core.proxy_stats import parse_proxy_window_spec, snapshot_proxy_stats
 from core.utils import ensure_dir, set_download_request_policy
 
 _CLIENT_REINIT_FIELDS = {
@@ -357,19 +357,31 @@ class ParserRuntime:
             "lastSyncFinishedAt": self.last_sync_finished_at,
             "lastSyncResult": self.last_sync_result,
             "lastError": self.last_error,
-            "proxyStats": self.proxy_snapshot(),
+            "proxyStats": self.proxy_snapshot(include_proxies=False),
         }
 
-    def proxy_snapshot(self) -> dict[str, Any]:
+    def proxy_snapshot(
+        self,
+        *,
+        window_seconds: float | None = None,
+        include_proxies: bool = True,
+    ) -> dict[str, Any]:
+        stats = snapshot_proxy_stats(window_seconds=window_seconds)
+        default_window_seconds, default_window_label = parse_proxy_window_spec(None)
+        window_seconds_value = float(stats.get("windowSeconds") or window_seconds or default_window_seconds)
+        window_label = str(stats.get("windowLabel") or default_window_label)
         return {
             "generatedAt": _utcnow_iso(),
+            "windowSeconds": window_seconds_value,
+            "windowLabel": window_label,
             "instanceName": self.cfg.instance_name,
             "workloadId": _workload_id_from_env(),
             "podName": os.environ.get("HOSTNAME", "").strip(),
             "proxyConfigured": bool(self.cfg.steam_proxy_pool),
             "proxyPoolSize": len(self.cfg.steam_proxy_pool),
             "proxyScope": self.cfg.steam_proxy_scope,
-            "stats": snapshot_proxy_stats(),
+            "stats": {k: v for k, v in stats.items() if k != "proxies"},
+            "proxies": list(stats.get("proxies") or []) if include_proxies else [],
         }
 
 
@@ -391,7 +403,8 @@ async def _status(request: web.Request) -> web.Response:
 
 async def _proxy_stats(request: web.Request) -> web.Response:
     runtime: ParserRuntime = request.app["runtime"]
-    return web.json_response(runtime.proxy_snapshot())
+    window_seconds, _ = parse_proxy_window_spec(request.query.get("window"))
+    return web.json_response(runtime.proxy_snapshot(window_seconds=window_seconds))
 
 
 async def _sync(request: web.Request) -> web.Response:

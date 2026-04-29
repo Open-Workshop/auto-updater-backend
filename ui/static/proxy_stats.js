@@ -1,23 +1,42 @@
 (() => {
-  const metricsRoot = document.getElementById("proxy-metrics");
-  const syncState = document.getElementById("proxy-sync-state");
+  const tableBody = document.getElementById("proxy-table-body");
+  const searchInput = document.getElementById("proxy-search");
+  const sortSelect = document.getElementById("proxy-sort");
+  const statusFilterRoot = document.getElementById("proxy-status-filters");
   const refreshButton = document.getElementById("proxy-refresh");
+  const windowSelect = document.getElementById("proxy-window-select");
+  const syncState = document.getElementById("proxy-sync-state");
   const payloadNode = document.getElementById("proxy-payload");
   const configNode = document.getElementById("proxy-config");
   const chartTotalNode = document.getElementById("proxy-chart-total");
-  const chartSuccessNode = document.getElementById("proxy-chart-success");
+  const chartSuccessRateNode = document.getElementById("proxy-chart-success-rate");
   const chartNode = document.getElementById("proxy-pie-chart");
   const legendRoot = document.getElementById("proxy-chart-legend");
-  const podsRoot = document.getElementById("proxy-pods-body");
+  const metricsRoot = document.getElementById("proxy-metrics");
 
-  if (!metricsRoot || !payloadNode || !configNode || !chartNode || !legendRoot || !podsRoot) {
+  if (
+    !tableBody
+    || !searchInput
+    || !sortSelect
+    || !statusFilterRoot
+    || !refreshButton
+    || !windowSelect
+    || !syncState
+    || !payloadNode
+    || !configNode
+    || !chartTotalNode
+    || !chartSuccessRateNode
+    || !chartNode
+    || !legendRoot
+    || !metricsRoot
+  ) {
     return;
   }
 
   const config = JSON.parse(configNode.textContent || "{}");
   const apiUrl = config.apiUrl || "";
-  const payload = JSON.parse(payloadNode.textContent || "{}");
-
+  const defaultSort = config.defaultSort || "bad_first";
+  const defaultWindow = config.selectedWindow || "1h";
   const palette = [
     "var(--healthy)",
     "var(--warning)",
@@ -27,7 +46,12 @@
     "var(--muted)",
   ];
 
-  let current = normalizePayload(payload);
+  let payload = normalizePayload(JSON.parse(payloadNode.textContent || "{}"));
+  let searchTerm = "";
+  let activeFilter = "All";
+  let sortKey = defaultSort;
+  let expandedKeys = new Set();
+  let selectedWindow = payload.window.spec || defaultWindow;
 
   function escapeHtml(value) {
     return String(value ?? "")
@@ -45,92 +69,224 @@
 
   function formatLatency(value) {
     const numeric = Number(value);
-    if (!Number.isFinite(numeric) || numeric < 0) {
-      return "n/a";
-    }
-    if (numeric >= 1000) {
-      return `${(numeric / 1000).toFixed(2)}s`;
-    }
-    if (numeric >= 100) {
-      return `${numeric.toFixed(0)}ms`;
-    }
+    if (!Number.isFinite(numeric) || numeric < 0) return "n/a";
+    if (numeric >= 1000) return `${(numeric / 1000).toFixed(2)}s`;
+    if (numeric >= 100) return `${numeric.toFixed(0)}ms`;
     return `${numeric.toFixed(1)}ms`;
   }
 
   function formatRate(value) {
     const numeric = Number(value);
-    if (!Number.isFinite(numeric)) {
-      return "0.0";
-    }
-    return numeric.toFixed(1);
+    if (!Number.isFinite(numeric) || numeric < 0) return "0.00";
+    if (numeric < 1) return numeric.toFixed(2);
+    if (numeric < 10) return numeric.toFixed(1);
+    return numeric.toFixed(0);
   }
 
-  function normalizeStats(stats) {
-    const totalCalls = Number(stats.totalCalls || 0);
-    const successCalls = Number(stats.successCalls || 0);
-    const failureCalls = Number(stats.failureCalls || 0);
-    const totalElapsedSeconds = Number(stats.totalElapsedSeconds || 0);
+  function formatPercent(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return "0%";
+    return `${Math.max(0, Math.min(100, Math.round(numeric * 100)))}%`;
+  }
+
+  function severityForStatus(status) {
+    if (status === "Broken") return 40;
+    if (status === "Degraded") return 30;
+    if (status === "Idle") return 20;
+    return 10;
+  }
+
+  function toneForStatus(status) {
+    if (status === "Broken") return "error";
+    if (status === "Degraded") return "warning";
+    if (status === "Healthy") return "healthy";
+    if (status === "Idle") return "muted";
+    return "muted";
+  }
+
+  function normalizeErrorCounts(errorCounts) {
+    const entries = Object.entries(errorCounts && typeof errorCounts === "object" ? errorCounts : {});
+    entries.sort((left, right) => {
+      const countDelta = Number(right[1] || 0) - Number(left[1] || 0);
+      if (countDelta !== 0) return countDelta;
+      return String(left[0] || "").localeCompare(String(right[0] || ""));
+    });
+    return Object.fromEntries(entries.map(([label, count]) => [String(label), Number(count || 0)]));
+  }
+
+  function normalizeStats(stats, windowSeconds, windowLabel) {
+    const totalCalls = Number(stats.totalCalls ?? stats.recentRequests ?? 0);
+    const successCalls = Number(stats.successCalls ?? 0);
+    const failureCalls = Number(stats.failureCalls ?? 0);
+    const totalElapsedSeconds = Number(stats.totalElapsedSeconds ?? 0);
     const averageResponseMs = stats.averageResponseMs === null || stats.averageResponseMs === undefined
       ? null
       : Number(stats.averageResponseMs);
-    const recentRequests = Number(stats.recentRequests || 0);
-    const recentWindowSeconds = Number(stats.recentWindowSeconds || 60) || 60;
-    const requestsPerSecond = Number(stats.requestsPerSecond || recentRequests / recentWindowSeconds);
-    const requestsPerMinute = Number(stats.requestsPerMinute || requestsPerSecond * 60);
-    const errorCounts = stats.errorCounts && typeof stats.errorCounts === "object"
-      ? stats.errorCounts
-      : {};
+    const requestsPerSecond = Number(stats.requestsPerSecond ?? (windowSeconds > 0 ? totalCalls / windowSeconds : 0));
+    const requestsPerMinute = Number(stats.requestsPerMinute ?? (requestsPerSecond * 60));
+    const errorCounts = normalizeErrorCounts(stats.errorCounts);
     const topError = stats.topError && typeof stats.topError === "object"
-      ? stats.topError
-      : { label: "", count: 0 };
+      ? {
+          label: String(stats.topError.label || ""),
+          count: Number(stats.topError.count || 0),
+        }
+      : {
+          label: "",
+          count: 0,
+        };
+    const failureRate = totalCalls > 0 ? failureCalls / totalCalls : 0;
     return {
       totalCalls,
       successCalls,
       failureCalls,
       totalElapsedSeconds,
       averageResponseMs,
-      recentRequests,
-      recentWindowSeconds,
+      recentRequests: Number(stats.recentRequests ?? totalCalls),
+      recentWindowSeconds: Number(stats.recentWindowSeconds ?? windowSeconds),
+      windowSeconds: Number(stats.windowSeconds ?? windowSeconds),
+      windowLabel: String(stats.windowLabel || windowLabel || "1h"),
       requestsPerSecond,
       requestsPerMinute,
       errorCounts,
-      topError: {
-        label: String(topError.label || ""),
-        count: Number(topError.count || 0),
-      },
+      failureRate,
+      topError,
+    };
+  }
+
+  function normalizeSource(source, windowSeconds, windowLabel) {
+    const stats = normalizeStats(source.stats || {}, windowSeconds, windowLabel);
+    return {
+      instanceName: String(source.instanceName || ""),
+      podName: String(source.podName || ""),
+      windowSeconds: Number(source.windowSeconds ?? windowSeconds),
+      windowLabel: String(source.windowLabel || windowLabel || "1h"),
+      stats,
+    };
+  }
+
+  function normalizeProxy(item, windowSeconds, windowLabel) {
+    const stats = normalizeStats(item.stats || {}, windowSeconds, windowLabel);
+    const podsSeen = Array.isArray(item.podsSeen) ? item.podsSeen.map((value) => String(value || "")).filter(Boolean) : [];
+    const podsWorking = Array.isArray(item.podsWorking) ? item.podsWorking.map((value) => String(value || "")).filter(Boolean) : [];
+    const sources = Array.isArray(item.sources)
+      ? item.sources.map((source) => normalizeSource(source, windowSeconds, windowLabel))
+      : [];
+    const statusLabel = String(item.statusLabel || (stats.totalCalls > 0 ? (stats.failureCalls > 0 ? (stats.successCalls > 0 ? "Degraded" : "Broken") : "Healthy") : "Idle"));
+    const statusTone = String(item.statusTone || toneForStatus(statusLabel));
+    const statusSeverity = Number(item.statusSeverity ?? severityForStatus(statusLabel));
+    const proxyKey = String(item.proxyKey || item.proxyLabel || "");
+    const proxyLabel = String(item.proxyLabel || proxyKey || "proxy");
+    const searchText = [
+      proxyKey,
+      proxyLabel,
+      statusLabel,
+      ...podsSeen,
+      ...podsWorking,
+      ...sources.flatMap((source) => [
+        source.instanceName,
+        source.podName,
+        source.stats.topError.label,
+      ]),
+      stats.topError.label,
+    ]
+      .join(" ")
+      .toLowerCase();
+
+    return {
+      proxyKey,
+      proxyLabel,
+      statusLabel,
+      statusTone,
+      statusSeverity,
+      podsSeen,
+      podsWorking,
+      podCount: podsSeen.length,
+      workingPodCount: podsWorking.length,
+      sourceCount: sources.length,
+      sources,
+      stats,
+      searchText,
     };
   }
 
   function normalizePayload(raw) {
+    const windowInfo = raw.window || {};
     const summary = raw.summary || {};
-    const items = Array.isArray(raw.pods) ? raw.pods : [];
+    const windowSeconds = Number(windowInfo.seconds ?? summary.recentWindowSeconds ?? 3600);
+    const windowLabel = String(windowInfo.label || windowInfo.spec || summary.windowLabel || "1h");
+    const proxies = (Array.isArray(raw.proxies) ? raw.proxies : [])
+      .map((item) => normalizeProxy(item, windowSeconds, windowLabel));
+    const sourceInfo = raw.sources || {};
+    const podsWithSuccess = summary.podsWithSuccess !== undefined
+      ? Number(summary.podsWithSuccess)
+      : new Set(proxies.flatMap((proxy) => proxy.podsWorking)).size;
+    const podsWithTraffic = summary.podsWithTraffic !== undefined
+      ? Number(summary.podsWithTraffic)
+      : new Set(proxies.flatMap((proxy) => proxy.podsSeen)).size;
+    const healthyProxies = summary.healthyProxies !== undefined
+      ? Number(summary.healthyProxies)
+      : proxies.filter((proxy) => proxy.statusLabel === "Healthy").length;
+    const degradedProxies = summary.degradedProxies !== undefined
+      ? Number(summary.degradedProxies)
+      : proxies.filter((proxy) => proxy.statusLabel === "Degraded").length;
+    const brokenProxies = summary.brokenProxies !== undefined
+      ? Number(summary.brokenProxies)
+      : proxies.filter((proxy) => proxy.statusLabel === "Broken").length;
+    const totalCalls = Number(summary.totalCalls ?? proxies.reduce((acc, proxy) => acc + proxy.stats.totalCalls, 0));
+    const successCalls = Number(summary.successCalls ?? proxies.reduce((acc, proxy) => acc + proxy.stats.successCalls, 0));
+    const failureCalls = Number(summary.failureCalls ?? proxies.reduce((acc, proxy) => acc + proxy.stats.failureCalls, 0));
+    const totalElapsedSeconds = Number(summary.totalElapsedSeconds ?? proxies.reduce((acc, proxy) => acc + proxy.stats.totalElapsedSeconds, 0));
+    const averageResponseMs = summary.averageResponseMs === null || summary.averageResponseMs === undefined
+      ? (totalCalls > 0 ? (totalElapsedSeconds / totalCalls) * 1000 : null)
+      : Number(summary.averageResponseMs);
+    const requestsPerSecond = Number(summary.requestsPerSecond ?? (windowSeconds > 0 ? totalCalls / windowSeconds : 0));
+    const requestsPerMinute = Number(summary.requestsPerMinute ?? requestsPerSecond * 60);
+    const errorCounts = normalizeErrorCounts(summary.errorCounts || proxies.reduce((acc, proxy) => {
+      for (const [label, count] of Object.entries(proxy.stats.errorCounts || {})) {
+        acc[label] = (acc[label] || 0) + Number(count || 0);
+      }
+      return acc;
+    }, {}));
+
     return {
-      generatedAt: raw.generatedAt || "",
-      summary: {
-        podsTotal: Number(summary.podsTotal || items.length || 0),
-        podsReachable: Number(summary.podsReachable || 0),
-        podsConfigured: Number(summary.podsConfigured || 0),
-        podsWorking: Number(summary.podsWorking || 0),
-        totalCalls: Number(summary.totalCalls || 0),
-        successCalls: Number(summary.successCalls || 0),
-        failureCalls: Number(summary.failureCalls || 0),
-        averageResponseMs: summary.averageResponseMs === null || summary.averageResponseMs === undefined
-          ? null
-          : Number(summary.averageResponseMs),
-        recentRequests: Number(summary.recentRequests || 0),
-        recentWindowSeconds: Number(summary.recentWindowSeconds || 60) || 60,
-        requestsPerSecond: Number(summary.requestsPerSecond || 0),
-        requestsPerMinute: Number(summary.requestsPerMinute || 0),
+      generatedAt: String(raw.generatedAt || ""),
+      window: {
+        spec: String(windowInfo.spec || windowLabel || "1h"),
+        label: String(windowInfo.label || windowLabel || "1h"),
+        seconds: windowSeconds,
       },
-      items: items.map((item) => ({
-        ...item,
-        stats: normalizeStats(item.stats || {}),
-      })),
+      summary: {
+        proxyCount: Number(summary.proxyCount ?? proxies.length),
+        sourcePodsTotal: Number(summary.sourcePodsTotal ?? sourceInfo.total ?? 0),
+        sourcePodsResponded: Number(summary.sourcePodsResponded ?? sourceInfo.responded ?? 0),
+        sourcePodsMissing: Number(summary.sourcePodsMissing ?? sourceInfo.missing ?? 0),
+        healthyProxies,
+        degradedProxies,
+        brokenProxies,
+        podsWithSuccess,
+        podsWithTraffic,
+        totalCalls,
+        successCalls,
+        failureCalls,
+        failureRate: totalCalls > 0 ? failureCalls / totalCalls : 0,
+        averageResponseMs,
+        recentRequests: Number(summary.recentRequests ?? totalCalls),
+        recentWindowSeconds: Number(summary.recentWindowSeconds ?? windowSeconds),
+        requestsPerSecond,
+        requestsPerMinute,
+        errorCounts,
+      },
+      proxies,
       errorBreakdown: Array.isArray(raw.errorBreakdown) ? raw.errorBreakdown : [],
+      sources: {
+        total: Number(sourceInfo.total ?? summary.sourcePodsTotal ?? 0),
+        responded: Number(sourceInfo.responded ?? summary.sourcePodsResponded ?? 0),
+        missing: Number(sourceInfo.missing ?? summary.sourcePodsMissing ?? 0),
+      },
     };
   }
 
-  function cardHtml(label, value, tone) {
+  function metricHtml(label, value, tone) {
     return `
       <section class="metric-card tone-${escapeHtml(tone)}">
         <div class="metric-label">${escapeHtml(label)}</div>
@@ -140,19 +296,13 @@
   }
 
   function renderMetrics(summary) {
-    const workingTone = !summary.podsTotal
-      ? "muted"
-      : summary.podsWorking >= summary.podsTotal
-        ? "healthy"
-        : summary.podsWorking > 0
-          ? "warning"
-          : "error";
     metricsRoot.innerHTML = [
-      cardHtml("Pods with working proxy", `${summary.podsWorking} / ${summary.podsTotal}`, workingTone),
-      cardHtml("Success calls", formatCount(summary.successCalls), "healthy"),
-      cardHtml("Failures", formatCount(summary.failureCalls), "error"),
-      cardHtml("Avg response", formatLatency(summary.averageResponseMs), "info"),
-      cardHtml("RPS / RPM", `${formatRate(summary.requestsPerSecond)} / ${formatCount(summary.requestsPerMinute)}`, "muted"),
+      metricHtml("Proxy endpoints", formatCount(summary.proxyCount), "info"),
+      metricHtml("Broken proxies", formatCount(summary.brokenProxies), summary.brokenProxies ? "error" : "muted"),
+      metricHtml("Degraded proxies", formatCount(summary.degradedProxies), summary.degradedProxies ? "warning" : "muted"),
+      metricHtml("Healthy proxies", formatCount(summary.healthyProxies), summary.healthyProxies ? "healthy" : "muted"),
+      metricHtml("Avg latency", formatLatency(summary.averageResponseMs), "info"),
+      metricHtml("RPS / RPM", `${formatRate(summary.requestsPerSecond)} / ${formatRate(summary.requestsPerMinute)}`, "muted"),
     ].join("");
   }
 
@@ -182,9 +332,7 @@
     const segments = buildSegments(summary, errorBreakdown);
     const total = segments.reduce((acc, segment) => acc + segment.count, 0);
     chartTotalNode.textContent = formatCount(total);
-    if (chartSuccessNode) {
-      chartSuccessNode.textContent = formatCount(summary.successCalls);
-    }
+    chartSuccessRateNode.textContent = total > 0 ? `${formatPercent(summary.successCalls / total)} success` : "No proxy calls yet";
     if (!segments.length || total <= 0) {
       chartNode.style.background = "radial-gradient(circle at center, rgba(255, 255, 255, 0.98), rgba(255, 255, 255, 0.82))";
       legendRoot.innerHTML = "<div class=\"empty-state\">No proxy calls yet.</div>";
@@ -200,91 +348,212 @@
     });
     chartNode.style.background = `conic-gradient(${slices.join(", ")})`;
     legendRoot.innerHTML = segments
-      .map((segment) => `
-        <div class="legend-item">
-          <span class="legend-swatch" style="background:${segment.color};"></span>
-          <span class="legend-label">${escapeHtml(segment.label)}</span>
-          <strong>${formatCount(segment.count)}</strong>
-        </div>
-      `)
+      .map((segment) => {
+        const share = segment.count / total;
+        return `
+          <div class="legend-item">
+            <span class="legend-swatch" style="background:${segment.color};"></span>
+            <span class="legend-label">${escapeHtml(segment.label)}</span>
+            <strong>${formatCount(segment.count)}</strong>
+            <span class="legend-share">${formatPercent(share)}</span>
+          </div>
+        `;
+      })
       .join("");
   }
 
-  function podStatusClass(statusTone) {
-    if (statusTone === "healthy") return "healthy";
-    if (statusTone === "warning") return "warning";
-    if (statusTone === "error") return "error";
-    if (statusTone === "info") return "info";
-    return "muted";
+  function compareNumberDesc(a, b, selector) {
+    const diff = Number(selector(b) || 0) - Number(selector(a) || 0);
+    if (diff !== 0) return diff;
+    return 0;
   }
 
-  function podRowHtml(item) {
-    const stats = item.stats || normalizeStats({});
-    const topError = stats.topError && stats.topError.label ? `${stats.topError.label} × ${formatCount(stats.topError.count)}` : "—";
-    const statusLabel = item.statusLabel || "Unknown";
-    const proxyScope = item.proxyScope || "n/a";
-    const proxyPoolSize = Number(item.proxyPoolSize || 0);
-    const detail = proxyPoolSize > 0 ? `${proxyScope} · ${proxyPoolSize} proxies` : proxyScope;
-    const totalCalls = stats.totalCalls || (stats.successCalls + stats.failureCalls);
-    const failRate = totalCalls > 0 ? `${Math.round((stats.failureCalls / totalCalls) * 100)}%` : "0%";
+  function sortProxies(proxies) {
+    const list = [...proxies];
+    const byLabel = (left, right) => String(left.proxyLabel || "").localeCompare(String(right.proxyLabel || ""));
+    const bySeverity = (left, right) => Number(right.statusSeverity || 0) - Number(left.statusSeverity || 0);
+    const comparators = {
+      bad_first(left, right) {
+        return (
+          bySeverity(left, right)
+          || compareNumberDesc(left, right, (item) => item.stats.failureRate)
+          || compareNumberDesc(left, right, (item) => item.stats.failureCalls)
+          || compareNumberDesc(left, right, (item) => item.stats.totalCalls)
+          || byLabel(left, right)
+        );
+      },
+      failures_desc(left, right) {
+        return (
+          compareNumberDesc(left, right, (item) => item.stats.failureCalls)
+          || compareNumberDesc(left, right, (item) => item.stats.failureRate)
+          || bySeverity(left, right)
+          || compareNumberDesc(left, right, (item) => item.stats.totalCalls)
+          || byLabel(left, right)
+        );
+      },
+      latency_desc(left, right) {
+        return (
+          compareNumberDesc(left, right, (item) => item.stats.averageResponseMs || 0)
+          || compareNumberDesc(left, right, (item) => item.stats.failureRate)
+          || compareNumberDesc(left, right, (item) => item.stats.totalCalls)
+          || byLabel(left, right)
+        );
+      },
+      pods_desc(left, right) {
+        return (
+          compareNumberDesc(left, right, (item) => item.workingPodCount)
+          || compareNumberDesc(left, right, (item) => item.podCount)
+          || compareNumberDesc(left, right, (item) => item.stats.failureRate)
+          || byLabel(left, right)
+        );
+      },
+      calls_desc(left, right) {
+        return (
+          compareNumberDesc(left, right, (item) => item.stats.totalCalls)
+          || compareNumberDesc(left, right, (item) => item.stats.failureCalls)
+          || compareNumberDesc(left, right, (item) => item.stats.failureRate)
+          || byLabel(left, right)
+        );
+      },
+      label_asc(left, right) {
+        return byLabel(left, right);
+      },
+    };
+    const comparator = comparators[sortKey] || comparators.bad_first;
+    list.sort(comparator);
+    return list;
+  }
+
+  function matchesFilter(proxy) {
+    if (activeFilter === "All") return true;
+    return proxy.statusLabel === activeFilter;
+  }
+
+  function matchesSearch(proxy) {
+    const needle = searchTerm.trim().toLowerCase();
+    if (!needle) return true;
+    return proxy.searchText.includes(needle);
+  }
+
+  function sourceCardHtml(source) {
     return `
-      <tr data-proxy-status="${escapeHtml(statusLabel)}" data-instance="${escapeHtml(item.name || "")}">
+      <article class="proxy-source-card">
+        <div class="proxy-source-title">${escapeHtml(source.instanceName || "Unknown instance")}</div>
+        <div class="cell-subtle">${escapeHtml(source.podName || "n/a")}</div>
+        <div class="proxy-source-metrics">
+          <span><strong>${formatCount(source.stats.successCalls)}</strong> success</span>
+          <span><strong>${formatCount(source.stats.failureCalls)}</strong> fail</span>
+          <span><strong>${formatCount(source.stats.totalCalls)}</strong> total</span>
+        </div>
+        <div class="proxy-source-footer">
+          <span>${escapeHtml(formatLatency(source.stats.averageResponseMs))}</span>
+          <span>${escapeHtml(`${formatRate(source.stats.requestsPerSecond)} rps`)}</span>
+          <span>${escapeHtml(source.stats.topError.label ? `${source.stats.topError.label} × ${formatCount(source.stats.topError.count)}` : "No error")}</span>
+        </div>
+      </article>
+    `;
+  }
+
+  function proxyRowHtml(proxy) {
+    const totalCalls = proxy.stats.totalCalls;
+    const successCalls = proxy.stats.successCalls;
+    const failureCalls = proxy.stats.failureCalls;
+    const failureRate = proxy.stats.failureRate;
+    const detailOpen = expandedKeys.has(proxy.proxyKey);
+    return `
+      <tr class="proxy-row" data-proxy-key="${escapeHtml(proxy.proxyKey)}" data-status="${escapeHtml(proxy.statusLabel)}">
         <td>
-          <div class="primary-cell">
-            <a class="row-link" href="${escapeHtml(item.urls && item.urls.detail ? item.urls.detail : "#")}">${escapeHtml(item.name || "")}</a>
-            <div class="cell-subtle">${escapeHtml(item.parserPod || "n/a")} · ${escapeHtml(detail)}</div>
+        <div class="proxy-primary-cell">
+          <button type="button" class="proxy-expand-button" data-expand-proxy="${escapeHtml(proxy.proxyKey)}" aria-expanded="${detailOpen ? "true" : "false"}">${detailOpen ? "Hide" : "Details"}</button>
+          <div>
+            <code class="proxy-endpoint">${escapeHtml(proxy.proxyLabel)}</code>
+            <div class="cell-subtle">${formatCount(proxy.workingPodCount)} pods with success · ${formatCount(proxy.podCount)} pods seen</div>
           </div>
-        </td>
-        <td><span class="pill tone-${podStatusClass(item.statusTone)}">${escapeHtml(statusLabel)}</span></td>
+        </div>
+      </td>
+      <td><span class="pill tone-${escapeHtml(proxy.statusTone)}">${escapeHtml(proxy.statusLabel)}</span></td>
+      <td>
+        <div class="proxy-metric-stack">
+          <strong>${formatCount(proxy.workingPodCount)} / ${formatCount(proxy.podCount)}</strong>
+          <div class="cell-subtle">${formatCount(proxy.sourceCount)} sources</div>
+        </div>
+      </td>
         <td>
           <div class="proxy-metric-stack">
-            <strong>${formatCount(stats.successCalls)}</strong>
+            <strong>${formatCount(successCalls)}</strong>
             <div class="cell-subtle">${formatCount(totalCalls)} total</div>
           </div>
         </td>
         <td>
           <div class="proxy-metric-stack">
-            <strong>${formatCount(stats.failureCalls)}</strong>
-            <div class="cell-subtle">${escapeHtml(failRate)}</div>
+            <strong>${formatCount(failureCalls)}</strong>
+            <div class="cell-subtle">${formatPercent(failureRate)} failure rate</div>
           </div>
         </td>
-        <td>${escapeHtml(formatLatency(stats.averageResponseMs))}</td>
-        <td>${escapeHtml(`${formatRate(stats.requestsPerSecond)} / ${formatCount(stats.requestsPerMinute)}`)}</td>
-        <td>${escapeHtml(topError)}</td>
+        <td>${escapeHtml(formatLatency(proxy.stats.averageResponseMs))}</td>
+        <td>${escapeHtml(`${formatRate(proxy.stats.requestsPerSecond)} / ${formatCount(proxy.stats.requestsPerMinute)}`)}</td>
+        <td>${escapeHtml(proxy.stats.topError.label ? `${proxy.stats.topError.label} × ${formatCount(proxy.stats.topError.count)}` : "—")}</td>
+      </tr>
+      <tr class="proxy-detail-row" data-proxy-detail="${escapeHtml(proxy.proxyKey)}" ${detailOpen ? "" : "hidden"}>
+        <td colspan="8">
+          <div class="proxy-detail-shell">
+            <div class="section-title">Proxy sources</div>
+            <div class="proxy-source-grid">
+              ${proxy.sources.map(sourceCardHtml).join("") || "<div class='empty-state'>No proxy source detail was captured for this endpoint.</div>"}
+            </div>
+          </div>
+        </td>
       </tr>
     `;
   }
 
-  function renderPods(items) {
-    podsRoot.innerHTML = items.length
-      ? items.map(podRowHtml).join("")
+  function updateSyncState() {
+    const updatedAt = new Date().toLocaleTimeString();
+    if (!payload.summary.proxyCount) {
+      syncState.textContent = `Waiting for proxy telemetry · window ${payload.window.label || selectedWindow} · updated ${updatedAt}`;
+      return;
+    }
+    syncState.textContent = `${formatCount(payload.summary.podsWithSuccess)} pods reported successful proxy calls · ${payload.sources.responded} / ${payload.sources.total} parser pods responded · window ${payload.window.label || selectedWindow} · updated ${updatedAt}`;
+  }
+
+  function renderTable() {
+    const filtered = sortProxies(
+      payload.proxies.filter((proxy) => matchesFilter(proxy) && matchesSearch(proxy)),
+    );
+    tableBody.innerHTML = filtered.length
+      ? filtered.map(proxyRowHtml).join("")
       : `
         <tr>
-          <td colspan="7">
-            <div class="empty-state">No proxy telemetry is available yet.</div>
+          <td colspan="8">
+            <div class="empty-state">No proxies match the current filters.</div>
           </td>
         </tr>
       `;
   }
 
   function renderAll() {
-    renderMetrics(current.summary);
-    renderChart(current.summary, current.errorBreakdown);
-    renderPods(current.items);
-    if (syncState) {
-      const updatedAt = new Date().toLocaleTimeString();
-      syncState.textContent = current.summary.podsTotal
-        ? `${current.summary.podsReachable} / ${current.summary.podsTotal} pods responded · updated ${updatedAt}`
-        : `Waiting for proxy telemetry · updated ${updatedAt}`;
+    renderMetrics(payload.summary);
+    renderChart(payload.summary, payload.errorBreakdown);
+    renderTable();
+    updateSyncState();
+  }
+
+  function updateWindowUrl(value) {
+    const url = new URL(window.location.href);
+    if (value && value !== defaultWindow) {
+      url.searchParams.set("window", value);
+    } else {
+      url.searchParams.delete("window");
     }
+    window.history.replaceState({}, "", url.toString());
   }
 
   async function refreshData() {
-    if (syncState) {
-      syncState.textContent = "Refreshing...";
-    }
+    syncState.textContent = "Refreshing...";
     try {
-      const response = await fetch(apiUrl, {
+      const url = new URL(apiUrl, window.location.href);
+      url.searchParams.set("window", selectedWindow);
+      const response = await fetch(url.toString(), {
         headers: { Accept: "application/json" },
         cache: "no-store",
       });
@@ -292,25 +561,76 @@
       if (!response.ok) {
         throw new Error(data.error || data.message || `HTTP ${response.status}`);
       }
-      current = normalizePayload(data);
+      payload = normalizePayload(data);
+      selectedWindow = payload.window.spec || selectedWindow;
+      windowSelect.value = selectedWindow;
+      updateWindowUrl(selectedWindow);
       renderAll();
     } catch (error) {
-      if (syncState) {
-        syncState.textContent = "Auto-refresh failed";
-      }
+      syncState.textContent = "Auto-refresh failed";
       if (window.autoUpdater && typeof window.autoUpdater.showToast === "function") {
-        window.autoUpdater.showToast(`Proxy stats refresh failed: ${error.message}`, "error");
+        window.autoUpdater.showToast(`Proxy dashboard refresh failed: ${error.message}`, "error");
       }
     }
   }
 
-  if (refreshButton) {
-    refreshButton.addEventListener("click", refreshData);
+  function setFilter(value) {
+    activeFilter = value || "All";
+    Array.from(statusFilterRoot.querySelectorAll("[data-filter]")).forEach((button) => {
+      button.classList.toggle("active", (button.dataset.filter || "All") === activeFilter);
+    });
+    renderTable();
   }
 
-  renderAll();
-  if (window.autoUpdater && typeof window.autoUpdater.bindActionForms === "function") {
-    window.autoUpdater.bindActionForms(document, refreshData);
+  function setSort(value) {
+    sortKey = value || defaultSort;
+    renderTable();
   }
-  window.setInterval(refreshData, 10000);
+
+  function setWindow(value) {
+    selectedWindow = value || defaultWindow;
+    windowSelect.value = selectedWindow;
+    updateWindowUrl(selectedWindow);
+    refreshData();
+  }
+
+  statusFilterRoot.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-filter]");
+    if (!button) return;
+    setFilter(button.dataset.filter || "All");
+  });
+
+  searchInput.addEventListener("input", () => {
+    searchTerm = searchInput.value || "";
+    renderTable();
+  });
+
+  sortSelect.addEventListener("change", () => {
+    setSort(sortSelect.value || defaultSort);
+  });
+
+  windowSelect.addEventListener("change", () => {
+    setWindow(windowSelect.value || defaultWindow);
+  });
+
+  refreshButton.addEventListener("click", () => {
+    refreshData();
+  });
+
+  tableBody.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-expand-proxy]");
+    if (!button) return;
+    const proxyKey = String(button.dataset.expandProxy || "");
+    if (!proxyKey) return;
+    if (expandedKeys.has(proxyKey)) {
+      expandedKeys.delete(proxyKey);
+    } else {
+      expandedKeys.add(proxyKey);
+    }
+    renderTable();
+  });
+
+  updateWindowUrl(selectedWindow);
+  renderAll();
+  window.setInterval(refreshData, 15000);
 })();

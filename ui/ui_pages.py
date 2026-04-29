@@ -4,6 +4,7 @@ import json
 from typing import Any
 from urllib.parse import quote
 
+from core.proxy_stats import PROXY_WINDOW_PRESETS
 from ui.ui_assets import render_template
 from ui.ui_common import UISettings, _escape, _format_time, _json_dump_default, _json_script, _url
 from ui.ui_forms import _settings_form
@@ -220,45 +221,142 @@ def _proxy_latency_label(value_ms: Any) -> str:
     return f"{numeric:.1f}ms"
 
 
-def _proxy_metric_value(value: Any) -> str:
-    if value is None:
-        return "0"
-    if isinstance(value, float):
-        if value.is_integer():
-            return str(int(value))
-        return f"{value:.1f}"
-    return str(value)
+def _proxy_rate_value_label(value: Any) -> str:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "0.00"
+    if numeric < 0:
+        return "0.00"
+    if numeric < 1:
+        return f"{numeric:.2f}"
+    if numeric < 10:
+        return f"{numeric:.1f}"
+    return f"{numeric:.0f}"
 
 
-def _proxy_pod_rows(items: list[dict[str, Any]]) -> str:
+def _proxy_rate_label(rps: Any, rpm: Any) -> str:
+    try:
+        requests_per_second = float(rps)
+    except (TypeError, ValueError):
+        requests_per_second = 0.0
+    try:
+        requests_per_minute = float(rpm)
+    except (TypeError, ValueError):
+        requests_per_minute = requests_per_second * 60.0
+
+    return f"{_proxy_rate_value_label(requests_per_second)} / {_proxy_rate_value_label(requests_per_minute)}"
+
+
+def _proxy_percent_label(value: float) -> str:
+    return f"{max(0.0, min(100.0, value * 100.0)):.0f}%"
+
+
+def _proxy_window_options_html(selected_window: str) -> str:
+    selected = str(selected_window or "").strip() or PROXY_WINDOW_PRESETS[1][0]
+    return "".join(
+        f"<option value='{_escape(spec)}' {'selected' if spec == selected else ''}>{_escape(spec)}</option>"
+        for spec, _seconds in PROXY_WINDOW_PRESETS
+    )
+
+
+def _proxy_sort_options_html(selected_sort: str) -> str:
+    options = [
+        ("bad_first", "Bad first"),
+        ("failures_desc", "Most failures"),
+        ("latency_desc", "Highest latency"),
+        ("pods_desc", "Most pod coverage"),
+        ("calls_desc", "Most calls"),
+        ("label_asc", "A-Z"),
+    ]
+    selected = str(selected_sort or "bad_first")
+    return "".join(
+        f"<option value='{_escape(value)}' {'selected' if value == selected else ''}>{_escape(label)}</option>"
+        for value, label in options
+    )
+
+
+def _proxy_status_filters_html(selected_filter: str) -> str:
+    filters = ["All", "Healthy", "Degraded", "Broken", "Idle"]
+    selected = str(selected_filter or "All")
+    return "".join(
+        f"<button type='button' class='filter-chip {'active' if label == selected else ''}' data-filter='{_escape(label)}'>{_escape(label)}</button>"
+        for label in filters
+    )
+
+
+def _proxy_source_cards_html(sources: list[dict[str, Any]]) -> str:
+    if not sources:
+        return "<div class='empty-state'>No proxy source detail was captured for this endpoint.</div>"
+    cards = []
+    for source in sources:
+        stats = dict(source.get("stats") or {})
+        instance_name = str(source.get("instanceName") or "").strip() or "Unknown instance"
+        pod_name = str(source.get("podName") or "").strip() or "n/a"
+        success_calls = int(stats.get("successCalls") or 0)
+        failure_calls = int(stats.get("failureCalls") or 0)
+        total_calls = int(stats.get("totalCalls") or 0)
+        top_error = dict(stats.get("topError") or {})
+        top_error_label = str(top_error.get("label") or "")
+        top_error_count = int(top_error.get("count") or 0)
+        cards.append(
+            f"""
+            <article class="proxy-source-card">
+              <div class="proxy-source-title">{_escape(instance_name)}</div>
+              <div class="cell-subtle">{_escape(pod_name)}</div>
+              <div class="proxy-source-metrics">
+                <span><strong>{_escape(success_calls)}</strong> success</span>
+                <span><strong>{_escape(failure_calls)}</strong> fail</span>
+                <span><strong>{_escape(total_calls)}</strong> total</span>
+              </div>
+              <div class="proxy-source-footer">
+                <span>{_escape(_proxy_latency_label(stats.get("averageResponseMs")))}</span>
+                <span>{_escape(f"{_proxy_rate_value_label(stats.get('requestsPerSecond'))} rps")}</span>
+                <span>{_escape(f"{top_error_label} × {top_error_count}" if top_error_label else "No error")}</span>
+              </div>
+            </article>
+            """
+        )
+    return "".join(cards)
+
+
+def _proxy_table_rows(items: list[dict[str, Any]]) -> str:
     rows = []
     for item in items:
         stats = dict(item.get("stats") or {})
         success_calls = int(stats.get("successCalls") or 0)
         failure_calls = int(stats.get("failureCalls") or 0)
-        total_calls = success_calls + failure_calls
+        total_calls = int(stats.get("totalCalls") or 0)
+        failure_rate = float(stats.get("failureRate") or (failure_calls / total_calls if total_calls else 0.0))
+        pods_seen = list(item.get("podsSeen") or [])
+        pods_working = list(item.get("podsWorking") or [])
+        proxy_label = str(item.get("proxyLabel") or item.get("proxyKey") or "proxy")
+        status_label = str(item.get("statusLabel") or "Idle")
+        status_tone = str(item.get("statusTone") or "muted")
         top_error = dict(stats.get("topError") or {})
         top_error_label = str(top_error.get("label") or "")
         top_error_count = int(top_error.get("count") or 0)
-        proxy_scope = str(item.get("proxyScope") or "").strip() or "n/a"
-        proxy_pool_size = int(item.get("proxyPoolSize") or 0)
-        status_label = str(item.get("statusLabel") or "Unknown")
-        status_tone = str(item.get("statusTone") or "muted")
-        pods_state = (
-            f"{_escape(proxy_scope)} · {proxy_pool_size} proxies"
-            if proxy_pool_size > 0
-            else _escape(proxy_scope)
-        )
+        proxy_key = str(item.get("proxyKey") or proxy_label)
+        source_cards_html = _proxy_source_cards_html(list(item.get("sources") or []))
         rows.append(
             f"""
-            <tr data-proxy-status="{_escape(status_label)}" data-instance="{_escape(item.get('name') or '')}">
+            <tr class="proxy-row" data-proxy-key="{_escape(proxy_key)}" data-status="{_escape(status_label)}">
               <td>
-                <div class="primary-cell">
-                  <a class="row-link" href="{_escape(item.get('urls', {}).get('detail') or '#')}">{_escape(item.get('name') or '')}</a>
-                  <div class="cell-subtle">{_escape(item.get('parserPod') or 'n/a')} · {pods_state}</div>
+                <div class="proxy-primary-cell">
+                  <button type="button" class="proxy-expand-button" data-expand-proxy="{_escape(proxy_key)}" aria-expanded="false">Details</button>
+                  <div>
+                    <code class="proxy-endpoint">{_escape(proxy_label)}</code>
+                    <div class="cell-subtle">{_escape(len(pods_working))} pods with success · {_escape(len(pods_seen))} pods seen</div>
+                  </div>
                 </div>
               </td>
               <td><span class="pill tone-{_escape(status_tone)}">{_escape(status_label)}</span></td>
+              <td>
+                <div class="proxy-metric-stack">
+                  <strong>{_escape(len(pods_working))} / {_escape(len(pods_seen))}</strong>
+                  <div class="cell-subtle">{_escape(len(list(item.get("sources") or [])))} sources</div>
+                </div>
+              </td>
               <td>
                 <div class="proxy-metric-stack">
                   <strong>{_escape(success_calls)}</strong>
@@ -268,18 +366,26 @@ def _proxy_pod_rows(items: list[dict[str, Any]]) -> str:
               <td>
                 <div class="proxy-metric-stack">
                   <strong>{_escape(failure_calls)}</strong>
-                  <div class="cell-subtle">{_escape(int(100 * failure_calls / total_calls)) + '%' if total_calls else '0%'}</div>
+                  <div class="cell-subtle">{_escape(_proxy_percent_label(failure_rate))} failure rate</div>
                 </div>
               </td>
               <td>{_escape(_proxy_latency_label(stats.get("averageResponseMs")))}</td>
-              <td>{_escape(f"{stats.get('requestsPerSecond', 0.0):.1f} / {stats.get('requestsPerMinute', 0.0):.0f}")}</td>
+              <td>{_escape(_proxy_rate_label(stats.get("requestsPerSecond"), stats.get("requestsPerMinute")))}</td>
               <td>{_escape(f"{top_error_label} × {top_error_count}" if top_error_label else "—")}</td>
+            </tr>
+            <tr class="proxy-detail-row" data-proxy-detail="{_escape(proxy_key)}" hidden>
+              <td colspan="8">
+                <div class="proxy-detail-shell">
+                  <div class="section-title">Proxy sources</div>
+                  <div class="proxy-source-grid">{source_cards_html}</div>
+                </div>
+              </td>
             </tr>
             """
         )
     return "".join(rows) or """
         <tr>
-          <td colspan="7">
+          <td colspan="8">
             <div class="empty-state">No proxy telemetry is available yet.</div>
           </td>
         </tr>
@@ -291,37 +397,43 @@ def _proxy_stats_page(
     payload: dict[str, Any],
     flash: str,
     flash_kind: str,
+    *,
+    selected_window: str,
 ) -> str:
     summary = dict(payload.get("summary") or {})
-    items = list(payload.get("pods") or [])
-    pods_total = int(summary.get("podsTotal") or 0)
-    pods_reachable = int(summary.get("podsReachable") or 0)
+    window = dict(payload.get("window") or {})
     generated_at = str(payload.get("generatedAt") or "")
     generated_at_label = _format_time(generated_at) if generated_at else "just now"
     error_entries = list(payload.get("errorBreakdown") or [])
-    pods_working = int(summary.get("podsWorking") or 0)
-    working_tone = "muted" if pods_total <= 0 else "healthy" if pods_working >= pods_total else "warning" if pods_working > 0 else "error"
+    proxies = list(payload.get("proxies") or [])
+    source_info = dict(payload.get("sources") or {})
+    window_label = str(window.get("label") or selected_window or "1h")
+    proxy_count = int(summary.get("proxyCount") or len(proxies))
+    source_total = int(source_info.get("total") or summary.get("sourcePodsTotal") or 0)
+    source_responded = int(source_info.get("responded") or summary.get("sourcePodsResponded") or 0)
+    pods_with_success = int(summary.get("podsWithSuccess") or 0)
+    healthy_proxies = int(summary.get("healthyProxies") or 0)
+    degraded_proxies = int(summary.get("degradedProxies") or 0)
+    broken_proxies = int(summary.get("brokenProxies") or 0)
+    failure_rate = float(summary.get("failureRate") or 0.0)
     metrics_html = "".join(
         [
-            _summary_metric(
-                "Pods with working proxy",
-                f"{pods_working} / {pods_total}",
-                working_tone,
-            ),
-            _summary_metric("Success calls", _proxy_metric_value(summary.get("successCalls")), "healthy"),
-            _summary_metric("Failures", _proxy_metric_value(summary.get("failureCalls")), "error"),
-            _summary_metric("Avg response", _proxy_latency_label(summary.get("averageResponseMs")), "info"),
-            _summary_metric(
-                "RPS / RPM",
-                f"{float(summary.get('requestsPerSecond') or 0.0):.1f} / {float(summary.get('requestsPerMinute') or 0.0):.0f}",
-                "muted",
-            ),
+            _summary_metric("Proxy endpoints", proxy_count, "info"),
+            _summary_metric("Broken proxies", broken_proxies, "error" if broken_proxies else "muted"),
+            _summary_metric("Degraded proxies", degraded_proxies, "warning" if degraded_proxies else "muted"),
+            _summary_metric("Healthy proxies", healthy_proxies, "healthy" if healthy_proxies else "muted"),
+            _summary_metric("Avg latency", _proxy_latency_label(summary.get("averageResponseMs")), "info"),
+            _summary_metric("RPS / RPM", _proxy_rate_label(summary.get("requestsPerSecond"), summary.get("requestsPerMinute")), "muted"),
         ]
     )
+    failure_calls = int(summary.get("failureCalls") or 0)
+    success_calls = int(summary.get("successCalls") or 0)
+    total_calls = int(summary.get("totalCalls") or 0)
+    success_rate = (success_calls / total_calls) if total_calls else 0.0
     chart_entries = [
         {
             "label": "Success",
-            "count": int(summary.get("successCalls") or 0),
+            "count": success_calls,
             "color": "var(--healthy)",
         }
     ]
@@ -339,7 +451,7 @@ def _proxy_stats_page(
         <div class="legend-item">
           <span class="legend-swatch" style="background:{_escape(entry['color'])};"></span>
           <span class="legend-label">{_escape(entry['label'])}</span>
-          <strong>{_escape(_proxy_metric_value(entry['count']))}</strong>
+          <strong>{_escape(entry['count'])}</strong>
         </div>
         """
         for entry in chart_entries
@@ -347,24 +459,38 @@ def _proxy_stats_page(
     )
     body = render_template(
         "proxy_stats.html",
-        title=_escape(settings.title),
+        title=_escape("Proxy Health"),
         subtitle=_escape(
-            "Cluster-wide proxy observability for parser pods. Working means the pod has recorded at least one successful proxied request."
+            "One row per normalized proxy endpoint, merged across parser pods. Broken and degraded proxies float to the top, with pod evidence tucked behind each row."
         ),
         dashboard_url=_escape(_url(settings, "/")),
+        hero_note=_escape(
+            f"{proxy_count} proxy endpoints · {pods_with_success} pods reported successful proxy calls · {source_responded} / {source_total} parser pods responded · window {window_label} · updated {generated_at_label}"
+            if source_total
+            else f"Waiting for proxy telemetry · window {window_label}"
+        ),
+        window_options_html=_proxy_window_options_html(selected_window),
+        sort_options_html=_proxy_sort_options_html("bad_first"),
+        status_filters_html=_proxy_status_filters_html("All"),
         metrics_html=metrics_html,
-        chart_total=_escape(summary.get("totalCalls") or 0),
-        chart_success=_escape(summary.get("successCalls") or 0),
+        chart_total=_escape(total_calls),
+        chart_success_rate=_escape(f"{_proxy_percent_label(success_rate)} success"),
         chart_legend_html=chart_legend_html
         or "<div class='empty-state'>No proxy calls have been observed yet.</div>",
         toolbar_note=_escape(
-            f"{pods_reachable} / {pods_total} pods responded · updated {generated_at_label}"
-            if pods_total
+            f"{pods_with_success} pods reported successful proxy calls · {source_responded} / {source_total} parser pods responded · updated {generated_at_label}"
+            if source_total
             else "Waiting for proxy telemetry..."
         ),
-        pods_rows_html=_proxy_pod_rows(items),
+        proxy_rows_html=_proxy_table_rows(proxies),
         proxy_stats_payload_json=_json_script(payload),
-        proxy_stats_config_json=_json_script({"apiUrl": _url(settings, "/api/proxy-stats")}),
+        proxy_stats_config_json=_json_script(
+            {
+                "apiUrl": _url(settings, "/api/proxy-stats"),
+                "selectedWindow": selected_window,
+                "defaultSort": "bad_first",
+            }
+        ),
         proxy_stats_js_href=_escape(_url(settings, "/assets/proxy_stats.js")),
     )
     return _layout(settings, body, flash=flash, flash_kind=flash_kind, page_title=settings.title)
