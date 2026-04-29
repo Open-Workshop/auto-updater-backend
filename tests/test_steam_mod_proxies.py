@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from contextlib import asynccontextmanager
 from unittest.mock import Mock, patch
@@ -82,6 +83,42 @@ class SteamModProxyTests(unittest.IsolatedAsyncioTestCase):
             language="english",
         )
         self.assertIsNone(result)
+
+    async def test_fetch_mod_handles_incomplete_read_and_reserves_proxy(self) -> None:
+        bad_proxy = "socks5://user:pass@46.8.223.44:3001"
+        client = SteamWorkshopClient(
+            policy=RetryPolicy(retries=0, backoff=0.0, request_delay=0.0),
+            proxies=[bad_proxy],
+        )
+        reserve = Mock(wraps=client.proxy_pool.reserve)
+        client.proxy_pool.reserve = reserve
+
+        class _BrokenResponse:
+            async def __aenter__(self):
+                raise asyncio.IncompleteReadError(partial=b"", expected=2)
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class _BrokenSession:
+            def get(self, *args, **kwargs):
+                return _BrokenResponse()
+
+        @asynccontextmanager
+        async def _fake_session_for_request(timeout_value, chosen_proxy, session):
+            del timeout_value, session
+            self.assertEqual(chosen_proxy, bad_proxy)
+            yield _BrokenSession(), None
+
+        with patch.object(client, "_session_for_request", _fake_session_for_request):
+            result = await client.fetch_mod(
+                "12345",
+                timeout=5,
+                language="english",
+            )
+
+        self.assertIsNone(result)
+        reserve.assert_called_once_with(bad_proxy, 120.0)
 
     async def test_fetch_mod_handles_proxy_timeout_and_reserves_proxy(self) -> None:
         bad_proxy = "socks5://user:pass@46.8.223.44:3001"

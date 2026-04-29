@@ -238,7 +238,7 @@ class OWClient:
             json={"method": "password", "login": self.login_name, "password": self.password},
             timeout=self.timeout,
         )
-        if response.status_code != 200:
+        if response.status_code not in {200, 201}:
             raise RuntimeError(
                 f"Login failed: {response.status_code} {response.text[:200]}"
             )

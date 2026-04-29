@@ -39,6 +39,9 @@ class _FakeSession:
     def request(self, method: str, url: str, timeout: int, **kwargs):  # noqa: ANN001
         return self._responses.pop(0)
 
+    def post(self, url: str, timeout: int, **kwargs):  # noqa: ANN001
+        return self.request("post", url, timeout=timeout, **kwargs)
+
 
 class _RecordingSession(_FakeSession):
     def __init__(self, responses: list[_FakeResponse]) -> None:
@@ -113,6 +116,19 @@ class HttpClientTests(unittest.TestCase):
         self.assertIs(response, success)
         self.assertTrue(unauthorized.closed)
         client.login.assert_called_once()
+
+    def test_ow_client_login_accepts_created_session(self) -> None:
+        client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
+        client.session = _FakeSession([_FakeResponse(201, payload={"ok": True})])
+
+        client.login()
+
+    def test_ow_client_login_rejects_non_success_statuses(self) -> None:
+        client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
+        client.session = _FakeSession([_FakeResponse(400, text="bad request")])
+
+        with self.assertRaisesRegex(RuntimeError, r"Login failed: 400 bad request"):
+            client.login()
 
     def test_ow_client_finds_mod_by_source_using_manager_filters(self) -> None:
         client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)

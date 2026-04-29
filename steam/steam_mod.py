@@ -358,12 +358,16 @@ class SteamWorkshopClient:
             except (
                 aiohttp.ClientError,
                 asyncio.TimeoutError,
+                asyncio.IncompleteReadError,
                 ProxyConnectionError,
                 ProxyError,
                 ProxyTimeoutError,
             ) as exc:
                 last_exc = exc
-                if isinstance(exc, (ProxyTimeoutError, ProxyConnectionError)):
+                if isinstance(
+                    exc,
+                    (ProxyTimeoutError, ProxyConnectionError, asyncio.IncompleteReadError),
+                ):
                     self._reserve_proxy(chosen_proxy, exc, url=url)
                 if chosen_proxy and is_dns_error(exc) and attempt < attempts:
                     logging.warning(
@@ -532,12 +536,20 @@ class SteamWorkshopClient:
                         except (
                             aiohttp.ClientError,
                             asyncio.TimeoutError,
+                            asyncio.IncompleteReadError,
                             ProxyConnectionError,
                             ProxyError,
                             ProxyTimeoutError,
                         ) as exc:
                             last_exc = exc
-                            if isinstance(exc, (ProxyTimeoutError, ProxyConnectionError)):
+                            if isinstance(
+                                exc,
+                                (
+                                    ProxyTimeoutError,
+                                    ProxyConnectionError,
+                                    asyncio.IncompleteReadError,
+                                ),
+                            ):
                                 self._reserve_proxy(chosen_proxy, exc, url=url)
                             if chosen_proxy and is_dns_error(exc) and attempt < attempts:
                                 logging.warning(
