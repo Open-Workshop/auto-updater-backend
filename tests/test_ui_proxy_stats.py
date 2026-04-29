@@ -5,14 +5,16 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 try:
-    from ui.ui_proxy_stats import _fetch_proxy_snapshot, _load_proxy_statistics
+    from ui.ui_proxy_stats import _fetch_proxy_detail_snapshot, _fetch_proxy_snapshot, _load_proxy_detail, _load_proxy_statistics
 except ModuleNotFoundError:
+    _fetch_proxy_detail_snapshot = None
     _fetch_proxy_snapshot = None
+    _load_proxy_detail = None
     _load_proxy_statistics = None
 
 
 @unittest.skipUnless(
-    _load_proxy_statistics is not None and _fetch_proxy_snapshot is not None,
+    _load_proxy_statistics is not None and _fetch_proxy_snapshot is not None and _fetch_proxy_detail_snapshot is not None and _load_proxy_detail is not None,
     "ui dependencies are not installed",
 )
 class UIProxyStatsTests(unittest.TestCase):
@@ -156,6 +158,197 @@ class UIProxyStatsTests(unittest.TestCase):
         self.assertEqual(proxy["stats"]["totalCalls"], 7)
         self.assertEqual(proxy["stats"]["successCalls"], 5)
         self.assertEqual(proxy["stats"]["failureCalls"], 2)
+
+    def test_fetch_proxy_detail_snapshot_normalizes_flat_proxy_payload(self) -> None:
+        settings = SimpleNamespace(namespace="auto-updater")
+        summary = {"name": "demo-a", "parser": {"podName": "demo-parser-0"}}
+        raw_payload = {
+            "generatedAt": "2026-04-29T11:15:00+00:00",
+            "windowSeconds": 3600.0,
+            "windowLabel": "1h",
+            "instanceName": "demo-a",
+            "workloadId": "parser",
+            "podName": "demo-parser-0",
+            "proxyConfigured": True,
+            "proxyPoolSize": 1,
+            "proxyScope": "mod_pages",
+            "proxyKey": "socks5://10.0.0.9:3001",
+            "proxyLabel": "socks5://10.0.0.9:3001",
+            "found": True,
+            "bucketCount": 24,
+            "bucketSizeSeconds": 150.0,
+            "stats": {
+                "windowSeconds": 3600.0,
+                "windowLabel": "1h",
+                "totalCalls": 3,
+                "successCalls": 2,
+                "failureCalls": 1,
+                "totalElapsedSeconds": 1.5,
+                "averageResponseMs": 500.0,
+                "recentRequests": 3,
+                "recentWindowSeconds": 3600.0,
+                "requestsPerSecond": 3 / 3600.0,
+                "requestsPerMinute": 3 / 60.0,
+                "errorCounts": {"ProxyError": 1},
+                "proxyCount": 1,
+                "topError": {"label": "ProxyError", "count": 1},
+            },
+            "buckets": [
+                {
+                    "index": 0,
+                    "label": "Bucket 01",
+                    "rangeLabel": "1h to 55m ago",
+                    "totalCalls": 2,
+                    "successCalls": 2,
+                    "failureCalls": 0,
+                    "totalElapsedSeconds": 1.0,
+                    "averageResponseMs": 500.0,
+                    "failureRate": 0.0,
+                    "errorCounts": {},
+                    "topError": {"label": "", "count": 0},
+                },
+                {
+                    "index": 1,
+                    "label": "Bucket 02",
+                    "rangeLabel": "55m to 50m ago",
+                    "totalCalls": 1,
+                    "successCalls": 0,
+                    "failureCalls": 1,
+                    "totalElapsedSeconds": 0.5,
+                    "averageResponseMs": 500.0,
+                    "failureRate": 1.0,
+                    "errorCounts": {"ProxyError": 1},
+                    "topError": {"label": "ProxyError", "count": 1},
+                },
+            ],
+            "recentFailures": [
+                {
+                    "ageSeconds": 12.0,
+                    "elapsedSeconds": 0.5,
+                    "errorType": "ProxyError",
+                    "bucketIndex": 1,
+                    "instanceName": "demo-a",
+                    "podName": "demo-parser-0",
+                }
+            ],
+        }
+        response = Mock()
+        response.ok = True
+        response.json.return_value = raw_payload
+
+        with patch("ui.ui_proxy_stats.requests.get", return_value=response):
+            payload = _fetch_proxy_detail_snapshot(
+                settings,
+                summary,
+                proxy_key="socks5://10.0.0.9:3001",
+                window_spec="1h",
+                window_seconds=3600.0,
+            )
+
+        self.assertTrue(payload["found"])
+        self.assertEqual(payload["proxyKey"], "socks5://10.0.0.9:3001")
+        self.assertEqual(payload["stats"]["totalCalls"], 3)
+        self.assertEqual(payload["buckets"][0]["totalCalls"], 2)
+        self.assertEqual(payload["buckets"][1]["failureCalls"], 1)
+        self.assertEqual(payload["recentFailures"][0]["errorType"], "ProxyError")
+
+    def test_merge_proxy_detail_across_multiple_pods(self) -> None:
+        settings = SimpleNamespace(namespace="auto-updater")
+        summaries = [
+            {"name": "demo-a", "parser": {"podName": "demo-parser-0"}},
+            {"name": "demo-b", "parser": {"podName": "demo-parser-1"}},
+        ]
+
+        def fake_fetch(_settings, summary, *, proxy_key, window_spec, window_seconds):
+            pod_name = str(summary.get("parser", {}).get("podName") or "")
+            success_calls = 4 if pod_name == "demo-parser-0" else 1
+            failure_calls = 0 if pod_name == "demo-parser-0" else 2
+            total_calls = success_calls + failure_calls
+            elapsed_seconds = 1.0 if pod_name == "demo-parser-0" else 0.75
+            bucket = {
+                "index": 0,
+                "label": "Bucket 01",
+                "rangeLabel": "oldest",
+                "totalCalls": total_calls,
+                "successCalls": success_calls,
+                "failureCalls": failure_calls,
+                "totalElapsedSeconds": elapsed_seconds,
+                "averageResponseMs": (elapsed_seconds / total_calls) * 1000.0,
+                "failureRate": (failure_calls / total_calls) if total_calls else 0.0,
+                "errorCounts": {"ProxyTimeoutError": failure_calls} if failure_calls else {},
+                "topError": {
+                    "label": "ProxyTimeoutError" if failure_calls else "",
+                    "count": failure_calls,
+                },
+            }
+            return {
+                "instanceName": str(summary.get("name") or ""),
+                "podName": pod_name,
+                "reachable": True,
+                "proxyConfigured": True,
+                "proxyKey": proxy_key,
+                "proxyLabel": proxy_key,
+                "found": True,
+                "bucketCount": 24,
+                "bucketSizeSeconds": window_seconds / 24.0,
+                "stats": {
+                    "totalCalls": total_calls,
+                    "successCalls": success_calls,
+                    "failureCalls": failure_calls,
+                    "totalElapsedSeconds": elapsed_seconds,
+                    "averageResponseMs": (elapsed_seconds / total_calls) * 1000.0,
+                    "recentRequests": total_calls,
+                    "recentWindowSeconds": window_seconds,
+                    "windowSeconds": window_seconds,
+                    "windowLabel": window_spec,
+                    "requestsPerSecond": total_calls / window_seconds,
+                    "requestsPerMinute": (total_calls / window_seconds) * 60.0,
+                    "errorCounts": {"ProxyTimeoutError": failure_calls} if failure_calls else {},
+                    "failureRate": (failure_calls / total_calls) if total_calls else 0.0,
+                    "topError": {
+                        "label": "ProxyTimeoutError" if failure_calls else "",
+                        "count": failure_calls,
+                    },
+                },
+                "buckets": [bucket],
+                "recentFailures": [
+                    {
+                        "ageSeconds": 10.0 if pod_name == "demo-parser-0" else 6.0,
+                        "elapsedSeconds": elapsed_seconds,
+                        "errorType": "ProxyTimeoutError" if failure_calls else "",
+                        "bucketIndex": 0,
+                        "instanceName": str(summary.get("name") or ""),
+                        "podName": pod_name,
+                    }
+                ]
+                if failure_calls
+                else [],
+                "error": "",
+                "generatedAt": "2026-04-29T11:15:00+00:00",
+            }
+
+        with (
+            patch("ui.ui_proxy_stats._load_instance_summaries", return_value=summaries),
+            patch("ui.ui_proxy_stats._fetch_proxy_detail_snapshot", side_effect=fake_fetch),
+        ):
+            payload = _load_proxy_detail(settings, proxy_key="socks5://10.0.0.9:3001", window_spec="1h")
+
+        self.assertEqual(payload["window"]["spec"], "1h")
+        self.assertEqual(payload["proxy"]["key"], "socks5://10.0.0.9:3001")
+        self.assertEqual(payload["summary"]["totalCalls"], 7)
+        self.assertEqual(payload["summary"]["successCalls"], 5)
+        self.assertEqual(payload["summary"]["failureCalls"], 2)
+        self.assertEqual(payload["summary"]["podsWithTraffic"], 2)
+        self.assertEqual(payload["summary"]["podsWithSuccess"], 2)
+        self.assertEqual(payload["summary"]["topError"]["label"], "ProxyTimeoutError")
+        self.assertEqual(payload["sources"]["total"], 2)
+        self.assertEqual(payload["sources"]["responded"], 2)
+        self.assertEqual(payload["podsSeen"], ["demo-parser-0", "demo-parser-1"])
+        self.assertEqual(payload["podsWorking"], ["demo-parser-0", "demo-parser-1"])
+        self.assertEqual(len(payload["buckets"]), 24)
+        self.assertEqual(payload["buckets"][0]["totalCalls"], 7)
+        self.assertEqual(len(payload["recentFailures"]), 1)
+        self.assertEqual(payload["recentFailures"][0]["errorType"], "ProxyTimeoutError")
 
 
 if __name__ == "__main__":

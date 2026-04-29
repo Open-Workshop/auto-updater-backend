@@ -68,6 +68,47 @@ class ProxyStatsTests(unittest.TestCase):
         self.assertEqual(snapshot["totalCalls"], 1)
         self.assertEqual(snapshot["proxies"][0]["totalCalls"], 1)
 
+    def test_snapshot_detail_groups_events_into_buckets(self) -> None:
+        collector = ProxyStatsCollector(recent_window_seconds=3600.0)
+        collector.record(
+            proxy="http://user:pass@proxy.example:3000",
+            success=True,
+            elapsed_seconds=0.25,
+            now=70.0,
+        )
+        collector.record(
+            proxy="http://proxy.example:3000",
+            success=False,
+            elapsed_seconds=0.50,
+            error_type="ProxyTimeoutError",
+            now=85.0,
+        )
+        collector.record(
+            proxy="http://proxy.example:3000",
+            success=False,
+            elapsed_seconds=0.75,
+            error_type="DNSError",
+            now=95.0,
+        )
+
+        detail = collector.snapshot_detail(
+            proxy="http://proxy.example:3000",
+            window_seconds=40.0,
+            bucket_count=4,
+            now=100.0,
+        )
+
+        self.assertTrue(detail["found"])
+        self.assertEqual(detail["proxyKey"], "http://proxy.example:3000")
+        self.assertEqual(detail["stats"]["totalCalls"], 3)
+        self.assertEqual(detail["stats"]["successCalls"], 1)
+        self.assertEqual(detail["stats"]["failureCalls"], 2)
+        self.assertEqual(detail["buckets"][1]["successCalls"], 1)
+        self.assertEqual(detail["buckets"][2]["failureCalls"], 1)
+        self.assertEqual(detail["buckets"][3]["failureCalls"], 1)
+        self.assertEqual(detail["recentFailures"][0]["errorType"], "DNSError")
+        self.assertEqual(detail["recentFailures"][1]["errorType"], "ProxyTimeoutError")
+
     def test_proxy_error_type_normalizes_http_and_dns_failures(self) -> None:
         self.assertEqual(proxy_error_type(status_code=503), "HTTP_503")
         self.assertEqual(

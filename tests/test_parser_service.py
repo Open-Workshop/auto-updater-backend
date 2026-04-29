@@ -196,6 +196,59 @@ class ParserRuntimeConfigReloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["stats"]["totalCalls"], 7)
         self.assertEqual(snapshot["proxies"], [])
 
+    def test_proxy_detail_snapshot_wraps_collector_detail(self) -> None:
+        runtime = ParserRuntime(
+            _config(
+                steam_proxy_pool=["socks5://user:pass@46.8.223.44:3001"],
+                steam_proxy_scope="mod_pages",
+                instance_name="demo",
+            )
+        )
+        detail_payload = {
+            "proxyKey": "socks5://46.8.223.44:3001",
+            "proxyLabel": "socks5://46.8.223.44:3001",
+            "found": True,
+            "bucketCount": 24,
+            "bucketSizeSeconds": 150.0,
+            "stats": {
+                "proxyKey": "socks5://46.8.223.44:3001",
+                "proxyLabel": "socks5://46.8.223.44:3001",
+                "totalCalls": 6,
+                "successCalls": 4,
+                "failureCalls": 2,
+                "totalElapsedSeconds": 1.8,
+                "averageResponseMs": 300.0,
+                "recentRequests": 6,
+                "recentWindowSeconds": 3600.0,
+                "windowSeconds": 3600.0,
+                "windowLabel": "1h",
+                "requestsPerSecond": 6 / 3600.0,
+                "requestsPerMinute": 6 / 60.0,
+                "errorCounts": {"ProxyTimeoutError": 2},
+                "failureRate": 1 / 3,
+                "topError": {"label": "ProxyTimeoutError", "count": 2},
+            },
+            "buckets": [],
+            "recentFailures": [],
+        }
+        with (
+            patch("services.parser_service.snapshot_proxy_detail", return_value=detail_payload),
+            patch.dict("os.environ", {"HOSTNAME": "demo-parser-0"}, clear=False),
+        ):
+            snapshot = runtime.proxy_detail_snapshot(
+                proxy="socks5://46.8.223.44:3001",
+                window_seconds=3600.0,
+            )
+
+        self.assertEqual(snapshot["instanceName"], "demo")
+        self.assertEqual(snapshot["podName"], "demo-parser-0")
+        self.assertEqual(snapshot["proxyKey"], "socks5://46.8.223.44:3001")
+        self.assertEqual(snapshot["proxyLabel"], "socks5://46.8.223.44:3001")
+        self.assertEqual(snapshot["bucketCount"], 24)
+        self.assertTrue(snapshot["found"])
+        self.assertEqual(snapshot["stats"]["totalCalls"], 6)
+        self.assertEqual(snapshot["stats"]["topError"]["label"], "ProxyTimeoutError")
+
 
 if __name__ == "__main__":
     unittest.main()

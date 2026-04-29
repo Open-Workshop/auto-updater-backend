@@ -20,6 +20,13 @@
   $metrics_html
 </section>
 
+<section class="panel-section proxy-anomaly-panel">
+  <div class="section-title">Top anomalies</div>
+  <div class="proxy-anomaly-strip" id="proxy-anomalies">
+    $top_anomalies_html
+  </div>
+</section>
+
 <section class="panel-section proxy-analytics">
   <div class="toolbar proxy-toolbar">
     <div class="toolbar-left">
@@ -49,7 +56,7 @@
         </div>
         <div class="proxy-chart-meta">
           <div class="chart-meta-title">Read this first</div>
-          <div class="chart-meta-copy">The table below is sorted by badness first, so broken proxies float up immediately.</div>
+          <div class="chart-meta-copy">Broken and degraded proxies rise in the board below. Tap a card to open pod-level detail.</div>
         </div>
       </div>
     </section>
@@ -63,25 +70,9 @@
 </section>
 
 <section class="panel-section">
-  <div class="section-title">Proxy endpoints</div>
-  <div class="table-wrap">
-    <table class="ops-table proxy-table">
-      <thead>
-        <tr>
-          <th>Proxy endpoint</th>
-          <th>Status</th>
-          <th>Coverage</th>
-          <th>Success</th>
-          <th>Failures</th>
-          <th>Avg latency</th>
-          <th>RPS / RPM</th>
-          <th>Top error</th>
-        </tr>
-      </thead>
-      <tbody id="proxy-table-body">
-        $proxy_rows_html
-      </tbody>
-    </table>
+  <div class="section-title">Ranked proxy board</div>
+  <div class="proxy-board" id="proxy-board">
+    $proxy_board_html
   </div>
 </section>
 

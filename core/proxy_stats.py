@@ -130,6 +130,32 @@ def _snapshot_stats(
     }
 
 
+def _empty_detail_bucket(
+    *,
+    index: int,
+    bucket_count: int,
+    bucket_size_seconds: float,
+    window_seconds: float,
+) -> dict[str, Any]:
+    start_seconds_ago = max(0.0, window_seconds - (index * bucket_size_seconds))
+    end_seconds_ago = max(0.0, window_seconds - ((index + 1) * bucket_size_seconds))
+    return {
+        "index": index,
+        "label": f"Bucket {index + 1:02d}",
+        "rangeLabel": f"{format_proxy_window_label(start_seconds_ago)} ago to {format_proxy_window_label(end_seconds_ago)} ago",
+        "startSecondsAgo": start_seconds_ago,
+        "endSecondsAgo": end_seconds_ago,
+        "totalCalls": 0,
+        "successCalls": 0,
+        "failureCalls": 0,
+        "totalElapsedSeconds": 0.0,
+        "averageResponseMs": None,
+        "failureRate": 0.0,
+        "errorCounts": {},
+        "topError": {"label": "", "count": 0},
+    }
+
+
 @dataclass(slots=True)
 class ProxyEvent:
     timestamp: float
@@ -174,6 +200,100 @@ class ProxySeries:
             error_counts=error_counts,
             window_seconds=window_seconds,
         )
+
+    def snapshot_detail(
+        self,
+        *,
+        window_seconds: float,
+        cutoff: float,
+        bucket_count: int = 24,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        bucket_count = max(1, int(bucket_count))
+        current_now = cutoff + window_seconds if now is None else float(now)
+        bucket_size_seconds = window_seconds / bucket_count if bucket_count else window_seconds
+        buckets = [
+            _empty_detail_bucket(
+                index=index,
+                bucket_count=bucket_count,
+                bucket_size_seconds=bucket_size_seconds,
+                window_seconds=window_seconds,
+            )
+            for index in range(bucket_count)
+        ]
+        recent_failures: list[dict[str, Any]] = []
+        total_calls = 0
+        success_calls = 0
+        failure_calls = 0
+        total_elapsed_seconds = 0.0
+        error_counts: Counter[str] = Counter()
+
+        for event in self.events:
+            if event.timestamp < cutoff:
+                continue
+            total_calls += 1
+            bucket_index = 0
+            if bucket_size_seconds > 0:
+                bucket_index = int((event.timestamp - cutoff) / bucket_size_seconds)
+            bucket_index = max(0, min(bucket_count - 1, bucket_index))
+            bucket = buckets[bucket_index]
+            bucket["totalCalls"] += 1
+            bucket["totalElapsedSeconds"] += event.elapsed_seconds
+            if event.success:
+                success_calls += 1
+                bucket["successCalls"] += 1
+            else:
+                failure_calls += 1
+                bucket["failureCalls"] += 1
+                bucket_error = str(event.error_type or "UnknownError")
+                bucket["errorCounts"][bucket_error] = int(bucket["errorCounts"].get(bucket_error) or 0) + 1
+                error_counts[bucket_error] += 1
+                recent_failures.append(
+                    {
+                        "ageSeconds": max(0.0, current_now - event.timestamp),
+                        "elapsedSeconds": event.elapsed_seconds,
+                        "errorType": bucket_error,
+                        "bucketIndex": bucket_index,
+                    }
+                )
+            total_elapsed_seconds += event.elapsed_seconds
+
+        for bucket in buckets:
+            total = int(bucket["totalCalls"] or 0)
+            failures = int(bucket["failureCalls"] or 0)
+            bucket["averageResponseMs"] = (
+                (float(bucket["totalElapsedSeconds"]) / total) * 1000.0 if total else None
+            )
+            bucket["failureRate"] = (failures / total) if total else 0.0
+            bucket["errorCounts"] = _sorted_counter(
+                Counter({str(key): int(value) for key, value in dict(bucket["errorCounts"]).items()})
+            )
+            top_error = next(iter(bucket["errorCounts"].items()), (None, 0))
+            bucket["topError"] = {
+                "label": top_error[0] or "",
+                "count": int(top_error[1] or 0),
+            }
+
+        recent_failures.sort(key=lambda item: float(item.get("ageSeconds") or 0.0))
+        return {
+            "proxyKey": self.proxy_key,
+            "proxyLabel": self.proxy_label,
+            "found": True,
+            "bucketCount": bucket_count,
+            "bucketSizeSeconds": bucket_size_seconds,
+            "buckets": buckets,
+            "recentFailures": recent_failures,
+            "stats": _snapshot_stats(
+                proxy_key=self.proxy_key,
+                proxy_label=self.proxy_label,
+                total_calls=total_calls,
+                success_calls=success_calls,
+                failure_calls=failure_calls,
+                total_elapsed_seconds=total_elapsed_seconds,
+                error_counts=error_counts,
+                window_seconds=window_seconds,
+            ),
+        }
 
 
 class ProxyStatsCollector:
@@ -287,6 +407,59 @@ class ProxyStatsCollector:
             "proxies": proxies,
         }
 
+    def snapshot_detail(
+        self,
+        *,
+        proxy: str | None,
+        window_seconds: float | None = None,
+        bucket_count: int = 24,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        proxy_key = normalize_proxy_endpoint(proxy)
+        requested_window = (
+            self.default_window_seconds if window_seconds is None else float(window_seconds)
+        )
+        selected_window = max(1.0, min(requested_window, self.retention_seconds))
+        cutoff = (time.monotonic() if now is None else float(now)) - selected_window
+        current_now = time.monotonic() if now is None else float(now)
+        with self._lock:
+            series = self._series.get(proxy_key or "")
+            if series is None:
+                return {
+                    "proxyKey": proxy_key or "",
+                    "proxyLabel": proxy_key or "",
+                    "found": False,
+                    "bucketCount": max(1, int(bucket_count)),
+                    "bucketSizeSeconds": selected_window / max(1, int(bucket_count)),
+                    "buckets": [
+                        _empty_detail_bucket(
+                            index=index,
+                            bucket_count=max(1, int(bucket_count)),
+                            bucket_size_seconds=selected_window / max(1, int(bucket_count)),
+                            window_seconds=selected_window,
+                        )
+                        for index in range(max(1, int(bucket_count)))
+                    ],
+                    "recentFailures": [],
+                    "stats": _snapshot_stats(
+                        proxy_key=proxy_key or "",
+                        proxy_label=proxy_key or "",
+                        total_calls=0,
+                        success_calls=0,
+                        failure_calls=0,
+                        total_elapsed_seconds=0.0,
+                        error_counts=Counter(),
+                        window_seconds=selected_window,
+                    ),
+                }
+            series.prune(current_now - self.retention_seconds)
+            return series.snapshot_detail(
+                window_seconds=selected_window,
+                cutoff=cutoff,
+                bucket_count=bucket_count,
+                now=current_now,
+            )
+
 
 _DEFAULT_PROXY_STATS = ProxyStatsCollector()
 
@@ -318,3 +491,18 @@ def snapshot_proxy_stats(
     now: float | None = None,
 ) -> dict[str, Any]:
     return _DEFAULT_PROXY_STATS.snapshot(window_seconds=window_seconds, now=now)
+
+
+def snapshot_proxy_detail(
+    *,
+    proxy: str | None,
+    window_seconds: float | None = None,
+    bucket_count: int = 24,
+    now: float | None = None,
+) -> dict[str, Any]:
+    return _DEFAULT_PROXY_STATS.snapshot_detail(
+        proxy=proxy,
+        window_seconds=window_seconds,
+        bucket_count=bucket_count,
+        now=now,
+    )

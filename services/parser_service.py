@@ -27,7 +27,7 @@ from steam.steam_mod import (
 )
 from sync.syncer import ensure_game, sync_mods
 from core.telemetry import init_telemetry, shutdown_telemetry, start_span
-from core.proxy_stats import parse_proxy_window_spec, snapshot_proxy_stats
+from core.proxy_stats import parse_proxy_window_spec, snapshot_proxy_detail, snapshot_proxy_stats
 from core.utils import ensure_dir, set_download_request_policy
 
 _CLIENT_REINIT_FIELDS = {
@@ -384,6 +384,40 @@ class ParserRuntime:
             "proxies": list(stats.get("proxies") or []) if include_proxies else [],
         }
 
+    def proxy_detail_snapshot(
+        self,
+        *,
+        proxy: str,
+        window_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        detail = snapshot_proxy_detail(
+            proxy=proxy,
+            window_seconds=window_seconds,
+        )
+        default_window_seconds, default_window_label = parse_proxy_window_spec(None)
+        stats = dict(detail.get("stats") or {})
+        bucket_count = int(detail.get("bucketCount") or 24)
+        window_seconds_value = float(stats.get("windowSeconds") or window_seconds or default_window_seconds)
+        return {
+            "generatedAt": _utcnow_iso(),
+            "windowSeconds": window_seconds_value,
+            "windowLabel": str(stats.get("windowLabel") or default_window_label),
+            "instanceName": self.cfg.instance_name,
+            "workloadId": _workload_id_from_env(),
+            "podName": os.environ.get("HOSTNAME", "").strip(),
+            "proxyConfigured": bool(self.cfg.steam_proxy_pool),
+            "proxyPoolSize": len(self.cfg.steam_proxy_pool),
+            "proxyScope": self.cfg.steam_proxy_scope,
+            "proxyKey": str(detail.get("proxyKey") or proxy),
+            "proxyLabel": str(detail.get("proxyLabel") or proxy),
+            "found": bool(detail.get("found")),
+            "bucketCount": bucket_count,
+            "bucketSizeSeconds": float(detail.get("bucketSizeSeconds") or (window_seconds_value / max(1, bucket_count))),
+            "stats": {k: v for k, v in stats.items() if k != "proxies"},
+            "buckets": list(detail.get("buckets") or []),
+            "recentFailures": list(detail.get("recentFailures") or []),
+        }
+
 
 def _utcnow_iso() -> str:
     from datetime import UTC, datetime
@@ -405,6 +439,15 @@ async def _proxy_stats(request: web.Request) -> web.Response:
     runtime: ParserRuntime = request.app["runtime"]
     window_seconds, _ = parse_proxy_window_spec(request.query.get("window"))
     return web.json_response(runtime.proxy_snapshot(window_seconds=window_seconds))
+
+
+async def _proxy_stats_detail(request: web.Request) -> web.Response:
+    runtime: ParserRuntime = request.app["runtime"]
+    proxy = str(request.query.get("proxy") or "").strip()
+    if not proxy:
+        return web.json_response({"error": "proxy query parameter is required"}, status=400)
+    window_seconds, _ = parse_proxy_window_spec(request.query.get("window"))
+    return web.json_response(runtime.proxy_detail_snapshot(proxy=proxy, window_seconds=window_seconds))
 
 
 async def _sync(request: web.Request) -> web.Response:
@@ -433,6 +476,7 @@ def _create_app(runtime: ParserRuntime) -> web.Application:
     app.router.add_get("/healthz", _healthz)
     app.router.add_get("/api/v1/status", _status)
     app.router.add_get("/api/v1/proxy-stats", _proxy_stats)
+    app.router.add_get("/api/v1/proxy-stats/detail", _proxy_stats_detail)
     app.router.add_post("/api/v1/sync", _sync)
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)

@@ -57,8 +57,15 @@ from ui.ui_logs import (
     _pod_log_snapshot,
     _tail_lines_from_request,
 )
-from ui.ui_pages import _dashboard, _dashboard_counts, _detail_page, _new_instance_page, _proxy_stats_page
-from ui.ui_proxy_stats import _load_proxy_statistics
+from ui.ui_pages import (
+    _dashboard,
+    _dashboard_counts,
+    _detail_page,
+    _new_instance_page,
+    _proxy_stats_detail_page,
+    _proxy_stats_page,
+)
+from ui.ui_proxy_stats import _load_proxy_detail, _load_proxy_statistics
 from core.proxy_stats import DEFAULT_PROXY_WINDOW_SPEC, PROXY_WINDOW_PRESETS, parse_proxy_window_spec
 
 
@@ -122,6 +129,37 @@ async def proxy_stats_api(request: web.Request) -> web.Response:
     try:
         selected_window = _proxy_window_from_request(request)
         payload = await _run_blocking(_load_proxy_statistics, settings, window_spec=selected_window)
+    except web.HTTPException:
+        raise
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=502)
+    return web.json_response(payload)
+
+
+async def proxy_stats_detail_page(request: web.Request) -> web.Response:
+    """Proxy detail page handler."""
+    settings: UISettings = request.app["settings"]
+    flash, flash_kind = _flash_from_request(request)
+    proxy = str(request.query.get("proxy") or "").strip()
+    selected_window = _proxy_window_from_request(request)
+    if not proxy:
+        raise web.HTTPBadRequest(text="proxy query parameter is required")
+    payload = await _run_blocking(_load_proxy_detail, settings, proxy_key=proxy, window_spec=selected_window)
+    return web.Response(
+        text=_proxy_stats_detail_page(settings, payload, flash, flash_kind, selected_window=selected_window),
+        content_type="text/html",
+    )
+
+
+async def proxy_stats_detail_api(request: web.Request) -> web.Response:
+    """Proxy detail API endpoint."""
+    settings: UISettings = request.app["settings"]
+    try:
+        proxy = str(request.query.get("proxy") or "").strip()
+        selected_window = _proxy_window_from_request(request)
+        if not proxy:
+            return web.json_response({"error": "proxy query parameter is required"}, status=400)
+        payload = await _run_blocking(_load_proxy_detail, settings, proxy_key=proxy, window_spec=selected_window)
     except web.HTTPException:
         raise
     except Exception as exc:

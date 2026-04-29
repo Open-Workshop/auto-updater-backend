@@ -22,6 +22,8 @@ from ui.ui_handlers import (
     pod_logs_api,
     pod_logs_page,
     proxy_stats_api,
+    proxy_stats_detail_api,
+    proxy_stats_detail_page,
     proxy_stats_page,
     resource_page,
     save_instance,
@@ -54,8 +56,10 @@ def _create_app(settings: UISettings) -> web.Application:
     register("GET", "/favicon.ico", favicon)
     register("GET", "/", dashboard)
     register("GET", "/proxy-stats", proxy_stats_page)
+    register("GET", "/proxy-stats/detail", proxy_stats_detail_page)
     register("GET", "/api/instances", instances_api)
     register("GET", "/api/proxy-stats", proxy_stats_api)
+    register("GET", "/api/proxy-stats/detail", proxy_stats_detail_api)
     register("GET", "/api/instances/{name}", instance_summary_api)
     register("GET", "/instances/new", new_instance_page)
     register("GET", "/instances/{name}", instance_detail_page)

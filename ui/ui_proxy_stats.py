@@ -44,6 +44,54 @@ def _empty_proxy_stats(window_seconds: float = 3600.0) -> dict[str, Any]:
     }
 
 
+def _empty_proxy_detail(window_seconds: float = 3600.0, bucket_count: int = 24) -> dict[str, Any]:
+    bucket_count = max(1, int(bucket_count))
+    bucket_size_seconds = window_seconds / bucket_count if bucket_count else window_seconds
+    buckets = [
+        {
+            "index": index,
+            "label": f"Bucket {index + 1:02d}",
+            "rangeLabel": f"{format_proxy_window_label(max(0.0, window_seconds - (index * bucket_size_seconds)))} ago to {format_proxy_window_label(max(0.0, window_seconds - ((index + 1) * bucket_size_seconds)))} ago",
+            "startSecondsAgo": max(0.0, window_seconds - (index * bucket_size_seconds)),
+            "endSecondsAgo": max(0.0, window_seconds - ((index + 1) * bucket_size_seconds)),
+            "totalCalls": 0,
+            "successCalls": 0,
+            "failureCalls": 0,
+            "totalElapsedSeconds": 0.0,
+            "averageResponseMs": None,
+            "failureRate": 0.0,
+            "errorCounts": {},
+            "topError": {"label": "", "count": 0},
+        }
+        for index in range(bucket_count)
+    ]
+    return {
+        "proxyKey": "",
+        "proxyLabel": "",
+        "found": False,
+        "bucketCount": bucket_count,
+        "bucketSizeSeconds": bucket_size_seconds,
+        "buckets": buckets,
+        "recentFailures": [],
+        "stats": {
+            "proxyKey": "",
+            "proxyLabel": "",
+            "totalCalls": 0,
+            "successCalls": 0,
+            "failureCalls": 0,
+            "totalElapsedSeconds": 0.0,
+            "averageResponseMs": None,
+            "recentRequests": 0,
+            "recentWindowSeconds": window_seconds,
+            "windowSeconds": window_seconds,
+            "windowLabel": format_proxy_window_label(window_seconds),
+            "requestsPerSecond": 0.0,
+            "requestsPerMinute": 0.0,
+            "errorCounts": {},
+        },
+    }
+
+
 def _status_for_proxy(*, total_calls: int, success_calls: int, failure_calls: int) -> tuple[str, str, int]:
     if total_calls <= 0:
         return "Idle", "muted", 20
@@ -125,6 +173,67 @@ def _normalize_source_entry(item: dict[str, Any], window_seconds: float) -> dict
     }
 
 
+def _normalize_detail_bucket(bucket: dict[str, Any], window_seconds: float) -> dict[str, Any]:
+    stats = _normalize_stats(_stats_payload(bucket), window_seconds)
+    return {
+        "index": int(bucket.get("index") or 0),
+        "label": str(bucket.get("label") or f"Bucket {int(bucket.get('index') or 0) + 1:02d}"),
+        "rangeLabel": str(bucket.get("rangeLabel") or ""),
+        "startSecondsAgo": float(bucket.get("startSecondsAgo") or 0.0),
+        "endSecondsAgo": float(bucket.get("endSecondsAgo") or 0.0),
+        "totalCalls": int(stats.get("totalCalls") or 0),
+        "successCalls": int(stats.get("successCalls") or 0),
+        "failureCalls": int(stats.get("failureCalls") or 0),
+        "totalElapsedSeconds": float(stats.get("totalElapsedSeconds") or 0.0),
+        "averageResponseMs": stats.get("averageResponseMs"),
+        "failureRate": float(stats.get("failureRate") or 0.0),
+        "errorCounts": dict(stats.get("errorCounts") or {}),
+        "topError": dict(stats.get("topError") or {"label": "", "count": 0}),
+    }
+
+
+def _normalize_recent_failure(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ageSeconds": float(item.get("ageSeconds") or 0.0),
+        "elapsedSeconds": float(item.get("elapsedSeconds") or 0.0),
+        "errorType": str(item.get("errorType") or "UnknownError"),
+        "bucketIndex": int(item.get("bucketIndex") or 0),
+        "instanceName": str(item.get("instanceName") or ""),
+        "podName": str(item.get("podName") or ""),
+    }
+
+
+def _normalize_detail_entry(item: dict[str, Any], window_seconds: float) -> dict[str, Any]:
+    stats = _normalize_stats(_stats_payload(item), window_seconds)
+    buckets = [
+        _normalize_detail_bucket(bucket, window_seconds)
+        for bucket in list(item.get("buckets") or [])
+    ]
+    bucket_count = int(item.get("bucketCount") or len(buckets) or 24)
+    if not buckets and bucket_count > 0:
+        buckets = _empty_proxy_detail(window_seconds, bucket_count)["buckets"]
+    return {
+        "instanceName": str(item.get("instanceName") or ""),
+        "podName": str(item.get("podName") or ""),
+        "reachable": bool(item.get("reachable", True)),
+        "proxyConfigured": bool(item.get("proxyConfigured")),
+        "windowSeconds": window_seconds,
+        "windowLabel": str(item.get("windowLabel") or stats["windowLabel"]),
+        "proxyKey": str(item.get("proxyKey") or stats.get("proxyKey") or ""),
+        "proxyLabel": str(item.get("proxyLabel") or stats.get("proxyLabel") or ""),
+        "found": bool(item.get("found")),
+        "bucketCount": bucket_count,
+        "bucketSizeSeconds": float(item.get("bucketSizeSeconds") or (window_seconds / max(1, bucket_count))),
+        "stats": stats,
+        "buckets": buckets,
+        "recentFailures": [
+            _normalize_recent_failure(failure)
+            for failure in list(item.get("recentFailures") or [])
+        ],
+        "generatedAt": str(item.get("generatedAt") or _utcnow_iso()),
+    }
+
+
 def _fetch_proxy_snapshot(
     settings: UISettings,
     summary: dict[str, Any],
@@ -192,6 +301,64 @@ def _fetch_proxy_snapshot(
         "error": "",
         "generatedAt": str(payload.get("generatedAt") or _utcnow_iso()),
     }
+
+
+def _fetch_proxy_detail_snapshot(
+    settings: UISettings,
+    summary: dict[str, Any],
+    *,
+    proxy_key: str,
+    window_spec: str,
+    window_seconds: float,
+) -> dict[str, Any]:
+    name = str(summary.get("name") or "")
+    parser_info = dict(summary.get("parser") or {})
+    pod_name = str(parser_info.get("podName") or "")
+    url = parser_service_url(name, settings.namespace).rstrip("/") + "/api/v1/proxy-stats/detail"
+    try:
+        response = requests.get(
+            url,
+            params={"proxy": proxy_key, "window": window_spec},
+            timeout=PROXY_STATS_TIMEOUT_SECONDS,
+            headers={"Accept": "application/json"},
+        )
+        payload = response.json()
+        if not response.ok:
+            raise RuntimeError(str(payload.get("error") or f"HTTP {response.status_code}"))
+    except Exception as exc:
+        empty = _empty_proxy_detail(window_seconds)
+        empty.update(
+            {
+                "instanceName": name,
+                "podName": pod_name,
+                "reachable": False,
+                "proxyConfigured": False,
+                "windowSeconds": window_seconds,
+                "windowLabel": window_spec,
+                "error": str(exc),
+                "generatedAt": _utcnow_iso(),
+            }
+        )
+        return empty
+
+    detail = _normalize_detail_entry(dict(payload or {}), window_seconds)
+    detail.update(
+        {
+            "instanceName": name,
+            "podName": str(payload.get("podName") or pod_name or ""),
+            "reachable": True,
+            "proxyConfigured": bool(payload.get("proxyConfigured")),
+            "windowSeconds": float(payload.get("windowSeconds") or window_seconds),
+            "windowLabel": str(payload.get("windowLabel") or window_spec),
+            "error": "",
+            "generatedAt": str(payload.get("generatedAt") or _utcnow_iso()),
+        }
+    )
+    if not detail.get("proxyKey"):
+        detail["proxyKey"] = proxy_key
+    if not detail.get("proxyLabel"):
+        detail["proxyLabel"] = proxy_key
+    return detail
 
 
 def _aggregate_proxy_stats(
@@ -359,6 +526,199 @@ def _merge_proxy_sources(items: list[dict[str, Any]], window_seconds: float) -> 
     return proxies
 
 
+def _merge_proxy_detail_sources(
+    items: list[dict[str, Any]],
+    *,
+    proxy_key: str,
+    window_seconds: float,
+) -> dict[str, Any]:
+    bucket_count = 24
+    merged = _empty_proxy_detail(window_seconds, bucket_count)
+    merged["proxyKey"] = proxy_key
+    merged["proxyLabel"] = proxy_key
+
+    buckets = merged["buckets"]
+    recent_failures: list[dict[str, Any]] = []
+    sources: list[dict[str, Any]] = []
+    pods_seen: set[str] = set()
+    pods_working: set[str] = set()
+    source_total = len(items)
+    source_responded = 0
+    total_calls = 0
+    success_calls = 0
+    failure_calls = 0
+    total_elapsed_seconds = 0.0
+    error_counts: Counter[str] = Counter()
+    max_bucket_count = bucket_count
+    bucket_size_seconds = window_seconds / bucket_count if bucket_count else window_seconds
+
+    for item in items:
+        detail = _normalize_detail_entry(dict(item or {}), window_seconds)
+        if detail.get("bucketCount"):
+            max_bucket_count = max(max_bucket_count, int(detail.get("bucketCount") or bucket_count))
+        if not detail.get("found"):
+            continue
+        source_responded += 1
+        pod_name = str(detail.get("podName") or "").strip()
+        instance_name = str(detail.get("instanceName") or "").strip()
+        stats = dict(detail.get("stats") or {})
+        total_calls += int(stats.get("totalCalls") or 0)
+        success_calls += int(stats.get("successCalls") or 0)
+        failure_calls += int(stats.get("failureCalls") or 0)
+        total_elapsed_seconds += float(stats.get("totalElapsedSeconds") or 0.0)
+        error_counts.update(dict(stats.get("errorCounts") or {}))
+        if pod_name:
+            pods_seen.add(pod_name)
+            if int(stats.get("successCalls") or 0) > 0:
+                pods_working.add(pod_name)
+        sources.append(
+            {
+                "instanceName": instance_name,
+                "podName": pod_name,
+                "windowSeconds": window_seconds,
+                "windowLabel": str(detail.get("windowLabel") or format_proxy_window_label(window_seconds)),
+                "stats": stats,
+            }
+        )
+
+        for bucket in list(detail.get("buckets") or []):
+            index = int(bucket.get("index") or 0)
+            if index < 0:
+                continue
+            while index >= len(buckets):
+                buckets.append(
+                    {
+                        "index": len(buckets),
+                        "label": f"Bucket {len(buckets) + 1:02d}",
+                        "rangeLabel": f"{format_proxy_window_label(max(0.0, window_seconds - (len(buckets) * bucket_size_seconds)))} ago to {format_proxy_window_label(max(0.0, window_seconds - ((len(buckets) + 1) * bucket_size_seconds)))} ago",
+                        "startSecondsAgo": max(0.0, window_seconds - (len(buckets) * bucket_size_seconds)),
+                        "endSecondsAgo": max(0.0, window_seconds - ((len(buckets) + 1) * bucket_size_seconds)),
+                        "totalCalls": 0,
+                        "successCalls": 0,
+                        "failureCalls": 0,
+                        "totalElapsedSeconds": 0.0,
+                        "averageResponseMs": None,
+                        "failureRate": 0.0,
+                        "errorCounts": {},
+                        "topError": {"label": "", "count": 0},
+                    }
+                )
+            merged_bucket = buckets[index]
+            merged_bucket["totalCalls"] += int(bucket.get("totalCalls") or 0)
+            merged_bucket["successCalls"] += int(bucket.get("successCalls") or 0)
+            merged_bucket["failureCalls"] += int(bucket.get("failureCalls") or 0)
+            merged_bucket["totalElapsedSeconds"] += float(bucket.get("totalElapsedSeconds") or 0.0)
+            merged_errors = Counter(dict(merged_bucket.get("errorCounts") or {}))
+            merged_errors.update(dict(bucket.get("errorCounts") or {}))
+            merged_bucket["errorCounts"] = dict(merged_errors)
+
+        for failure in list(detail.get("recentFailures") or []):
+            recent_failures.append(
+                {
+                    **_normalize_recent_failure(failure),
+                    "instanceName": instance_name,
+                    "podName": pod_name,
+                }
+            )
+
+    normalized_buckets = []
+    for index, bucket in enumerate(buckets[:max_bucket_count]):
+        total = int(bucket.get("totalCalls") or 0)
+        failures = int(bucket.get("failureCalls") or 0)
+        error_counts_bucket = _sort_error_counts({str(key): int(value) for key, value in dict(bucket.get("errorCounts") or {}).items()})
+        top_error = next(iter(error_counts_bucket.items()), (None, 0))
+        normalized_buckets.append(
+            {
+                "index": index,
+                "label": str(bucket.get("label") or f"Bucket {index + 1:02d}"),
+                "rangeLabel": str(bucket.get("rangeLabel") or ""),
+                "startSecondsAgo": float(bucket.get("startSecondsAgo") or 0.0),
+                "endSecondsAgo": float(bucket.get("endSecondsAgo") or 0.0),
+                "totalCalls": total,
+                "successCalls": int(bucket.get("successCalls") or 0),
+                "failureCalls": failures,
+                "totalElapsedSeconds": float(bucket.get("totalElapsedSeconds") or 0.0),
+                "averageResponseMs": (
+                    (float(bucket.get("totalElapsedSeconds") or 0.0) / total) * 1000.0 if total else None
+                ),
+                "failureRate": (failures / total) if total else 0.0,
+                "errorCounts": error_counts_bucket,
+                "topError": {
+                    "label": top_error[0] or "",
+                    "count": int(top_error[1] or 0),
+                },
+            }
+        )
+
+    recent_failures.sort(key=lambda item: float(item.get("ageSeconds") or 0.0))
+    recent_failures = recent_failures[:12]
+    summary = {
+        "proxyCount": 1 if (total_calls > 0 or source_responded > 0) else 0,
+        "sourcePodsTotal": source_total,
+        "sourcePodsResponded": source_responded,
+        "sourcePodsMissing": max(0, source_total - source_responded),
+        "podsWithSuccess": len(pods_working),
+        "podsWithTraffic": len(pods_seen),
+        "totalCalls": total_calls,
+        "successCalls": success_calls,
+        "failureCalls": failure_calls,
+        "failureRate": (failure_calls / total_calls) if total_calls else 0.0,
+        "averageResponseMs": (total_elapsed_seconds / total_calls) * 1000.0 if total_calls else None,
+        "recentRequests": total_calls,
+        "recentWindowSeconds": window_seconds,
+        "requestsPerSecond": total_calls / window_seconds if window_seconds else 0.0,
+        "requestsPerMinute": (total_calls / window_seconds * 60.0) if window_seconds else 0.0,
+        "errorCounts": dict(error_counts),
+        "errorBreakdown": [
+            {"label": label, "count": count}
+            for label, count in sorted(error_counts.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "topError": {
+            "label": "",
+            "count": 0,
+        },
+        "healthyProxies": 1 if total_calls > 0 and failure_calls == 0 else 0,
+        "degradedProxies": 1 if total_calls > 0 and 0 < failure_calls < total_calls else 0,
+        "brokenProxies": 1 if total_calls > 0 and success_calls == 0 and failure_calls > 0 else 0,
+    }
+    if summary["errorBreakdown"]:
+        summary["topError"] = {
+            "label": summary["errorBreakdown"][0]["label"],
+            "count": summary["errorBreakdown"][0]["count"],
+        }
+    merged["found"] = bool(source_responded > 0)
+    merged["bucketCount"] = len(normalized_buckets)
+    merged["bucketSizeSeconds"] = bucket_size_seconds
+    merged["buckets"] = normalized_buckets
+    merged["recentFailures"] = recent_failures
+    merged["podsSeen"] = sorted(pods_seen)
+    merged["podsWorking"] = sorted(pods_working)
+    merged["stats"] = {
+        "proxyKey": proxy_key,
+        "proxyLabel": proxy_key,
+        "totalCalls": total_calls,
+        "successCalls": success_calls,
+        "failureCalls": failure_calls,
+        "totalElapsedSeconds": total_elapsed_seconds,
+        "averageResponseMs": summary["averageResponseMs"],
+        "recentRequests": total_calls,
+        "recentWindowSeconds": window_seconds,
+        "windowSeconds": window_seconds,
+        "windowLabel": format_proxy_window_label(window_seconds),
+        "requestsPerSecond": summary["requestsPerSecond"],
+        "requestsPerMinute": summary["requestsPerMinute"],
+        "errorCounts": _sort_error_counts(dict(error_counts)),
+        "failureRate": summary["failureRate"],
+        "topError": {
+            "label": summary["errorBreakdown"][0]["label"] if summary["errorBreakdown"] else "",
+            "count": summary["errorBreakdown"][0]["count"] if summary["errorBreakdown"] else 0,
+        },
+    }
+    merged["sources"] = sources
+    merged["summary"] = summary
+    return merged
+
+
 def _load_proxy_statistics(
     settings: UISettings,
     *,
@@ -406,4 +766,63 @@ def _load_proxy_statistics(
             "responded": source_responded,
             "missing": summary["sourcePodsMissing"],
         },
+    }
+
+
+def _load_proxy_detail(
+    settings: UISettings,
+    *,
+    proxy_key: str,
+    window_spec: str | None = None,
+) -> dict[str, Any]:
+    summaries = _load_instance_summaries(settings)
+    selected_window_seconds, selected_window_label = parse_proxy_window_spec(window_spec)
+    items: list[dict[str, Any]] = []
+    if summaries:
+        with ThreadPoolExecutor(max_workers=max(1, min(8, len(summaries)))) as executor:
+            futures = {
+                executor.submit(
+                    _fetch_proxy_detail_snapshot,
+                    settings,
+                    summary,
+                    proxy_key=proxy_key,
+                    window_spec=selected_window_label,
+                    window_seconds=selected_window_seconds,
+                ): summary
+                for summary in summaries
+            }
+            for future in as_completed(futures):
+                items.append(_normalize_detail_entry(future.result(), selected_window_seconds))
+
+    source_total = len(summaries)
+    source_responded = sum(1 for item in items if bool(item.get("reachable")))
+    merged = _merge_proxy_detail_sources(
+        items,
+        proxy_key=proxy_key,
+        window_seconds=selected_window_seconds,
+    )
+    merged_summary = dict(merged.get("summary") or {})
+    return {
+        "generatedAt": _utcnow_iso(),
+        "window": {
+            "spec": selected_window_label,
+            "seconds": selected_window_seconds,
+            "label": selected_window_label,
+        },
+        "proxy": {
+            "key": proxy_key,
+            "label": str(merged.get("proxyLabel") or proxy_key),
+        },
+        "summary": merged_summary,
+        "buckets": list(merged.get("buckets") or []),
+        "recentFailures": list(merged.get("recentFailures") or []),
+        "sources": {
+            "total": source_total,
+            "responded": source_responded,
+            "missing": max(0, source_total - source_responded),
+        },
+        "podsSeen": list(merged.get("podsSeen") or []),
+        "podsWorking": list(merged.get("podsWorking") or []),
+        "sourceEntries": list(merged.get("sources") or []),
+        "found": bool(merged.get("found")),
     }

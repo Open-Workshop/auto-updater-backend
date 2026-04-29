@@ -1,0 +1,53 @@
+<section class="page-top proxy-hero proxy-detail-hero">
+  <div class="proxy-hero-copy">
+    <div class="eyebrow">Proxy Detail</div>
+    <h1>$title</h1>
+    <div class="subtitle">$subtitle</div>
+    <div class="hero-note">$hero_note</div>
+  </div>
+  <div class="proxy-hero-actions proxy-detail-actions">
+    <form class="proxy-detail-window-form" id="proxy-detail-window-form" method="get" action="$detail_base_url">
+      <input type="hidden" id="proxy-detail-key" name="proxy" value="$proxy_key">
+      <label class="inline-field">
+        <span class="meta-label">Window</span>
+        <select id="proxy-detail-window-select" name="window" class="input proxy-window-select">
+          $window_options_html
+        </select>
+      </label>
+      <button type="submit" class="button secondary">Apply</button>
+    </form>
+    <a class="button secondary" href="$dashboard_url">Back to overview</a>
+  </div>
+</section>
+
+<section class="metrics-grid proxy-summary-grid" id="proxy-detail-metrics">
+  $metrics_html
+</section>
+
+<section class="panel-section proxy-detail-timeline-panel">
+  <div class="section-title">Timeline</div>
+  <div class="proxy-chart-subtitle">24 buckets across the selected window. Hover the bars for a quick read of each slice.</div>
+  $timeline_html
+  <div class="proxy-bucket-grid">
+    $bucket_cards_html
+  </div>
+</section>
+
+<div class="detail-grid proxy-detail-grid">
+  <section class="panel-section">
+    <div class="section-title">Pod coverage</div>
+    <div class="proxy-source-grid">
+      $source_cards_html
+    </div>
+  </section>
+  <section class="panel-section">
+    <div class="section-title">Recent failures</div>
+    <div class="proxy-failure-list">
+      $recent_failures_html
+    </div>
+  </section>
+</div>
+
+<script id="proxy-detail-payload" type="application/json">$detail_payload_json</script>
+<script id="proxy-detail-config" type="application/json">$detail_config_json</script>
+<script src="$proxy_detail_js_href"></script>

@@ -1,5 +1,6 @@
 (() => {
-  const tableBody = document.getElementById("proxy-table-body");
+  const anomaliesRoot = document.getElementById("proxy-anomalies");
+  const boardRoot = document.getElementById("proxy-board");
   const searchInput = document.getElementById("proxy-search");
   const sortSelect = document.getElementById("proxy-sort");
   const statusFilterRoot = document.getElementById("proxy-status-filters");
@@ -15,7 +16,8 @@
   const metricsRoot = document.getElementById("proxy-metrics");
 
   if (
-    !tableBody
+    !anomaliesRoot
+    || !boardRoot
     || !searchInput
     || !sortSelect
     || !statusFilterRoot
@@ -35,6 +37,7 @@
 
   const config = JSON.parse(configNode.textContent || "{}");
   const apiUrl = config.apiUrl || "";
+  const detailBaseUrl = config.detailBaseUrl || "";
   const defaultSort = config.defaultSort || "bad_first";
   const defaultWindow = config.selectedWindow || "1h";
   const palette = [
@@ -50,7 +53,6 @@
   let searchTerm = "";
   let activeFilter = "All";
   let sortKey = defaultSort;
-  let expandedKeys = new Set();
   let selectedWindow = payload.window.spec || defaultWindow;
 
   function escapeHtml(value) {
@@ -176,6 +178,7 @@
     const statusSeverity = Number(item.statusSeverity ?? severityForStatus(statusLabel));
     const proxyKey = String(item.proxyKey || item.proxyLabel || "");
     const proxyLabel = String(item.proxyLabel || proxyKey || "proxy");
+    const topErrorLabel = stats.topError.label;
     const searchText = [
       proxyKey,
       proxyLabel,
@@ -187,7 +190,7 @@
         source.podName,
         source.stats.topError.label,
       ]),
-      stats.topError.label,
+      topErrorLabel,
     ]
       .join(" ")
       .toLowerCase();
@@ -297,10 +300,10 @@
 
   function renderMetrics(summary) {
     metricsRoot.innerHTML = [
-      metricHtml("Proxy endpoints", formatCount(summary.proxyCount), "info"),
       metricHtml("Broken proxies", formatCount(summary.brokenProxies), summary.brokenProxies ? "error" : "muted"),
       metricHtml("Degraded proxies", formatCount(summary.degradedProxies), summary.degradedProxies ? "warning" : "muted"),
       metricHtml("Healthy proxies", formatCount(summary.healthyProxies), summary.healthyProxies ? "healthy" : "muted"),
+      metricHtml("Pods with traffic", formatCount(summary.podsWithTraffic), "info"),
       metricHtml("Avg latency", formatLatency(summary.averageResponseMs), "info"),
       metricHtml("RPS / RPM", `${formatRate(summary.requestsPerSecond)} / ${formatRate(summary.requestsPerMinute)}`, "muted"),
     ].join("");
@@ -368,7 +371,7 @@
     return 0;
   }
 
-  function sortProxies(proxies) {
+  function sortProxies(proxies, key = sortKey) {
     const list = [...proxies];
     const byLabel = (left, right) => String(left.proxyLabel || "").localeCompare(String(right.proxyLabel || ""));
     const bySeverity = (left, right) => Number(right.statusSeverity || 0) - Number(left.statusSeverity || 0);
@@ -419,7 +422,7 @@
         return byLabel(left, right);
       },
     };
-    const comparator = comparators[sortKey] || comparators.bad_first;
+    const comparator = comparators[key] || comparators.bad_first;
     list.sort(comparator);
     return list;
   }
@@ -435,80 +438,99 @@
     return proxy.searchText.includes(needle);
   }
 
-  function sourceCardHtml(source) {
+  function detailUrlFor(proxyKey) {
+    const url = new URL(detailBaseUrl || window.location.href, window.location.href);
+    url.searchParams.set("proxy", proxyKey);
+    url.searchParams.set("window", selectedWindow);
+    return url.toString();
+  }
+
+  function proxyAnomalyHtml(proxy) {
+    const topError = proxy.stats.topError || { label: "", count: 0 };
+    const errorLabel = topError.label ? `${topError.label} × ${formatCount(topError.count)}` : "—";
     return `
-      <article class="proxy-source-card">
-        <div class="proxy-source-title">${escapeHtml(source.instanceName || "Unknown instance")}</div>
-        <div class="cell-subtle">${escapeHtml(source.podName || "n/a")}</div>
-        <div class="proxy-source-metrics">
-          <span><strong>${formatCount(source.stats.successCalls)}</strong> success</span>
-          <span><strong>${formatCount(source.stats.failureCalls)}</strong> fail</span>
-          <span><strong>${formatCount(source.stats.totalCalls)}</strong> total</span>
+      <a class="proxy-anomaly-card" href="${escapeHtml(detailUrlFor(proxy.proxyKey))}">
+        <div class="proxy-anomaly-head">
+          <span class="pill tone-${escapeHtml(proxy.statusTone)}">${escapeHtml(proxy.statusLabel)}</span>
+          <span class="proxy-anomaly-link">Open detail</span>
         </div>
-        <div class="proxy-source-footer">
-          <span>${escapeHtml(formatLatency(source.stats.averageResponseMs))}</span>
-          <span>${escapeHtml(`${formatRate(source.stats.requestsPerSecond)} rps`)}</span>
-          <span>${escapeHtml(source.stats.topError.label ? `${source.stats.topError.label} × ${formatCount(source.stats.topError.count)}` : "No error")}</span>
+        <div class="proxy-anomaly-title">${escapeHtml(proxy.proxyLabel)}</div>
+        <div class="proxy-anomaly-meta">
+          <span>${formatCount(proxy.workingPodCount)} / ${formatCount(proxy.podCount)} pods</span>
+          <span>${formatCount(proxy.stats.failureCalls)} failures</span>
+          <span>${escapeHtml(formatLatency(proxy.stats.averageResponseMs))}</span>
         </div>
-      </article>
+        <div class="proxy-anomaly-footer">
+          <span>${escapeHtml(topError.label || "No error")}</span>
+          <strong>${escapeHtml(errorLabel)}</strong>
+        </div>
+      </a>
     `;
   }
 
-  function proxyRowHtml(proxy) {
-    const totalCalls = proxy.stats.totalCalls;
-    const successCalls = proxy.stats.successCalls;
-    const failureCalls = proxy.stats.failureCalls;
-    const failureRate = proxy.stats.failureRate;
-    const detailOpen = expandedKeys.has(proxy.proxyKey);
+  function proxyCardHtml(proxy) {
+    const topError = proxy.stats.topError || { label: "", count: 0 };
+    const errorLabel = topError.label ? `${topError.label} × ${formatCount(topError.count)}` : "No error";
     return `
-      <tr class="proxy-row" data-proxy-key="${escapeHtml(proxy.proxyKey)}" data-status="${escapeHtml(proxy.statusLabel)}">
-        <td>
-        <div class="proxy-primary-cell">
-          <button type="button" class="proxy-expand-button" data-expand-proxy="${escapeHtml(proxy.proxyKey)}" aria-expanded="${detailOpen ? "true" : "false"}">${detailOpen ? "Hide" : "Details"}</button>
-          <div>
+      <a class="proxy-board-card" href="${escapeHtml(detailUrlFor(proxy.proxyKey))}">
+        <div class="proxy-board-header">
+          <div class="proxy-board-title-wrap">
             <code class="proxy-endpoint">${escapeHtml(proxy.proxyLabel)}</code>
             <div class="cell-subtle">${formatCount(proxy.workingPodCount)} pods with success · ${formatCount(proxy.podCount)} pods seen</div>
           </div>
+          <div class="proxy-board-status">
+            <span class="pill tone-${escapeHtml(proxy.statusTone)}">${escapeHtml(proxy.statusLabel)}</span>
+            <span class="proxy-board-error">${escapeHtml(errorLabel)}</span>
+          </div>
         </div>
-      </td>
-      <td><span class="pill tone-${escapeHtml(proxy.statusTone)}">${escapeHtml(proxy.statusLabel)}</span></td>
-      <td>
-        <div class="proxy-metric-stack">
-          <strong>${formatCount(proxy.workingPodCount)} / ${formatCount(proxy.podCount)}</strong>
-          <div class="cell-subtle">${formatCount(proxy.sourceCount)} sources</div>
+        <div class="proxy-board-grid">
+          <div class="proxy-board-cell">
+            <span class="meta-label">Coverage</span>
+            <strong>${formatCount(proxy.workingPodCount)} / ${formatCount(proxy.podCount)}</strong>
+            <span class="cell-subtle">${formatCount(proxy.sourceCount)} source pods</span>
+          </div>
+          <div class="proxy-board-cell">
+            <span class="meta-label">Success</span>
+            <strong>${formatCount(proxy.stats.successCalls)}</strong>
+            <span class="cell-subtle">${formatCount(proxy.stats.totalCalls)} total calls</span>
+          </div>
+          <div class="proxy-board-cell">
+            <span class="meta-label">Failures</span>
+            <strong>${formatCount(proxy.stats.failureCalls)}</strong>
+            <span class="cell-subtle">${formatPercent(proxy.stats.failureRate)} failure rate</span>
+          </div>
+          <div class="proxy-board-cell">
+            <span class="meta-label">Avg latency</span>
+            <strong>${escapeHtml(formatLatency(proxy.stats.averageResponseMs))}</strong>
+            <span class="cell-subtle">${escapeHtml(`${formatRate(proxy.stats.requestsPerSecond)} / ${formatRate(proxy.stats.requestsPerMinute)}`)} rps / rpm</span>
+          </div>
         </div>
-      </td>
-        <td>
-          <div class="proxy-metric-stack">
-            <strong>${formatCount(successCalls)}</strong>
-            <div class="cell-subtle">${formatCount(totalCalls)} total</div>
-          </div>
-        </td>
-        <td>
-          <div class="proxy-metric-stack">
-            <strong>${formatCount(failureCalls)}</strong>
-            <div class="cell-subtle">${formatPercent(failureRate)} failure rate</div>
-          </div>
-        </td>
-        <td>${escapeHtml(formatLatency(proxy.stats.averageResponseMs))}</td>
-        <td>${escapeHtml(`${formatRate(proxy.stats.requestsPerSecond)} / ${formatCount(proxy.stats.requestsPerMinute)}`)}</td>
-        <td>${escapeHtml(proxy.stats.topError.label ? `${proxy.stats.topError.label} × ${formatCount(proxy.stats.topError.count)}` : "—")}</td>
-      </tr>
-      <tr class="proxy-detail-row" data-proxy-detail="${escapeHtml(proxy.proxyKey)}" ${detailOpen ? "" : "hidden"}>
-        <td colspan="8">
-          <div class="proxy-detail-shell">
-            <div class="section-title">Proxy sources</div>
-            <div class="proxy-source-grid">
-              ${proxy.sources.map(sourceCardHtml).join("") || "<div class='empty-state'>No proxy source detail was captured for this endpoint.</div>"}
-            </div>
-          </div>
-        </td>
-      </tr>
+      </a>
     `;
   }
 
+  function renderAnomalies() {
+    const filtered = sortProxies(
+      payload.proxies.filter((proxy) => matchesFilter(proxy) && matchesSearch(proxy)),
+      "bad_first",
+    ).slice(0, 3);
+    anomaliesRoot.innerHTML = filtered.length
+      ? filtered.map(proxyAnomalyHtml).join("")
+      : "<div class=\"empty-state\">No proxy anomalies match the current filters.</div>";
+  }
+
+  function renderBoard() {
+    const filtered = sortProxies(
+      payload.proxies.filter((proxy) => matchesFilter(proxy) && matchesSearch(proxy)),
+      sortKey,
+    );
+    boardRoot.innerHTML = filtered.length
+      ? filtered.map(proxyCardHtml).join("")
+      : "<div class=\"empty-state\">No proxies match the current filters.</div>";
+  }
+
   function updateSyncState() {
-    const updatedAt = new Date().toLocaleTimeString();
+    const updatedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     if (!payload.summary.proxyCount) {
       syncState.textContent = `Waiting for proxy telemetry · window ${payload.window.label || selectedWindow} · updated ${updatedAt}`;
       return;
@@ -516,25 +538,11 @@
     syncState.textContent = `${formatCount(payload.summary.podsWithSuccess)} pods reported successful proxy calls · ${payload.sources.responded} / ${payload.sources.total} parser pods responded · window ${payload.window.label || selectedWindow} · updated ${updatedAt}`;
   }
 
-  function renderTable() {
-    const filtered = sortProxies(
-      payload.proxies.filter((proxy) => matchesFilter(proxy) && matchesSearch(proxy)),
-    );
-    tableBody.innerHTML = filtered.length
-      ? filtered.map(proxyRowHtml).join("")
-      : `
-        <tr>
-          <td colspan="8">
-            <div class="empty-state">No proxies match the current filters.</div>
-          </td>
-        </tr>
-      `;
-  }
-
   function renderAll() {
     renderMetrics(payload.summary);
     renderChart(payload.summary, payload.errorBreakdown);
-    renderTable();
+    renderAnomalies();
+    renderBoard();
     updateSyncState();
   }
 
@@ -549,7 +557,7 @@
   }
 
   async function refreshData() {
-    syncState.textContent = "Refreshing...";
+    syncState.textContent = "Refreshing proxy telemetry...";
     try {
       const url = new URL(apiUrl, window.location.href);
       url.searchParams.set("window", selectedWindow);
@@ -579,12 +587,13 @@
     Array.from(statusFilterRoot.querySelectorAll("[data-filter]")).forEach((button) => {
       button.classList.toggle("active", (button.dataset.filter || "All") === activeFilter);
     });
-    renderTable();
+    renderAnomalies();
+    renderBoard();
   }
 
   function setSort(value) {
     sortKey = value || defaultSort;
-    renderTable();
+    renderBoard();
   }
 
   function setWindow(value) {
@@ -602,7 +611,8 @@
 
   searchInput.addEventListener("input", () => {
     searchTerm = searchInput.value || "";
-    renderTable();
+    renderAnomalies();
+    renderBoard();
   });
 
   sortSelect.addEventListener("change", () => {
@@ -615,19 +625,6 @@
 
   refreshButton.addEventListener("click", () => {
     refreshData();
-  });
-
-  tableBody.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-expand-proxy]");
-    if (!button) return;
-    const proxyKey = String(button.dataset.expandProxy || "");
-    if (!proxyKey) return;
-    if (expandedKeys.has(proxyKey)) {
-      expandedKeys.delete(proxyKey);
-    } else {
-      expandedKeys.add(proxyKey);
-    }
-    renderTable();
   });
 
   updateWindowUrl(selectedWindow);

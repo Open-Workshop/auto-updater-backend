@@ -356,6 +356,151 @@ def _sample_proxy_payload() -> dict:
             "missing": 1,
         },
     }
+
+
+def _sample_proxy_detail_payload() -> dict:
+    return {
+        "generatedAt": "2026-04-29T11:15:00+00:00",
+        "window": {
+            "spec": "1h",
+            "seconds": 3600.0,
+            "label": "1h",
+        },
+        "proxy": {
+            "key": "socks5://10.0.0.2:3001",
+            "label": "socks5://10.0.0.2:3001",
+        },
+        "summary": {
+            "proxyCount": 1,
+            "sourcePodsTotal": 3,
+            "sourcePodsResponded": 2,
+            "sourcePodsMissing": 1,
+            "healthyProxies": 0,
+            "degradedProxies": 1,
+            "brokenProxies": 0,
+            "podsWithSuccess": 2,
+            "podsWithTraffic": 2,
+            "totalCalls": 37,
+            "successCalls": 29,
+            "failureCalls": 8,
+            "failureRate": 8 / 37,
+            "averageResponseMs": 412.0,
+            "recentRequests": 37,
+            "recentWindowSeconds": 3600.0,
+            "requestsPerSecond": 37 / 3600.0,
+            "requestsPerMinute": 37 / 60.0,
+            "errorCounts": {
+                "ProxyTimeoutError": 5,
+                "HTTP_503": 3,
+            },
+            "errorBreakdown": [
+                {"label": "ProxyTimeoutError", "count": 5},
+                {"label": "HTTP_503", "count": 3},
+            ],
+            "topError": {
+                "label": "ProxyTimeoutError",
+                "count": 5,
+            },
+        },
+        "buckets": [
+            {
+                "index": 0,
+                "label": "Bucket 01",
+                "rangeLabel": "1h to 55m ago",
+                "startSecondsAgo": 3300.0,
+                "endSecondsAgo": 3600.0,
+                "totalCalls": 6,
+                "successCalls": 5,
+                "failureCalls": 1,
+                "totalElapsedSeconds": 2.4,
+                "averageResponseMs": 400.0,
+                "failureRate": 1 / 6,
+                "errorCounts": {"ProxyTimeoutError": 1},
+                "topError": {"label": "ProxyTimeoutError", "count": 1},
+            }
+        ]
+        + [
+            {
+                "index": index,
+                "label": f"Bucket {index + 1:02d}",
+                "rangeLabel": "",
+                "startSecondsAgo": 0.0,
+                "endSecondsAgo": 0.0,
+                "totalCalls": 0,
+                "successCalls": 0,
+                "failureCalls": 0,
+                "totalElapsedSeconds": 0.0,
+                "averageResponseMs": None,
+                "failureRate": 0.0,
+                "errorCounts": {},
+                "topError": {"label": "", "count": 0},
+            }
+            for index in range(1, 24)
+        ],
+        "recentFailures": [
+            {
+                "ageSeconds": 14.0,
+                "elapsedSeconds": 0.5,
+                "errorType": "ProxyTimeoutError",
+                "bucketIndex": 0,
+                "instanceName": "demo",
+                "podName": "demo-parser-0",
+            }
+        ],
+        "sources": {
+            "total": 3,
+            "responded": 2,
+            "missing": 1,
+        },
+        "podsSeen": ["demo-parser-0", "demo-parser-1"],
+        "podsWorking": ["demo-parser-0", "demo-parser-1"],
+        "sourceEntries": [
+            {
+                "instanceName": "demo",
+                "podName": "demo-parser-0",
+                "windowSeconds": 3600.0,
+                "windowLabel": "1h",
+                "stats": {
+                    "totalCalls": 19,
+                    "successCalls": 16,
+                    "failureCalls": 3,
+                    "totalElapsedSeconds": 6.2,
+                    "averageResponseMs": 326.3,
+                    "recentRequests": 19,
+                    "recentWindowSeconds": 3600.0,
+                    "windowSeconds": 3600.0,
+                    "windowLabel": "1h",
+                    "requestsPerSecond": 19 / 3600.0,
+                    "requestsPerMinute": 19 / 60.0,
+                    "errorCounts": {"ProxyTimeoutError": 3},
+                    "failureRate": 3 / 19,
+                    "topError": {"label": "ProxyTimeoutError", "count": 3},
+                },
+            },
+            {
+                "instanceName": "demo",
+                "podName": "demo-parser-1",
+                "windowSeconds": 3600.0,
+                "windowLabel": "1h",
+                "stats": {
+                    "totalCalls": 18,
+                    "successCalls": 13,
+                    "failureCalls": 5,
+                    "totalElapsedSeconds": 7.1,
+                    "averageResponseMs": 394.4,
+                    "recentRequests": 18,
+                    "recentWindowSeconds": 3600.0,
+                    "windowSeconds": 3600.0,
+                    "windowLabel": "1h",
+                    "requestsPerSecond": 18 / 3600.0,
+                    "requestsPerMinute": 18 / 60.0,
+                    "errorCounts": {"HTTP_503": 3, "ProxyTimeoutError": 2},
+                    "failureRate": 5 / 18,
+                    "topError": {"label": "HTTP_503", "count": 3},
+                },
+            },
+        ],
+    }
 def _secret_value(_: str, __: str, key: str) -> str:
     values = {
         "login": "demo-login",
@@ -444,11 +589,12 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 200)
                 text = await response.text()
                 self.assertIn("Proxy Health", text)
-                self.assertIn("Proxy endpoints", text)
+                self.assertIn("Top anomalies", text)
                 self.assertIn("Broken proxies", text)
                 self.assertIn("Outcome mix", text)
-                self.assertIn("Coverage", text)
-                self.assertIn("Proxy sources", text)
+                self.assertIn("Ranked proxy board", text)
+                self.assertIn("proxy-anomalies", text)
+                self.assertIn("proxy-board", text)
                 self.assertIn("proxy_stats.js", text)
                 self.assertIn("proxy-chart-total", text)
             finally:
@@ -471,6 +617,47 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(payload["errorBreakdown"][0]["label"], "ProxyTimeoutError")
                 self.assertEqual(payload["proxies"][0]["statusLabel"], "Degraded")
                 self.assertEqual(payload["proxies"][1]["statusLabel"], "Healthy")
+            finally:
+                await client.close()
+
+    async def test_proxy_stats_detail_page_renders_under_base_path(self) -> None:
+        with patch("ui.ui_handlers._load_proxy_detail", return_value=_sample_proxy_detail_payload()):
+            app = _create_app(load_ui_settings())
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                response = await client.get(
+                    "/auto-updater/proxy-stats/detail?proxy=socks5%3A%2F%2F10.0.0.2%3A3001&window=1h",
+                    headers=_auth_headers(),
+                )
+                self.assertEqual(response.status, 200)
+                text = await response.text()
+                self.assertIn("Proxy Detail", text)
+                self.assertIn("Pod coverage", text)
+                self.assertIn("Timeline", text)
+                self.assertIn("Recent failures", text)
+                self.assertIn("proxy_detail.js", text)
+                self.assertIn("proxy-detail-window-form", text)
+            finally:
+                await client.close()
+
+    async def test_proxy_stats_detail_api_returns_json_under_base_path(self) -> None:
+        with patch("ui.ui_handlers._load_proxy_detail", return_value=_sample_proxy_detail_payload()):
+            app = _create_app(load_ui_settings())
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                response = await client.get(
+                    "/auto-updater/api/proxy-stats/detail?proxy=socks5%3A%2F%2F10.0.0.2%3A3001&window=1h",
+                    headers=_auth_headers(),
+                )
+                self.assertEqual(response.status, 200)
+                payload = await response.json()
+                self.assertEqual(payload["proxy"]["key"], "socks5://10.0.0.2:3001")
+                self.assertEqual(payload["summary"]["totalCalls"], 37)
+                self.assertEqual(payload["summary"]["topError"]["label"], "ProxyTimeoutError")
+                self.assertEqual(len(payload["buckets"]), 24)
+                self.assertEqual(payload["recentFailures"][0]["errorType"], "ProxyTimeoutError")
             finally:
                 await client.close()
 
