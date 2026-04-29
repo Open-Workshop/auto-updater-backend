@@ -647,13 +647,14 @@ class OWClient:
         return raw
 
     def _transfer_from_init(self, response: requests.Response) -> StorageTransfer | None:
-        redirect_url = self._redirect_location(response)
         payload = self._json_payload(response)
-        transfer_url = redirect_url
-        if not transfer_url and payload:
+        transfer_url = None
+        if payload:
             candidate = payload.get("transfer_url")
             if isinstance(candidate, str) and candidate.strip():
-                transfer_url = candidate.strip()
+                transfer_url = urljoin(response.url, candidate.strip())
+        if not transfer_url:
+            transfer_url = self._redirect_location(response)
         if not transfer_url:
             return None
         ws_url = self._normalize_ws_url(self._derive_transfer_ws_url(transfer_url, payload))
@@ -1039,6 +1040,11 @@ class OWClient:
             return _result(mod_id, True)
         raise RuntimeError("Failed to parse mod id from response")
 
+    @staticmethod
+    def _is_mod_source_conflict_error(exc: RuntimeError) -> bool:
+        message = str(exc)
+        return "MOD_SOURCE_ALREADY_EXISTS" in message
+
     def upsert_mod_with_file(
         self,
         name: str,
@@ -1070,22 +1076,47 @@ class OWClient:
             )
             return int(existing_id), False
 
-        add_result = self.add_mod(
-            name,
-            short_desc,
-            desc,
-            source,
-            source_id,
-            game_id,
-            public_mode,
-            without_author,
-            file_path,
-            return_created=True,
-        )
-        if isinstance(add_result, tuple):
-            mod_id, created = add_result
-        else:
-            mod_id, created = int(add_result), True
+        try:
+            add_result = self.add_mod(
+                name,
+                short_desc,
+                desc,
+                source,
+                source_id,
+                game_id,
+                public_mode,
+                without_author,
+                file_path,
+                return_created=True,
+            )
+        except RuntimeError as exc:
+            if not self._is_mod_source_conflict_error(exc):
+                raise
+            existing_id = self._find_mod_by_source_with_wait(
+                source,
+                source_id,
+                attempts=12,
+                delay=1.5,
+            )
+            if existing_id is None:
+                raise
+            self.edit_mod(
+                int(existing_id),
+                name,
+                short_desc,
+                desc,
+                source,
+                source_id,
+                game_id,
+                public_mode,
+                file_path,
+                set_source=False,
+            )
+            return int(existing_id), False
+
+        if not isinstance(add_result, tuple):
+            return int(add_result), True
+        mod_id, created = add_result
         if created:
             return int(mod_id), True
 

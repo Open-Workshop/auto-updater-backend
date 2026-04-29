@@ -295,6 +295,29 @@ class HttpClientTests(unittest.TestCase):
             "wss://storage.openworkshop.miskler.ru/transfer/ws/42?token=abc",
         )
 
+    def test_transfer_from_init_prefers_payload_transfer_url_over_location(self) -> None:
+        client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
+        response = _InitResponse(
+            headers={"Location": "/uploads/job-1"},
+            payload={
+                "transfer_url": "https://storage.openworkshop.miskler.ru/transfer/upload?token=abc&job_id=job-1",
+                "ws_url": "https://storage.openworkshop.miskler.ru/transfer/ws/job-1?token=abc",
+            },
+            status_code=201,
+        )
+
+        transfer = client._transfer_from_init(response)
+
+        self.assertIsNotNone(transfer)
+        self.assertEqual(
+            transfer.transfer_url,
+            "https://storage.openworkshop.miskler.ru/transfer/upload?token=abc&job_id=job-1",
+        )
+        self.assertEqual(
+            transfer.ws_url,
+            "wss://storage.openworkshop.miskler.ru/transfer/ws/job-1?token=abc",
+        )
+
     def test_transfer_from_init_derives_ws_url_from_token_job_id(self) -> None:
         client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
         token = _fake_token({"job_id": 123})
@@ -345,6 +368,44 @@ class HttpClientTests(unittest.TestCase):
         self.assertEqual(progress.sent_bytes, 50)
         self.assertEqual(progress.total_bytes, 200)
         self.assertFalse(progress.explicit_percent)
+
+    def test_ow_client_upsert_mod_with_file_recovers_from_source_conflict(self) -> None:
+        client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
+        client.find_mod_by_source = Mock(return_value=None)  # type: ignore[method-assign]
+        client.add_mod = Mock(  # type: ignore[method-assign]
+            side_effect=RuntimeError(
+                'Failed to add mod: 409 {"code":"MOD_SOURCE_ALREADY_EXISTS"}'
+            )
+        )
+        client._find_mod_by_source_with_wait = Mock(return_value=17)  # type: ignore[method-assign]
+        client.edit_mod = Mock(return_value=None)  # type: ignore[method-assign]
+
+        mod_id, created = client.upsert_mod_with_file(
+            "Example",
+            "Short",
+            "Long",
+            "steam",
+            294100,
+            123,
+            0,
+            False,
+            "archive.zip",
+        )
+
+        self.assertEqual(mod_id, 17)
+        self.assertFalse(created)
+        client.edit_mod.assert_called_once_with(
+            17,
+            "Example",
+            "Short",
+            "Long",
+            "steam",
+            294100,
+            123,
+            0,
+            "archive.zip",
+            set_source=False,
+        )
 
 
 if __name__ == "__main__":
