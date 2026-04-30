@@ -19,9 +19,9 @@ spec:
         - name: Enabled
           type: boolean
           jsonPath: .spec.enabled
-        - name: SteamApp
-          type: integer
-          jsonPath: .spec.parser.config.steamAppId
+        - name: ParserType
+          type: string
+          jsonPath: .spec.parser.type
         - name: Phase
           type: string
           jsonPath: .status.phase

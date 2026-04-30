@@ -2,11 +2,19 @@ import unittest
 from unittest.mock import patch
 
 from core.config import Config
+from core.parser_registry import (
+    ParserContract,
+    ParserConfigFieldSpec,
+    ParserSecretSpec,
+    ParserWorkloadSpec,
+    WorkloadLogTargetSpec,
+)
 
 try:
-    from services.parser_service import ParserRuntime
+    from services.parser_service import ParserRuntime, run_parser
 except ModuleNotFoundError:
     ParserRuntime = None
+    run_parser = None
 
 
 def _config(**overrides) -> Config:
@@ -135,6 +143,104 @@ async def _immediate_to_thread(func, /, *args, **kwargs):
     return func(*args, **kwargs)
 
 
+FAKE_PARSER_TYPE = "custom-parser"
+
+
+def _fake_contract() -> ParserContract:
+    return ParserContract(
+        parser_type=FAKE_PARSER_TYPE,
+        label="Custom Parser",
+        description="Test-only parser contract.",
+        config_fields=(
+            ParserConfigFieldSpec(
+                "sourceUrl",
+                "OW_SOURCE_URL",
+                "source_url",
+                "source_url",
+                "Source URL",
+                "str",
+                "https://api.example.test",
+                required=True,
+                ui_section="basic",
+            ),
+        ),
+        secret_specs=(
+            ParserSecretSpec(
+                key="parserProxyPoolSecretRef",
+                label="Parser proxy pool",
+                form_field="parser_proxy_pool",
+                secret_component="parser-proxies",
+                secret_data_key="proxyPool",
+                validator="proxy-pool",
+            ),
+            ParserSecretSpec(
+                key="runnerProxySecretRef",
+                label="Runner proxy URL",
+                form_field="runner_proxy_url",
+                secret_component="runner-proxy",
+                secret_data_key="proxyUrl",
+                validator="proxy-url",
+            ),
+        ),
+        workloads=(
+            ParserWorkloadSpec(
+                workload_id="ingestor",
+                component="parser",
+                name_suffix="ingestor",
+                display_label="Ingestor",
+                mode="parser",
+                main_container_name="parser",
+                storage_form_field="parser_storage_size",
+                storage_label="Parser PVC size",
+                default_storage_size="20Gi",
+                log_targets=(WorkloadLogTargetSpec("ingestor", "Parser", "parser"),),
+            ),
+            ParserWorkloadSpec(
+                workload_id="fetcher",
+                component="runner",
+                name_suffix="fetcher",
+                display_label="Fetcher",
+                mode="runner",
+                main_container_name="runner",
+                storage_form_field="runner_storage_size",
+                storage_label="Runner PVC size",
+                default_storage_size="10Gi",
+                config_fields=(
+                    ParserConfigFieldSpec(
+                        "proxyType",
+                        "",
+                        "runner_proxy_type",
+                        "runner_proxy_type",
+                        "Runner proxy type",
+                        "str",
+                        "http",
+                        required=False,
+                        ui_section="workload",
+                        options=(("socks5", "SOCKS5"), ("http", "HTTP")),
+                    ),
+                ),
+                log_targets=(WorkloadLogTargetSpec("fetcher", "Runner", "runner"),),
+            ),
+        ),
+    )
+
+
+class _FakeParserAdapter:
+    def __init__(self) -> None:
+        self.bootstrap_calls = 0
+        self.sync_calls = 0
+
+    def bootstrap(self, runtime: ParserRuntime) -> int:
+        self.bootstrap_calls += 1
+        runtime.api = object()
+        runtime.game_id = 1
+        runtime.steam_app_id = 2
+        return 0
+
+    async def run_sync_once(self, runtime: ParserRuntime) -> None:
+        self.sync_calls += 1
+
+
 @unittest.skipUnless(ParserRuntime is not None, "aiohttp dependency is not installed")
 class ParserRuntimeConfigReloadTests(unittest.IsolatedAsyncioTestCase):
     def test_refresh_config_from_cluster_updates_hot_sync_settings(self) -> None:
@@ -195,6 +301,29 @@ class ParserRuntimeConfigReloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["proxyScope"], "mod_pages")
         self.assertEqual(snapshot["stats"]["totalCalls"], 7)
         self.assertEqual(snapshot["proxies"], [])
+
+    def test_run_parser_accepts_registered_non_default_parser_type(self) -> None:
+        fake_adapter = _FakeParserAdapter()
+        with (
+            patch.dict("core.parser_registry._PARSER_REGISTRY", {FAKE_PARSER_TYPE: _fake_contract()}, clear=False),
+            patch.dict("services.parser_service._RUNTIME_ADAPTERS", {FAKE_PARSER_TYPE: fake_adapter}, clear=False),
+            patch.dict(
+                "os.environ",
+                {
+                    "OW_PARSER_TYPE": FAKE_PARSER_TYPE,
+                    "OW_WORKLOAD_ID": "ingestor",
+                },
+                clear=False,
+            ),
+            patch("services.parser_service.load_config", return_value=_config(run_once=True, instance_name="", instance_namespace="")),
+            patch("services.parser_service.init_telemetry"),
+            patch("services.parser_service.shutdown_telemetry"),
+        ):
+            result = run_parser()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(fake_adapter.bootstrap_calls, 1)
+        self.assertEqual(fake_adapter.sync_calls, 1)
 
     def test_proxy_detail_snapshot_wraps_collector_detail(self) -> None:
         runtime = ParserRuntime(

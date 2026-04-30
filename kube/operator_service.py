@@ -162,7 +162,10 @@ class MirrorInstanceOperator:
                 build_runner_config_secret(normalized, runner_proxy_url),
             )
         else:
-            delete_secret(self.settings.namespace, runner_config_secret_name(name))
+            delete_secret(
+                self.settings.namespace,
+                runner_config_secret_name(name, model.parser_type),
+            )
 
         for workload in contract.workloads:
             if workload.service_enabled:
@@ -177,7 +180,7 @@ class MirrorInstanceOperator:
                     workload.workload_id,
                     self.settings.app_image,
                     self.settings.singbox_image,
-                    runner_proxy_url if workload.workload_id == "steamcmd" else "",
+                    runner_proxy_url if workload.mode == "runner" else "",
                 ),
             )
         self._sync_status(normalized)
@@ -231,9 +234,9 @@ class MirrorInstanceOperator:
                 "serviceName": workload_service_name(name, model.parser_type, workload.workload_id),
                 "observedGeneration": generation,
             }
-            if workload.workload_id == "parser":
+            if workload.mode == "parser":
                 parser_pod_name = pod_name
-            if workload.workload_id == "steamcmd":
+            if workload.mode == "runner":
                 runner_pod_name = pod_name
             condition_type = _condition_type_for_workload(workload.display_label)
             conditions = set_condition(
@@ -255,20 +258,22 @@ class MirrorInstanceOperator:
             phase,
             phase,
         )
-        if "parser" in workload_ready_map:
+        parser_workload = contract.workload_for_mode("parser")
+        if parser_workload is not None and parser_workload.workload_id in workload_ready_map:
             conditions = set_condition(
                 conditions,
                 "ParserReady",
-                workload_ready_map["parser"],
-                "ParserReady" if workload_ready_map["parser"] else "ParserNotReady",
+                workload_ready_map[parser_workload.workload_id],
+                "ParserReady" if workload_ready_map[parser_workload.workload_id] else "ParserNotReady",
                 parser_pod_name or "parser pod not created yet",
             )
-        if "steamcmd" in workload_ready_map:
+        runner_workload = contract.workload_for_mode("runner")
+        if runner_workload is not None and runner_workload.workload_id in workload_ready_map:
             conditions = set_condition(
                 conditions,
                 "RunnerReady",
-                workload_ready_map["steamcmd"],
-                "RunnerReady" if workload_ready_map["steamcmd"] else "RunnerNotReady",
+                workload_ready_map[runner_workload.workload_id],
+                "RunnerReady" if workload_ready_map[runner_workload.workload_id] else "RunnerNotReady",
                 runner_pod_name or "runner pod not created yet",
             )
         merge_instance_status(

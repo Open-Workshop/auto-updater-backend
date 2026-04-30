@@ -7,7 +7,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from core.instance_schema import default_parser_type
+from core.instance_schema import default_parser_type, get_parser_contract
 from steam.depot_downloader import download_mod_archive
 
 
@@ -232,11 +232,21 @@ def run_runner() -> int:
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.StreamHandler()],
     )
-    if parser_type != default_parser_type():
+    try:
+        contract = get_parser_contract(parser_type)
+    except KeyError:
         logging.error("Unsupported parser type %s", parser_type)
         return 2
-    if workload_id != "steamcmd":
-        logging.error("Runner host cannot run workload %s", workload_id)
+    runner_workload = contract.workload_for_mode("runner")
+    if runner_workload is None:
+        logging.error("Parser type %s has no runner workload", parser_type)
+        return 2
+    if workload_id != runner_workload.workload_id:
+        logging.error(
+            "Runner host cannot run workload %s for parser type %s",
+            workload_id,
+            parser_type,
+        )
         return 2
     _cleanup_old_archives()
     app = _create_app()

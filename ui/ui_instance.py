@@ -16,10 +16,6 @@ from kube.mirror_instance import (
     common_labels,
     instance_name,
     normalize_instance,
-    parser_name,
-    parser_service_name,
-    runner_name,
-    runner_service_name,
 )
 from ui.ui_common import UISettings, _format_time, _url
 from ui.ui_formatting import _int_value, _sum_values
@@ -212,8 +208,18 @@ def _instance_summary(
     name = instance_name(normalized)
     component_snapshots = component_snapshots or {}
     component_resources = component_resources or {}
-    parser_snapshot = dict(component_snapshots.get("parser") or {})
-    runner_snapshot = dict(component_snapshots.get("steamcmd") or {})
+    parser_workload = contract.workload_for_mode("parser")
+    runner_workload = contract.workload_for_mode("runner")
+    parser_snapshot = (
+        dict(component_snapshots.get(parser_workload.workload_id) or {})
+        if parser_workload is not None
+        else {}
+    )
+    runner_snapshot = (
+        dict(component_snapshots.get(runner_workload.workload_id) or {})
+        if runner_workload is not None
+        else {}
+    )
 
     # Get node CPU and memory capacity for percentage calculation
     node_name = next(
@@ -288,8 +294,16 @@ def _instance_summary(
     last_sync_result = str(status.get("lastSyncResult") or "").strip().lower()
     enabled = bool(normalized["spec"].get("enabled", True))
     all_ready = bool(workload_summaries) and all(bool(item.get("ready")) for item in workload_summaries)
-    parser_alias = next((item for item in workload_summaries if item["id"] == "parser"), {})
-    runner_alias = next((item for item in workload_summaries if item["id"] == "steamcmd"), {})
+    parser_alias = (
+        next((item for item in workload_summaries if item["id"] == parser_workload.workload_id), {})
+        if parser_workload is not None
+        else {}
+    )
+    runner_alias = (
+        next((item for item in workload_summaries if item["id"] == runner_workload.workload_id), {})
+        if runner_workload is not None
+        else {}
+    )
     health = _derive_health(
         enabled=enabled,
         phase=phase,

@@ -138,6 +138,7 @@ class ParserSecretSpec:
     input_type: str = "textarea"
     hint: str = ""
     required: bool = False
+    validator: str = ""
 
 
 @dataclass(frozen=True)
@@ -179,6 +180,7 @@ class ParserContract:
     secret_specs_by_key: dict[str, ParserSecretSpec] = field(init=False)
     secret_specs_by_form: dict[str, ParserSecretSpec] = field(init=False)
     workloads_by_id: dict[str, ParserWorkloadSpec] = field(init=False)
+    workloads_by_mode: dict[str, ParserWorkloadSpec] = field(init=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -206,6 +208,29 @@ class ParserContract:
             "workloads_by_id",
             {workload.workload_id: workload for workload in self.workloads},
         )
+        object.__setattr__(
+            self,
+            "workloads_by_mode",
+            {
+                workload.mode: workload
+                for workload in self.workloads
+                if workload.mode
+            },
+        )
+
+    def config_fields_in_section(self, section: str) -> tuple[ParserConfigFieldSpec, ...]:
+        normalized_section = str(section or "").strip().lower()
+        return tuple(
+            field
+            for field in self.config_fields
+            if str(field.ui_section or "").strip().lower() == normalized_section
+        )
+
+    def workload_for_mode(self, mode: str) -> ParserWorkloadSpec | None:
+        return self.workloads_by_mode.get(str(mode or "").strip())
+
+    def secret_spec_for_key(self, key: str) -> ParserSecretSpec | None:
+        return self.secret_specs_by_key.get(str(key or "").strip())
 
 
 STEAM_WORKSHOP_CONFIG_FIELDS: tuple[ParserConfigFieldSpec, ...] = (
@@ -252,6 +277,7 @@ STEAM_WORKSHOP_SECRET_SPECS: tuple[ParserSecretSpec, ...] = (
         secret_data_key="proxyPool",
         input_type="textarea",
         hint="One proxy URL per line, or comma-separated. This pool is used only by parser HTTP requests.",
+        validator="proxy-pool",
     ),
     ParserSecretSpec(
         key="runnerProxySecretRef",
@@ -261,6 +287,7 @@ STEAM_WORKSHOP_SECRET_SPECS: tuple[ParserSecretSpec, ...] = (
         secret_data_key="proxyUrl",
         input_type="textarea",
         hint="Single upstream proxy used by the helper workload through the TUN sidecar.",
+        validator="proxy-url",
     ),
 )
 
@@ -330,6 +357,31 @@ def parser_type_options() -> list[tuple[str, str]]:
 
 def default_parser_type() -> str:
     return DEFAULT_PARSER_TYPE
+
+
+def parser_workload_for_mode(
+    parser_type: str | None,
+    mode: str,
+) -> ParserWorkloadSpec | None:
+    contract = get_parser_contract(parser_type)
+    return contract.workload_for_mode(mode)
+
+
+def parser_workload_id(parser_type: str | None, mode: str) -> str:
+    workload = parser_workload_for_mode(parser_type, mode)
+    if workload is None:
+        normalized = str(parser_type or "").strip() or DEFAULT_PARSER_TYPE
+        raise KeyError(f"parser type {normalized} has no workload with mode {mode}")
+    return workload.workload_id
+
+
+def parser_secret_component(parser_type: str | None, key: str) -> str:
+    contract = get_parser_contract(parser_type)
+    secret_spec = contract.secret_spec_for_key(key)
+    if secret_spec is None:
+        normalized = str(parser_type or "").strip() or DEFAULT_PARSER_TYPE
+        raise KeyError(f"parser type {normalized} has no secret spec {key}")
+    return secret_spec.secret_component
 
 
 def get_parser_contract(parser_type: str | None) -> ParserContract:

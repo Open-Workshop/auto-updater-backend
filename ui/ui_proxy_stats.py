@@ -242,9 +242,10 @@ def _fetch_proxy_snapshot(
     window_seconds: float,
 ) -> dict[str, Any]:
     name = str(summary.get("name") or "")
+    parser_type = str(summary.get("parserType") or "")
     parser_info = dict(summary.get("parser") or {})
     pod_name = str(parser_info.get("podName") or "")
-    url = parser_service_url(name, settings.namespace).rstrip("/") + "/api/v1/proxy-stats"
+    url = parser_service_url(name, settings.namespace, parser_type).rstrip("/") + "/api/v1/proxy-stats"
     try:
         response = requests.get(
             url,
@@ -312,9 +313,10 @@ def _fetch_proxy_detail_snapshot(
     window_seconds: float,
 ) -> dict[str, Any]:
     name = str(summary.get("name") or "")
+    parser_type = str(summary.get("parserType") or "")
     parser_info = dict(summary.get("parser") or {})
     pod_name = str(parser_info.get("podName") or "")
-    url = parser_service_url(name, settings.namespace).rstrip("/") + "/api/v1/proxy-stats/detail"
+    url = parser_service_url(name, settings.namespace, parser_type).rstrip("/") + "/api/v1/proxy-stats/detail"
     try:
         response = requests.get(
             url,

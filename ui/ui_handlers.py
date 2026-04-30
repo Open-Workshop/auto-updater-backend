@@ -10,7 +10,13 @@ import requests
 from aiohttp import web
 from kubernetes.client.rest import ApiException
 
-from core.instance_schema import MirrorInstanceSpecModel, default_spec, get_parser_contract
+from core.instance_schema import (
+    MirrorInstanceSpecModel,
+    build_parser_config_from_form,
+    build_parser_workloads_from_form,
+    default_spec,
+    get_parser_contract,
+)
 from core.log_tags import format_log_tag_options
 from kube.kube_client import (
     delete_instance,
@@ -26,22 +32,20 @@ from kube.mirror_instance import (
     KIND,
     common_labels,
     managed_credentials_secret_name,
+    managed_secret_name,
     managed_secret_names,
     managed_secret_specs,
-    managed_parser_proxy_secret_name,
-    managed_runner_proxy_secret_name,
     normalize_instance,
     parser_service_url,
+    runner_config_secret_name,
 )
+from kube.kube_resources import build_runner_config_secret
 from ui.ui_assets import STATIC_DIR
-from ui.ui_common import UISettings, _bool_from_form, _int_from_form, _url
+from ui.ui_common import UISettings, _bool_from_form, _url
 from ui.ui_forms import (
-    _build_sync_spec,
     _editor_context,
     _settings_form,
     _validation_errors,
-    _validate_proxy_pool,
-    _validate_runner_proxy,
 )
 from ui.ui_http import (
     _action_response,
@@ -318,33 +322,25 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
         except (ApiException, KeyError, ValueError) as exc:
             logging.debug("Failed to load existing credentials for %s: %s", original_name, exc)
             instance = None
-    runner_proxy_type = str(form.get("runner_proxy_type", "socks5")).strip() or "socks5"
+    model = (
+        MirrorInstanceSpecModel.from_instance_dict(instance)
+        if instance is not None
+        else MirrorInstanceSpecModel.from_spec_dict(default_spec())
+    )
+    parser_type = str(form.get("parser_type", model.parser_type)).strip() or model.parser_type
     runner_proxy_url = str(form.get("runner_proxy_url", "")).strip()
-    parser_proxy_pool = str(form.get("parser_proxy_pool", ""))
     password = str(form.get("ow_password", "")).strip()
     login = str(form.get("ow_login", "")).strip()
-    parser_storage_size = str(form.get("parser_storage_size", "")).strip()
-    runner_storage_size = str(form.get("runner_storage_size", "")).strip()
     sync_json_patch = str(form.get("sync_json_patch", form.get("sync_json", ""))).strip()
-    steam_app_id = _int_from_form(form.get("steam_app_id"), 0)
     errors = _validation_errors(
         name=name,
-        steam_app_id=steam_app_id,
         login=login,
         password=password,
         existing_password=existing_password,
-        runner_proxy_url=runner_proxy_url,
-        parser_proxy_pool=parser_proxy_pool,
-        parser_storage_size=parser_storage_size,
-        runner_storage_size=runner_storage_size,
+        parser_type=parser_type,
+        form=submitted,
         sync_json_patch=sync_json_patch,
-        sync_form_data=submitted,
     )
-    if "runner_proxy_url" not in errors:
-        try:
-            _validate_runner_proxy(runner_proxy_url, runner_proxy_type)
-        except Exception as exc:
-            errors["runner_proxy_url"] = str(exc)
     if errors:
         logging.warning(
             "Validation failed while saving instance %s: %s",
@@ -375,60 +371,39 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
             )
         return web.Response(text=body, content_type="text/html", status=400)
 
-    normalized_instance = normalize_instance(instance) if instance is not None else {"spec": default_spec()}
-    model = (
-        MirrorInstanceSpecModel.from_instance_dict(instance)
-        if instance is not None
-        else MirrorInstanceSpecModel.from_spec_dict(default_spec())
-    )
-    parser_type = str(form.get("parser_type", model.parser_type)).strip() or model.parser_type
     contract = get_parser_contract(parser_type)
-    sync_spec = _build_sync_spec(dict(model.sync), submitted)
-    parser_proxy_pool_value = _validate_proxy_pool(parser_proxy_pool)
-    runner_proxy_url_value = _validate_runner_proxy(runner_proxy_url, runner_proxy_type)
-    credentials_secret = managed_credentials_secret_name(name)
-    parser_proxy_secret = managed_parser_proxy_secret_name(name)
-    runner_proxy_secret = managed_runner_proxy_secret_name(name)
-    parser_proxy_ref = parser_proxy_secret if parser_proxy_pool_value else ""
-    final_password = password or existing_password
-    parser_config = dict(model.parser_config)
-    parser_config["steamAppId"] = steam_app_id
-    parser_config["owGameId"] = _int_from_form(form.get("ow_game_id"), 0)
-    parser_config["language"] = str(form.get("language", "")).strip() or "english"
-    parser_config.update(
-        {
-            key: value
-            for key, value in sync_spec.items()
-            if key in contract.config_fields_by_key
-        }
+    raw_patch = _parse_sync_json(sync_json_patch) if sync_json_patch else {}
+    parser_config_rendered = build_parser_config_from_form(
+        parser_type,
+        model.parser_config,
+        submitted,
+        raw_patch,
     )
+    parser_config = {
+        key: value
+        for key, value in parser_config_rendered.items()
+        if key in contract.config_fields_by_key
+    }
     parser_config_extras = {
         key: value
-        for key, value in sync_spec.items()
+        for key, value in parser_config_rendered.items()
         if key not in contract.config_fields_by_key
     }
-    parser_secret_refs = dict(model.parser_secret_refs)
-    parser_secret_refs["parserProxyPoolSecretRef"] = parser_proxy_ref
-    parser_secret_refs["runnerProxySecretRef"] = runner_proxy_secret
-    parser_workloads = {
-        key: {
-            "storage": dict(dict(value or {}).get("storage") or {}),
-            "config": dict(dict(value or {}).get("config") or {}),
-        }
-        for key, value in model.parser_workloads.items()
-    }
-    parser_workloads.setdefault("parser", {}).setdefault("storage", {})
-    parser_workloads["parser"]["storage"]["size"] = (
-        parser_storage_size
-        or str(parser_workloads["parser"]["storage"].get("size") or "")
+    parser_workloads = build_parser_workloads_from_form(
+        parser_type,
+        model.parser_workloads,
+        submitted,
     )
-    parser_workloads.setdefault("steamcmd", {}).setdefault("storage", {})
-    parser_workloads["steamcmd"]["storage"]["size"] = (
-        runner_storage_size
-        or str(parser_workloads["steamcmd"]["storage"].get("size") or "")
-    )
-    parser_workloads.setdefault("steamcmd", {}).setdefault("config", {})
-    parser_workloads["steamcmd"]["config"]["proxyType"] = runner_proxy_type
+    credentials_secret = managed_credentials_secret_name(name)
+    final_password = password or existing_password
+    parser_secret_values: dict[str, str] = {}
+    parser_secret_refs: dict[str, str] = {}
+    for secret_spec in contract.secret_specs:
+        raw_value = str(form.get(secret_spec.form_field) or "").strip()
+        parser_secret_values[secret_spec.key] = raw_value
+        parser_secret_refs[secret_spec.key] = (
+            managed_secret_name(name, parser_type, secret_spec.key) if raw_value else ""
+        )
     updated_model = MirrorInstanceSpecModel(
         raw_spec=dict(model.raw_spec),
         enabled=_bool_from_form(form.get("enabled")),
@@ -447,14 +422,12 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
             "namespace": settings.namespace,
             "labels": common_labels(name, "instance"),
         },
-        "spec": updated_model.to_spec_dict(),
+        "spec": updated_model.to_compat_spec_dict(),
     }
     await _run_blocking(replace_or_create_instance, settings.namespace, name, body)
     saved_instance = await _run_blocking(get_instance, settings.namespace, name)
     secret_specs = managed_secret_specs(saved_instance)
     credentials_metadata = secret_specs["credentials"]
-    parser_proxy_metadata = secret_specs["parser_proxy"]
-    runner_proxy_metadata = secret_specs["runner_proxy"]
 
     await _run_blocking(
         upsert_secret,
@@ -475,49 +448,46 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
             },
         },
     )
-    if parser_proxy_pool_value:
+    for secret_spec in contract.secret_specs:
+        metadata = secret_specs[secret_spec.key]
+        raw_value = parser_secret_values.get(secret_spec.key, "")
+        if raw_value:
+            await _run_blocking(
+                upsert_secret,
+                settings.namespace,
+                {
+                    "apiVersion": "v1",
+                    "kind": "Secret",
+                    "metadata": {
+                        "name": metadata.name,
+                        "namespace": metadata.namespace,
+                        "labels": metadata.labels,
+                        "ownerReferences": metadata.owner_references,
+                    },
+                    "type": "Opaque",
+                    "stringData": {
+                        secret_spec.secret_data_key: raw_value,
+                    },
+                },
+            )
+        else:
+            await _run_blocking(delete_secret, settings.namespace, metadata.name)
+    runner_config_secret = runner_config_secret_name(name, parser_type)
+    if runner_proxy_url:
         await _run_blocking(
             upsert_secret,
             settings.namespace,
-            {
-                "apiVersion": "v1",
-                "kind": "Secret",
-                "metadata": {
-                    "name": parser_proxy_metadata.name,
-                    "namespace": parser_proxy_metadata.namespace,
-                    "labels": parser_proxy_metadata.labels,
-                    "ownerReferences": parser_proxy_metadata.owner_references,
-                },
-                "type": "Opaque",
-                "stringData": {
-                    "proxyPool": parser_proxy_pool_value,
-                },
-            },
+            build_runner_config_secret(saved_instance, runner_proxy_url),
         )
     else:
-        await _run_blocking(delete_secret, settings.namespace, parser_proxy_metadata.name)
-    await _run_blocking(
-        upsert_secret,
-        settings.namespace,
-        {
-            "apiVersion": "v1",
-            "kind": "Secret",
-            "metadata": {
-                "name": runner_proxy_metadata.name,
-                "namespace": runner_proxy_metadata.namespace,
-                "labels": runner_proxy_metadata.labels,
-                "ownerReferences": runner_proxy_metadata.owner_references,
-            },
-            "type": "Opaque",
-            "stringData": {
-                "proxyUrl": runner_proxy_url_value,
-            },
-        },
-    )
-    if original_name and original_name != name:
-        await _run_blocking(delete_instance, settings.namespace, original_name)
-        for secret_name in managed_secret_names(original_name):
+        await _run_blocking(delete_secret, settings.namespace, runner_config_secret)
+    if original_name and (original_name != name or model.parser_type != parser_type):
+        old_secret_names = managed_secret_names(original_name, model.parser_type)
+        new_secret_names = managed_secret_names(name, parser_type)
+        for secret_name in sorted(old_secret_names - new_secret_names):
             await _run_blocking(delete_secret, settings.namespace, secret_name)
+        if original_name != name:
+            await _run_blocking(delete_instance, settings.namespace, original_name)
     return _action_response(
         request,
         settings,
@@ -531,7 +501,9 @@ async def sync_now(request: web.Request) -> web.StreamResponse:
     """Sync now handler."""
     settings: UISettings = request.app["settings"]
     name = request.match_info["name"]
-    url = parser_service_url(name, settings.namespace) + "/api/v1/sync"
+    instance = normalize_instance(await _run_blocking(get_instance, settings.namespace, name))
+    parser_type = MirrorInstanceSpecModel.from_instance_dict(instance).parser_type
+    url = parser_service_url(name, settings.namespace, parser_type) + "/api/v1/sync"
     form = await request.post() if request.can_read_body else {}
     return_path = str(form.get("return_path", "")).strip() if form else ""
     redirect_path = return_path or f"/instances/{quote(name)}?tab=overview"
@@ -574,8 +546,10 @@ async def delete_instance_route(request: web.Request) -> web.StreamResponse:
     settings: UISettings = request.app["settings"]
     name = request.match_info["name"]
     await request.post()
+    instance = normalize_instance(await _run_blocking(get_instance, settings.namespace, name))
+    parser_type = MirrorInstanceSpecModel.from_instance_dict(instance).parser_type
     await _run_blocking(delete_instance, settings.namespace, name)
-    for secret_name in managed_secret_names(name):
+    for secret_name in managed_secret_names(name, parser_type):
         await _run_blocking(delete_secret, settings.namespace, secret_name)
     return _action_response(
         request,

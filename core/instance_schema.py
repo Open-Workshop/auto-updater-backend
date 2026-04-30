@@ -381,6 +381,8 @@ class MirrorInstanceSpecModel:
 
     def to_compat_spec_dict(self) -> dict[str, Any]:
         spec = self.to_spec_dict()
+        if self.parser_type != DEFAULT_PARSER_TYPE:
+            return spec
         spec["source"] = self.source
         spec["sync"] = self.sync
         spec["steamcmd"] = self.legacy_steamcmd_spec
@@ -405,6 +407,29 @@ def parser_config_form_values(parser_type: str, config: Mapping[str, Any] | None
         if field.form_field is None:
             continue
         values[field.form_field] = field.normalize(rendered_config.get(field.key))
+    return values
+
+
+def parser_workload_form_values(
+    parser_type: str,
+    workloads: Mapping[str, Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    contract = get_parser_contract(parser_type)
+    rendered_workloads = dict(workloads or {})
+    values: dict[str, Any] = {}
+    for workload in contract.workloads:
+        rendered = dict(rendered_workloads.get(workload.workload_id) or {})
+        rendered_storage = dict(rendered.get("storage") or {})
+        rendered_config = dict(rendered.get("config") or {})
+        if workload.storage_form_field:
+            values[workload.storage_form_field] = (
+                str(rendered_storage.get("size") or workload.default_storage_size).strip()
+                or workload.default_storage_size
+            )
+        for field in workload.config_fields:
+            if field.form_field is None:
+                continue
+            values[field.form_field] = field.normalize(rendered_config.get(field.key))
     return values
 
 
@@ -441,6 +466,61 @@ def build_parser_config_from_form(
         raw_patch,
         protected_keys=set(contract.config_fields_by_key),
     )
+
+
+def validate_parser_workload_form_inputs(
+    parser_type: str,
+    form: Mapping[str, Any],
+) -> dict[str, str]:
+    contract = get_parser_contract(parser_type)
+    errors: dict[str, str] = {}
+    for workload in contract.workloads:
+        if not workload.storage_form_field:
+            continue
+        raw = str(form.get(workload.storage_form_field) or "").strip()
+        if raw:
+            continue
+        errors[workload.storage_form_field] = f"{workload.storage_label} is required"
+    return errors
+
+
+def build_parser_workloads_from_form(
+    parser_type: str,
+    base_workloads: Mapping[str, Mapping[str, Any]] | None,
+    form: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    contract = get_parser_contract(parser_type)
+    current = deepcopy(dict(base_workloads or {}))
+    defaults = parser_workload_defaults(parser_type)
+    for workload in contract.workloads:
+        rendered = deepcopy(current.get(workload.workload_id) or {})
+        default_rendered = dict(defaults.get(workload.workload_id) or {})
+        rendered_storage = dict(rendered.get("storage") or default_rendered.get("storage") or {})
+        storage_value = str(form.get(workload.storage_form_field) or "").strip()
+        if workload.storage_form_field:
+            rendered_storage["size"] = (
+                storage_value
+                or str(rendered_storage.get("size") or workload.default_storage_size).strip()
+                or workload.default_storage_size
+            )
+        rendered_storage["storageClassName"] = str(
+            rendered_storage.get("storageClassName")
+            or default_rendered.get("storage", {}).get("storageClassName")
+            or workload.default_storage_class
+        ).strip() or workload.default_storage_class
+        rendered["storage"] = rendered_storage
+
+        rendered_config = dict(rendered.get("config") or default_rendered.get("config") or {})
+        for field in workload.config_fields:
+            if field.form_field is None:
+                continue
+            rendered_config[field.key] = field.parse_form(
+                form.get(field.form_field),
+                field.normalize(rendered_config.get(field.key)),
+            )
+        rendered["config"] = rendered_config
+        current[workload.workload_id] = rendered
+    return current
 
 
 def parser_config_form_minimum(parser_type: str, form_field: str) -> str:
@@ -573,6 +653,7 @@ __all__ = [
     "DEFAULT_STORAGE_CLASS",
     "MirrorInstanceSpecModel",
     "build_parser_config_from_form",
+    "build_parser_workloads_from_form",
     "build_sync_spec_from_form",
     "deep_merge",
     "default_spec",
@@ -585,6 +666,7 @@ __all__ = [
     "normalize_instance_dict",
     "parser_config_form_minimum",
     "parser_config_form_values",
+    "parser_workload_form_values",
     "parser_overview_pairs",
     "parser_subtitle_label",
     "parser_type_options",
@@ -592,5 +674,6 @@ __all__ = [
     "sync_form_minimum",
     "sync_form_values",
     "validate_parser_config_form_inputs",
+    "validate_parser_workload_form_inputs",
     "validate_sync_form_inputs",
 ]

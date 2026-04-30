@@ -8,6 +8,7 @@ from core.instance_schema import (
     get_parser_contract,
     iter_parser_config_env_items,
 )
+from core.parser_registry import parser_workload_id
 from core.http_utils import ParsedProxy, parse_proxy_url
 from kube.mirror_instance import (
     common_labels,
@@ -16,11 +17,7 @@ from kube.mirror_instance import (
     instance_namespace,
     normalize_instance,
     owner_reference,
-    parser_name,
-    parser_service_name,
     runner_config_secret_name,
-    runner_name,
-    runner_service_name,
     workload_name,
     workload_service_name,
     workload_service_url,
@@ -90,21 +87,29 @@ def build_parser_env(instance: dict[str, Any]) -> list[dict[str, Any]]:
     name = instance_name(normalized)
     namespace = instance_namespace(normalized)
     model = from_instance_dict(normalized)
+    parser_workload_id_value = parser_workload_id(model.parser_type, "parser")
     parser_proxy_secret = str(
         model.parser_secret_refs.get("parserProxyPoolSecretRef") or ""
     ).strip()
-    env = _common_workload_env(normalized, "parser")
+    env = _common_workload_env(normalized, parser_workload_id_value)
     env.extend(
         [
             _env("OW_MIRROR_DIR", "/data/mirror"),
             _env("STEAM_ROOT", "/data/steam"),
             _env("OW_STEAM_PROXY_SCOPE", "mod_pages" if parser_proxy_secret else "none"),
-            _env(
-                "OW_STEAMCMD_RUNNER_URL",
-                workload_service_url(name, namespace, model.parser_type, "steamcmd"),
-            ),
         ]
     )
+    try:
+        runner_workload_id = parser_workload_id(model.parser_type, "runner")
+    except KeyError:
+        runner_workload_id = ""
+    if runner_workload_id:
+        env.append(
+            _env(
+                "OW_STEAMCMD_RUNNER_URL",
+                workload_service_url(name, namespace, model.parser_type, runner_workload_id),
+            )
+        )
     for env_name, value in iter_parser_config_env_items(model.parser_type, model.parser_config):
         env.append(_env(env_name, value))
     if parser_proxy_secret:
@@ -120,7 +125,10 @@ def build_parser_env(instance: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def build_runner_env(instance: dict[str, Any]) -> list[dict[str, Any]]:
-    env = _common_workload_env(instance, "steamcmd")
+    normalized = normalize_instance(instance)
+    model = from_instance_dict(normalized)
+    runner_workload_id = parser_workload_id(model.parser_type, "runner")
+    env = _common_workload_env(normalized, runner_workload_id)
     env.extend(
         [
             _env("RUNNER_BIND_HOST", "0.0.0.0"),
@@ -161,11 +169,15 @@ def build_workload_service(instance: dict[str, Any], workload_id: str) -> dict[s
 
 
 def build_parser_service(instance: dict[str, Any]) -> dict[str, Any]:
-    return build_workload_service(instance, "parser")
+    normalized = normalize_instance(instance)
+    model = from_instance_dict(normalized)
+    return build_workload_service(instance, parser_workload_id(model.parser_type, "parser"))
 
 
 def build_runner_service(instance: dict[str, Any]) -> dict[str, Any]:
-    return build_workload_service(instance, "steamcmd")
+    normalized = normalize_instance(instance)
+    model = from_instance_dict(normalized)
+    return build_workload_service(instance, parser_workload_id(model.parser_type, "runner"))
 
 
 def _statefulset_claim_spec(model: MirrorInstanceSpecModel, workload_id: str) -> dict[str, Any]:
@@ -180,7 +192,14 @@ def _statefulset_claim_spec(model: MirrorInstanceSpecModel, workload_id: str) ->
 
 
 def build_parser_statefulset(instance: dict[str, Any], app_image: str) -> dict[str, Any]:
-    return build_workload_statefulset(instance, "parser", app_image, "")
+    normalized = normalize_instance(instance)
+    model = from_instance_dict(normalized)
+    return build_workload_statefulset(
+        instance,
+        parser_workload_id(model.parser_type, "parser"),
+        app_image,
+        "",
+    )
 
 
 def _proxy_outbound(proxy: ParsedProxy) -> dict[str, Any]:
@@ -205,9 +224,9 @@ def render_singbox_config(proxy_url: str, proxy_type: str) -> str:
     parsed = parse_proxy_url(proxy_url)
     expected_type = (proxy_type or "").strip().lower()
     if expected_type == "socks5" and not parsed.is_socks:
-        raise ValueError("steamcmd proxy is configured as socks5, but secret URL is not socks5")
+        raise ValueError("Runner proxy is configured as socks5, but secret URL is not socks5")
     if expected_type == "http" and not parsed.is_http:
-        raise ValueError("steamcmd proxy is configured as http, but secret URL is not http")
+        raise ValueError("Runner proxy is configured as http, but secret URL is not http")
     payload = {
         "log": {"level": "info"},
         "inbounds": [
@@ -246,15 +265,21 @@ def build_runner_config_secret(
     model = from_instance_dict(normalized)
     name = instance_name(normalized)
     namespace = instance_namespace(normalized)
-    runner_workload = dict(model.parser_workloads.get("steamcmd") or {})
+    try:
+        runner_workload_id = parser_workload_id(model.parser_type, "runner")
+    except KeyError:
+        runner_workload_id = ""
+    runner_workload = dict(model.parser_workloads.get(runner_workload_id) or {})
     runner_config = dict(runner_workload.get("config") or {})
+    runner_config_secret = runner_config_secret_name(name, model.parser_type)
+    secret_component = f"{runner_workload_id}-config" if runner_workload_id else "runner-config"
     return {
         "apiVersion": "v1",
         "kind": "Secret",
         "metadata": {
-            "name": runner_config_secret_name(name),
+            "name": runner_config_secret,
             "namespace": namespace,
-            "labels": common_labels(name, "runner-config"),
+            "labels": common_labels(name, secret_component),
             "ownerReferences": owner_reference(instance),
         },
         "type": "Opaque",
@@ -338,7 +363,7 @@ def build_workload_statefulset(
             pod_spec["volumes"] = [
                 {
                     "name": "runner-config",
-                    "secret": {"secretName": runner_config_secret_name(name)},
+                    "secret": {"secretName": runner_config_secret_name(name, model.parser_type)},
                 },
                 {
                     "name": "dev-tun",
@@ -408,9 +433,12 @@ def build_runner_statefulset(
     singbox_image: str,
     runner_proxy_url: str = "",
 ) -> dict[str, Any]:
+    normalized = normalize_instance(instance)
+    model = from_instance_dict(normalized)
+    runner_workload_id = parser_workload_id(model.parser_type, "runner")
     return build_workload_statefulset(
         instance,
-        "steamcmd",
+        runner_workload_id,
         app_image,
         singbox_image,
         runner_proxy_url,

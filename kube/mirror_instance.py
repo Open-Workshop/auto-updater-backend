@@ -13,6 +13,7 @@ from core.instance_schema import (
     get_parser_contract,
     normalize_instance_dict,
 )
+from core.parser_registry import parser_secret_component, parser_workload_id
 
 
 GROUP = "auto-updater.miskler.ru"
@@ -72,24 +73,33 @@ def workload_service_url(name: str, namespace: str, parser_type: str, workload_i
     )
 
 
-def parser_name(name: str) -> str:
-    return workload_name(name, default_parser_type(), "parser")
+def parser_name(name: str, parser_type: str | None = None) -> str:
+    parser_type = parser_type or default_parser_type()
+    return workload_name(name, parser_type, parser_workload_id(parser_type, "parser"))
 
 
-def runner_name(name: str) -> str:
-    return workload_name(name, default_parser_type(), "steamcmd")
+def runner_name(name: str, parser_type: str | None = None) -> str:
+    parser_type = parser_type or default_parser_type()
+    return workload_name(name, parser_type, parser_workload_id(parser_type, "runner"))
 
 
-def parser_service_name(name: str) -> str:
-    return workload_service_name(name, default_parser_type(), "parser")
+def parser_service_name(name: str, parser_type: str | None = None) -> str:
+    parser_type = parser_type or default_parser_type()
+    return workload_service_name(name, parser_type, parser_workload_id(parser_type, "parser"))
 
 
-def runner_service_name(name: str) -> str:
-    return workload_service_name(name, default_parser_type(), "steamcmd")
+def runner_service_name(name: str, parser_type: str | None = None) -> str:
+    parser_type = parser_type or default_parser_type()
+    return workload_service_name(name, parser_type, parser_workload_id(parser_type, "runner"))
 
 
-def runner_config_secret_name(name: str) -> str:
-    return component_name(name, "steamcmd-config")
+def runner_config_secret_name(name: str, parser_type: str | None = None) -> str:
+    parser_type = parser_type or default_parser_type()
+    contract = get_parser_contract(parser_type)
+    workload = contract.workload_for_mode("runner")
+    if workload is None:
+        return component_name(name, "runner-config")
+    return component_name(name, f"{workload.name_suffix}-config")
 
 
 def managed_credentials_secret_name(name: str) -> str:
@@ -113,12 +123,22 @@ class ManagedSecretSpec:
     owner_references: list[dict[str, Any]]
 
 
-def managed_secret_names(name: str) -> set[str]:
-    names = {managed_credentials_secret_name(name)}
-    contract = get_parser_contract(default_parser_type())
+def managed_secret_names(name: str, parser_type: str | None = None) -> set[str]:
+    parser_type = parser_type or default_parser_type()
+    names = {
+        managed_credentials_secret_name(name),
+        runner_config_secret_name(name, parser_type),
+    }
+    contract = get_parser_contract(parser_type)
     for secret_spec in contract.secret_specs:
         names.add(component_name(name, secret_spec.secret_component))
     return names
+
+
+def managed_secret_name(name: str, parser_type: str | None, secret_key: str) -> str:
+    parser_type = parser_type or default_parser_type()
+    secret_component = parser_secret_component(parser_type, secret_key)
+    return component_name(name, secret_component)
 
 
 def managed_secret_specs(instance: dict[str, Any]) -> dict[str, ManagedSecretSpec]:
@@ -158,12 +178,14 @@ def managed_secret_specs(instance: dict[str, Any]) -> dict[str, ManagedSecretSpe
     return specs
 
 
-def parser_service_url(name: str, namespace: str) -> str:
-    return workload_service_url(name, namespace, default_parser_type(), "parser")
+def parser_service_url(name: str, namespace: str, parser_type: str | None = None) -> str:
+    parser_type = parser_type or default_parser_type()
+    return workload_service_url(name, namespace, parser_type, parser_workload_id(parser_type, "parser"))
 
 
-def runner_service_url(name: str, namespace: str) -> str:
-    return workload_service_url(name, namespace, default_parser_type(), "steamcmd")
+def runner_service_url(name: str, namespace: str, parser_type: str | None = None) -> str:
+    parser_type = parser_type or default_parser_type()
+    return workload_service_url(name, namespace, parser_type, parser_workload_id(parser_type, "runner"))
 
 
 def common_labels(name: str, component: str | None = None) -> dict[str, str]:

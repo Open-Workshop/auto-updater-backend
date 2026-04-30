@@ -11,6 +11,7 @@ from aiohttp import web
 
 from core.config import Config, load_config, parse_list
 from core.instance_schema import default_parser_type, iter_sync_env_items, load_sync_config_from_env
+from core.parser_registry import get_parser_contract
 from kube.kube_client import get_instance, merge_instance_status, read_secret_value
 from kube.mirror_instance import normalize_instance, runner_service_url
 from core.log_tags import parser_log_handler
@@ -43,6 +44,71 @@ _CLIENT_REINIT_FIELDS = {
 }
 
 
+class ParserRuntimeAdapter:
+    parser_type: str
+
+    def bootstrap(self, runtime: "ParserRuntime") -> int:
+        raise NotImplementedError
+
+    async def run_sync_once(self, runtime: "ParserRuntime") -> None:
+        raise NotImplementedError
+
+
+class SteamWorkshopParserRuntimeAdapter(ParserRuntimeAdapter):
+    parser_type = default_parser_type()
+
+    def bootstrap(self, runtime: "ParserRuntime") -> int:
+        runtime._apply_runtime_settings()
+        if not runtime._reinitialize_client_state():
+            return 2
+        return 0
+
+    async def run_sync_once(self, runtime: "ParserRuntime") -> None:
+        await asyncio.to_thread(runtime._refresh_config_from_cluster)
+        await asyncio.to_thread(
+            sync_mods,
+            runtime.api,
+            runtime.steam_app_id,
+            runtime.game_id,
+            Path(runtime.cfg.mirror_root),
+            Path(runtime.cfg.steam_root),
+            runtime.cfg.page_size,
+            runtime.cfg.timeout,
+            runtime.cfg.steam_max_pages,
+            runtime.cfg.steam_start_page,
+            runtime.cfg.steam_max_items,
+            runtime.cfg.steam_delay,
+            runtime.cfg.max_screenshots,
+            runtime.cfg.public_mode,
+            runtime.cfg.without_author,
+            runtime.cfg.sync_tags,
+            runtime.cfg.prune_tags,
+            runtime.cfg.sync_dependencies,
+            runtime.cfg.prune_dependencies,
+            runtime.cfg.sync_resources,
+            runtime.cfg.prune_resources,
+            runtime.cfg.upload_resource_files,
+            runtime.cfg.scrape_preview_images,
+            runtime.cfg.scrape_required_items,
+            runtime.cfg.force_required_item_id,
+            runtime.cfg.language,
+            Path(runtime.cfg.depotdownloader_path),
+            runtime.cfg.steamcmd_runner_url or None,
+        )
+
+
+_RUNTIME_ADAPTERS: dict[str, ParserRuntimeAdapter] = {
+    default_parser_type(): SteamWorkshopParserRuntimeAdapter(),
+}
+
+
+def get_runtime_adapter(parser_type: str) -> ParserRuntimeAdapter:
+    try:
+        return _RUNTIME_ADAPTERS[parser_type]
+    except KeyError as exc:
+        raise KeyError(f"unknown parser runtime adapter: {parser_type}") from exc
+
+
 def _parser_type_from_env() -> str:
     return os.environ.get("OW_PARSER_TYPE", "").strip() or default_parser_type()
 
@@ -52,8 +118,13 @@ def _workload_id_from_env() -> str:
 
 
 class ParserRuntime:
-    def __init__(self, cfg: Config) -> None:
+    def __init__(
+        self,
+        cfg: Config,
+        adapter: ParserRuntimeAdapter | None = None,
+    ) -> None:
         self.cfg = cfg
+        self.adapter = adapter or get_runtime_adapter(_parser_type_from_env())
         self.api: ApiClient | None = None
         self.game_id = 0
         self.steam_app_id = 0
@@ -252,10 +323,7 @@ class ParserRuntime:
         )
 
     def bootstrap(self) -> int:
-        self._apply_runtime_settings()
-        if not self._reinitialize_client_state():
-            return 2
-        return 0
+        return self.adapter.bootstrap(self)
 
     async def run_forever(self) -> None:
         while not self.stop_requested.is_set():
@@ -286,37 +354,7 @@ class ParserRuntime:
             }
         )
         try:
-            await asyncio.to_thread(self._refresh_config_from_cluster)
-            await asyncio.to_thread(
-                sync_mods,
-                self.api,
-                self.steam_app_id,
-                self.game_id,
-                Path(self.cfg.mirror_root),
-                Path(self.cfg.steam_root),
-                self.cfg.page_size,
-                self.cfg.timeout,
-                self.cfg.steam_max_pages,
-                self.cfg.steam_start_page,
-                self.cfg.steam_max_items,
-                self.cfg.steam_delay,
-                self.cfg.max_screenshots,
-                self.cfg.public_mode,
-                self.cfg.without_author,
-                self.cfg.sync_tags,
-                self.cfg.prune_tags,
-                self.cfg.sync_dependencies,
-                self.cfg.prune_dependencies,
-                self.cfg.sync_resources,
-                self.cfg.prune_resources,
-                self.cfg.upload_resource_files,
-                self.cfg.scrape_preview_images,
-                self.cfg.scrape_required_items,
-                self.cfg.force_required_item_id,
-                self.cfg.language,
-                Path(self.cfg.depotdownloader_path),
-                self.cfg.steamcmd_runner_url or None,
-            )
+            await self.adapter.run_sync_once(self)
             self.last_sync_result = "success"
         except Exception as exc:
             logging.exception("Sync failed")
@@ -486,7 +524,9 @@ def _create_app(runtime: ParserRuntime) -> web.Application:
 def run_parser() -> int:
     parser_type = _parser_type_from_env()
     workload_id = _workload_id_from_env()
-    if parser_type != default_parser_type():
+    try:
+        contract = get_parser_contract(parser_type)
+    except KeyError:
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(message)s",
@@ -494,13 +534,29 @@ def run_parser() -> int:
         )
         logging.error("Unsupported parser type %s", parser_type)
         return 2
-    if workload_id != "parser":
+    try:
+        parser_workload = contract.workload_for_mode("parser")
+    except KeyError:
+        parser_workload = None
+    if parser_workload is None:
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(message)s",
             handlers=[logging.StreamHandler()],
         )
-        logging.error("Parser host cannot run workload %s", workload_id)
+        logging.error("Parser type %s has no parser workload", parser_type)
+        return 2
+    if workload_id != parser_workload.workload_id:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+            handlers=[logging.StreamHandler()],
+        )
+        logging.error(
+            "Parser host cannot run workload %s for parser type %s",
+            workload_id,
+            parser_type,
+        )
         return 2
     cfg = load_config()
     log_level = getattr(logging, cfg.log_level.upper(), logging.INFO)
@@ -509,7 +565,13 @@ def run_parser() -> int:
         handlers=[parser_log_handler()],
     )
     init_telemetry()
-    runtime = ParserRuntime(cfg)
+    try:
+        adapter = get_runtime_adapter(parser_type)
+    except KeyError:
+        logging.error("Unsupported parser runtime adapter %s", parser_type)
+        shutdown_telemetry()
+        return 2
+    runtime = ParserRuntime(cfg, adapter)
     code = runtime.bootstrap()
     if code != 0:
         shutdown_telemetry()

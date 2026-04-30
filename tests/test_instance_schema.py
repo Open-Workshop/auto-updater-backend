@@ -9,6 +9,13 @@ from core.instance_schema import (
     sync_form_values,
     validate_sync_form_inputs,
 )
+from core.parser_registry import (
+    ParserConfigFieldSpec,
+    ParserContract,
+    ParserSecretSpec,
+    ParserWorkloadSpec,
+    WorkloadLogTargetSpec,
+)
 from kube.kube_resources import build_parser_env
 
 
@@ -43,6 +50,132 @@ INSTANCE = {
 }
 
 
+FAKE_PARSER_TYPE = "custom-parser"
+
+
+def _fake_contract() -> ParserContract:
+    return ParserContract(
+        parser_type=FAKE_PARSER_TYPE,
+        label="Custom Parser",
+        description="Test-only parser contract.",
+        config_fields=(
+            ParserConfigFieldSpec(
+                "sourceUrl",
+                "OW_SOURCE_URL",
+                "source_url",
+                "source_url",
+                "Source URL",
+                "str",
+                "https://api.example.test",
+                required=True,
+                ui_section="basic",
+            ),
+        ),
+        secret_specs=(
+            ParserSecretSpec(
+                key="parserProxyPoolSecretRef",
+                label="Parser proxy pool",
+                form_field="parser_proxy_pool",
+                secret_component="parser-proxies",
+                secret_data_key="proxyPool",
+                validator="proxy-pool",
+            ),
+            ParserSecretSpec(
+                key="runnerProxySecretRef",
+                label="Runner proxy URL",
+                form_field="runner_proxy_url",
+                secret_component="runner-proxy",
+                secret_data_key="proxyUrl",
+                validator="proxy-url",
+            ),
+        ),
+        workloads=(
+            ParserWorkloadSpec(
+                workload_id="ingestor",
+                component="parser",
+                name_suffix="ingestor",
+                display_label="Ingestor",
+                mode="parser",
+                main_container_name="parser",
+                storage_form_field="parser_storage_size",
+                storage_label="Parser PVC size",
+                default_storage_size="20Gi",
+                log_targets=(WorkloadLogTargetSpec("ingestor", "Parser", "parser"),),
+            ),
+            ParserWorkloadSpec(
+                workload_id="fetcher",
+                component="runner",
+                name_suffix="fetcher",
+                display_label="Fetcher",
+                mode="runner",
+                main_container_name="runner",
+                storage_form_field="runner_storage_size",
+                storage_label="Runner PVC size",
+                default_storage_size="10Gi",
+                config_fields=(
+                    ParserConfigFieldSpec(
+                        "proxyType",
+                        "",
+                        "runner_proxy_type",
+                        "runner_proxy_type",
+                        "Runner proxy type",
+                        "str",
+                        "http",
+                        required=False,
+                        ui_section="workload",
+                        options=(("socks5", "SOCKS5"), ("http", "HTTP")),
+                    ),
+                ),
+                log_targets=(WorkloadLogTargetSpec("fetcher", "Runner", "runner"),),
+            ),
+        ),
+    )
+
+
+def _fake_instance() -> dict:
+    return {
+        "apiVersion": "auto-updater.miskler.ru/v1alpha1",
+        "kind": "MirrorInstance",
+        "metadata": {
+            "name": "demo",
+            "namespace": "auto-updater",
+            "uid": "uid-1",
+        },
+        "spec": {
+            "enabled": True,
+            "parser": {
+                "type": FAKE_PARSER_TYPE,
+                "config": {
+                    "sourceUrl": "https://api.example.test",
+                },
+                "secretRefs": {
+                    "parserProxyPoolSecretRef": "demo-parser-proxies",
+                    "runnerProxySecretRef": "demo-runner-proxy",
+                },
+                "workloads": {
+                    "ingestor": {
+                        "storage": {
+                            "size": "20Gi",
+                            "storageClassName": "local-path",
+                        },
+                        "config": {},
+                    },
+                    "fetcher": {
+                        "storage": {
+                            "size": "10Gi",
+                            "storageClassName": "local-path",
+                        },
+                        "config": {
+                            "proxyType": "http",
+                        },
+                    },
+                },
+            },
+            "credentials": {"secretRef": "demo-ow-credentials"},
+        },
+    }
+
+
 class InstanceSchemaTests(unittest.TestCase):
     def test_round_trip_preserves_sync_extras(self) -> None:
         model = MirrorInstanceSpecModel.from_instance_dict(INSTANCE)
@@ -52,6 +185,20 @@ class InstanceSchemaTests(unittest.TestCase):
         rebuilt = model.to_spec_dict()
         self.assertEqual(rebuilt["parser"]["config"]["pageSize"], 77)
         self.assertEqual(rebuilt["parser"]["config"]["customMirrorSetting"], {"keep": True})
+
+    def test_non_default_parser_round_trip_stays_canonical(self) -> None:
+        with patch.dict("core.parser_registry._PARSER_REGISTRY", {FAKE_PARSER_TYPE: _fake_contract()}, clear=False):
+            model = MirrorInstanceSpecModel.from_instance_dict(_fake_instance())
+            rebuilt = model.to_compat_spec_dict()
+
+        self.assertEqual(model.parser_type, FAKE_PARSER_TYPE)
+        self.assertEqual(model.parser_config["sourceUrl"], "https://api.example.test")
+        self.assertEqual(model.parser_workloads["ingestor"]["storage"]["size"], "20Gi")
+        self.assertEqual(rebuilt["parser"]["type"], FAKE_PARSER_TYPE)
+        self.assertNotIn("source", rebuilt)
+        self.assertNotIn("sync", rebuilt)
+        self.assertNotIn("steamcmd", rebuilt)
+        self.assertNotIn("storage", rebuilt)
 
     def test_defaults_match_form_values_and_runtime_env_projection(self) -> None:
         spec = default_spec()
