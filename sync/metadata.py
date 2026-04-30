@@ -80,16 +80,23 @@ class SteamModLoader:
 def ensure_game(
     api: ApiClient,
     game_id: Optional[int],
-    steam_app_id: int,
+    source_name: str,
+    source_id: int,
     language: str,
     timeout: int,
+    *,
+    source_details_loader=None,
 ) -> int:
+    if source_details_loader is None:
+        if source_name != "steam":
+            raise RuntimeError(f"source_details_loader is required for non-steam source {source_name}")
+        source_details_loader = steam_get_app_details
     with start_span(
         "ensure_game.resolve_or_create",
         {
             "ow.game_id": game_id or 0,
-            "steam.app_id": steam_app_id,
-            "steam.language": language,
+            f"{source_name}.source_id": source_id,
+            f"{source_name}.language": language,
         },
     ):
         if game_id:
@@ -98,26 +105,27 @@ def ensure_game(
             except Exception as exc:
                 OW_LOG.warning("Game %s not found: %s", game_id, exc)
             else:
-                source_id = game.get("source_id")
-                if source_id and int(source_id) != steam_app_id:
+                existing_source_id = game.get("source_id")
+                if existing_source_id and int(existing_source_id) != source_id:
                     OW_LOG.warning(
-                        "OW game source_id %s does not match steam app id %s",
+                        "OW game source_id %s does not match %s source id %s",
+                        existing_source_id,
+                        source_name,
                         source_id,
-                        steam_app_id,
                     )
                 return game_id
 
-        games = api.list_games_by_source(steam_app_id, 50)
+        games = api.list_games_by_source(source_name, source_id, 50)
         if games:
             return int(games[0]["id"])
 
-        app_details = steam_get_app_details(steam_app_id, language, timeout)
+        app_details = source_details_loader(source_id, language, timeout)
         game_id = api.add_game(
             app_details["name"],
             app_details["short"],
             app_details["description"],
         )
-        api.edit_game_source(game_id, "steam", steam_app_id)
+        api.edit_game_source(game_id, source_name, source_id)
         return game_id
 
 

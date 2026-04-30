@@ -168,11 +168,14 @@ class ParserRuntime:
         )
 
     def _reinitialize_client_state(self) -> bool:
+        source_env_name = (
+            "OW_STEAM_APP_ID" if self.source_name == "steam" else f"OW_{self.source_name.upper()}_ID"
+        )
         if not self.cfg.login_name or not self.cfg.password:
             logging.error("OW_LOGIN and OW_PASSWORD are required")
             return False
         if self.cfg.steam_app_id <= 0 and self.cfg.game_id <= 0:
-            logging.error("OW_STEAM_APP_ID or OW_GAME_ID is required")
+            logging.error("%s or OW_GAME_ID is required", source_env_name)
             return False
 
         api = ApiClient(
@@ -202,17 +205,21 @@ class ParserRuntime:
                 return False
             steam_app_id = int(game.get("source_id") or 0)
             if steam_app_id <= 0:
-                logging.error("OW game has no steam source_id, set OW_STEAM_APP_ID")
+                logging.error("OW game has no %s source_id, set %s", self.source_name, source_env_name)
                 return False
 
         try:
             with start_span(
                 "ow.ensure_game",
-                {"steam.app_id": steam_app_id, "ow.game_id": self.cfg.game_id or 0},
+                {
+                    f"{self.source_name}.source_id": steam_app_id,
+                    "ow.game_id": self.cfg.game_id or 0,
+                },
             ):
                 game_id = ensure_game(
                     api,
                     self.cfg.game_id if self.cfg.game_id > 0 else None,
+                    self.source_name,
                     steam_app_id,
                     self.cfg.language,
                     self.cfg.timeout,
@@ -226,7 +233,7 @@ class ParserRuntime:
         self.api = api
         self.game_id = game_id
         self.steam_app_id = steam_app_id
-        logging.info("Using OW game %s for steam app %s", game_id, steam_app_id)
+        logging.info("Using OW game %s for %s source %s", game_id, self.source_name, steam_app_id)
         return True
 
     def _refresh_config_from_cluster(self) -> None:

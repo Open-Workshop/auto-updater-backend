@@ -472,7 +472,12 @@ class OWClient:
         except (TypeError, ValueError):
             return None
 
-    def list_games_by_source(self, app_id: int, page_size: int) -> List[Dict[str, Any]]:
+    def list_games_by_source(
+        self,
+        source: str,
+        source_id: int,
+        page_size: int,
+    ) -> List[Dict[str, Any]]:
         def fetch(page: int) -> Dict[str, Any]:
             response = self.request(
                 "get",
@@ -480,8 +485,8 @@ class OWClient:
                 params={
                     "page_size": _clamp_page_size(page_size),
                     "page": page,
-                    "sources": ["steam"],
-                    "source_ids": [app_id],
+                    "sources": [source],
+                    "source_ids": [source_id],
                 },
             )
             response.raise_for_status()
@@ -1527,9 +1532,9 @@ def ow_get_mod_by_source(
 
 
 def ow_list_games_by_source(
-    api: OWClient, app_id: int, page_size: int
+    api: OWClient, source: str, source_id: int, page_size: int
 ) -> List[Dict[str, Any]]:
-    return api.list_games_by_source(app_id, page_size)
+    return api.list_games_by_source(source, source_id, page_size)
 
 
 def ow_get_game(api: OWClient, game_id: int) -> Dict[str, Any]:
