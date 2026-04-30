@@ -14,8 +14,8 @@ from PIL import Image, ImageOps
 from core.telemetry import start_span
 from core.utils import ensure_dir
 from ow.ow_api import ApiClient
-from steam.steam_mod import SteamMod
 from sync.metadata import OW_LOG
+from sync.state import SourceModProtocol
 
 
 _PHASH_AVAILABLE = True
@@ -105,7 +105,7 @@ class ResourceSyncer:
     def sync_resources(
         self,
         ow_mod_id: int,
-        mod: SteamMod,
+        mod: SourceModProtocol,
         images: List[str],
         images_incomplete: bool,
     ) -> None:
@@ -137,7 +137,7 @@ class ResourceSyncer:
     def _sync_resource_files(
         self,
         ow_mod_id: int,
-        mod: SteamMod,
+        mod: SourceModProtocol,
         images: List[str],
         images_incomplete: bool,
         current_resources: List[Dict[str, Any]],
@@ -205,7 +205,7 @@ class ResourceSyncer:
                     "images.targets": len(targets),
                 },
             ):
-                downloads = self._download_steam_images(mod, targets, dest_dir)
+                downloads = self._download_source_images(mod, targets, dest_dir)
             downloaded_count = len(downloads)
             with start_span(
                 "images.process_and_compare",
@@ -281,9 +281,9 @@ class ResourceSyncer:
                         cached_resources.pop(str(res_id), None)
                 self._save_hash_cache(cache_path, hash_cache)
 
-    def _download_steam_images(
+    def _download_source_images(
         self,
-        mod: SteamMod,
+        mod: SourceModProtocol,
         targets: List[tuple[str, str, str]],
         dest_dir: Path,
     ) -> List[tuple[str, str, Path, str]]:
@@ -299,7 +299,7 @@ class ResourceSyncer:
 
     def _build_resource_hashes(
         self,
-        mod: SteamMod,
+        mod: SourceModProtocol,
         resources: List[Dict[str, Any]],
         dest_dir: Path,
     ) -> tuple[Dict[int, ImageHashes], Dict[str, Any]]:
@@ -356,7 +356,7 @@ class ResourceSyncer:
                 "images.download_existing_for_hashes",
                 {"images.targets": len(targets)},
             ):
-                downloads = self._download_steam_images(mod, targets, dest_dir)
+                downloads = self._download_source_images(mod, targets, dest_dir)
             with start_span(
                 "images.process_existing_hashes",
                 {"images.downloaded": len(downloads)},

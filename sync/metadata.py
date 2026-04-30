@@ -12,6 +12,7 @@ from core.telemetry import start_span
 from ow.ow_api import ApiClient
 from steam.steam_api import steam_get_app_details
 from steam.steam_mod import SteamMod
+from sync.state import SourceModProtocol
 
 
 OW_LOG = tagged_logger("ow")
@@ -36,7 +37,7 @@ class SteamModLoader:
         self.timeout = int(timeout)
         self.language = language
 
-    def load_batch(self, item_ids: List[str]) -> Dict[str, SteamMod]:
+    def load_batch(self, item_ids: List[str]) -> Dict[str, SourceModProtocol]:
         if not item_ids:
             return {}
         STEAM_LOG.info("Steam batch load: items=%s", len(item_ids))
@@ -49,9 +50,9 @@ class SteamModLoader:
         ):
             return asyncio.run(self._load_sequential(item_ids))
 
-    async def _load_sequential(self, item_ids: List[str]) -> Dict[str, SteamMod]:
+    async def _load_sequential(self, item_ids: List[str]) -> Dict[str, SourceModProtocol]:
         timeout_cfg = aiohttp.ClientTimeout(total=self.timeout)
-        results: Dict[str, SteamMod] = {}
+        results: Dict[str, SourceModProtocol] = {}
         async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
             total = len(item_ids)
             for idx, item_id in enumerate(item_ids, start=1):

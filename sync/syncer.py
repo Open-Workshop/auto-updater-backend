@@ -5,10 +5,11 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 
 import requests
 from core.telemetry import start_span
+from core.parser_registry import default_parser_type
 from core.utils import (
     dedupe_images,
     has_files,
@@ -23,8 +24,15 @@ from steam.steam_api import (
     steam_stats_reset,
     steam_stats_snapshot,
 )
-from steam.steam_mod import SteamMod
-from sync.state import DownloadTask, ModIndex, ModPayload, ReadyTask, SyncOptions, WorkQueue
+from sync.state import (
+    DownloadTask,
+    ModIndex,
+    ModPayload,
+    ReadyTask,
+    SourceModProtocol,
+    SyncOptions,
+    WorkQueue,
+)
 from sync.support import (
     DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS,
     DEPOTDOWNLOADER_RETRY_BACKOFF_SECONDS,
@@ -47,6 +55,210 @@ STEAM_DOWNLOADER_WORKER_COUNT = 2
 OW_WORKER_COUNT = 3
 
 
+class ParserSyncAdapter(Protocol):
+    parser_type: str
+    source_name: str
+    source_label: str
+
+    def create_mod_loader(self, timeout: int, language: str) -> Any:
+        ...
+
+    def reset_stats(self) -> None:
+        ...
+
+    def snapshot_stats(self) -> Dict[str, Any]:
+        ...
+
+    def download_worker_count(self, runner_url: str | None) -> int:
+        ...
+
+    def fetch_page_ids(
+        self,
+        source_id: int,
+        page: int,
+        language: str,
+        timeout: int,
+    ) -> List[str]:
+        ...
+
+    def download_archive(
+        self,
+        source_id: int,
+        item_id: str,
+        mirror_root: Path,
+        source_root: Path,
+        downloader_path: Path,
+        runner_url: str | None,
+    ) -> Path | None:
+        ...
+
+    def notify_archive_done(
+        self,
+        source_id: int,
+        item_id: str,
+        runner_url: str | None,
+    ) -> None:
+        ...
+
+    def clear_local_caches(self, mirror_root: Path, source_root: Path, source_id: int) -> None:
+        ...
+
+
+class SteamWorkshopSyncAdapter:
+    parser_type = default_parser_type()
+    source_name = "steam"
+    source_label = "Steam"
+
+    def create_mod_loader(self, timeout: int, language: str) -> Any:
+        return SteamModLoader(timeout, language)
+
+    def reset_stats(self) -> None:
+        steam_stats_reset()
+
+    def snapshot_stats(self) -> Dict[str, Any]:
+        return steam_stats_snapshot()
+
+    def download_worker_count(self, runner_url: str | None) -> int:
+        return STEAM_DOWNLOADER_WORKER_COUNT if runner_url else 1
+
+    def fetch_page_ids(
+        self,
+        source_id: int,
+        page: int,
+        language: str,
+        timeout: int,
+    ) -> List[str]:
+        return steam_fetch_workshop_page_ids_html(source_id, page, language, timeout)
+
+    def download_archive(
+        self,
+        source_id: int,
+        item_id: str,
+        mirror_root: Path,
+        source_root: Path,
+        downloader_path: Path,
+        runner_url: str | None,
+    ) -> Path | None:
+        for attempt in range(1, DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS + 1):
+            download_result = download_mod_archive(
+                downloader_path,
+                source_root,
+                source_id,
+                int(item_id),
+                mirror_root / "steam_archives" / f"{item_id}.zip",
+                runner_url,
+            )
+            if download_result.ok:
+                return download_result.archive_path
+            reason = download_result.reason or "unknown reason"
+            STEAM_LOG.error(
+                "SteamCMD download attempt %s/%s failed for %s: %s",
+                attempt,
+                DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS,
+                item_id,
+                reason,
+            )
+            if attempt >= DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS or not download_result.retryable:
+                return None
+            delay = DEPOTDOWNLOADER_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            STEAM_LOG.warning(
+                "Retrying SteamCMD download for %s in %.1fs",
+                item_id,
+                delay,
+            )
+            time.sleep(delay)
+        return None
+
+    def notify_archive_done(
+        self,
+        source_id: int,
+        item_id: str,
+        runner_url: str | None,
+    ) -> None:
+        if not runner_url:
+            return
+        response: requests.Response | None = None
+        try:
+            endpoint = runner_url.rstrip("/") + "/api/v1/archive/done"
+            response = requests.post(
+                endpoint,
+                json={"appId": source_id, "workshopId": int(item_id)},
+                timeout=10,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            details = ""
+            if response is not None:
+                details = f" status={response.status_code} body={(response.text or '')[:200]!r}"
+            PARSER_LOG.warning("Failed to notify archive done: %s%s", exc, details)
+        finally:
+            if response is not None:
+                response.close()
+
+    def clear_local_caches(self, mirror_root: Path, source_root: Path, source_id: int) -> None:
+        appworkshop_acf = source_root / "steamapps" / "workshop" / f"appworkshop_{source_id}.acf"
+        self._safe_unlink(appworkshop_acf)
+        cache_dirs = (
+            mirror_root / "steam_archives",
+            source_root / "steamapps" / "workshop" / "downloads",
+            source_root / "steamapps" / "workshop" / "content",
+        )
+        for cache_dir in cache_dirs:
+            self._clear_directory_contents(cache_dir, "startup")
+
+    def _clear_directory_contents(self, path: Path, reason: str) -> None:
+        if not path.exists():
+            return
+        if not path.is_dir():
+            PARSER_LOG.warning(
+                "Skip cache cleanup for %s (%s): path is not a directory",
+                path,
+                reason,
+            )
+            return
+        removed = 0
+        for child in path.iterdir():
+            try:
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+                removed += 1
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                PARSER_LOG.warning(
+                    "Failed to delete cache entry %s (%s): %s",
+                    child,
+                    reason,
+                    exc,
+                )
+        if removed:
+            PARSER_LOG.info("Cache cleanup %s (%s): removed=%s", path, reason, removed)
+
+    @staticmethod
+    def _safe_unlink(path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            PARSER_LOG.warning("Failed to remove archive %s: %s", path, exc)
+
+
+_SYNC_ADAPTERS: dict[str, ParserSyncAdapter] = {
+    default_parser_type(): SteamWorkshopSyncAdapter(),
+}
+
+
+def get_sync_adapter(parser_type: str | None) -> ParserSyncAdapter:
+    normalized = str(parser_type or "").strip() or default_parser_type()
+    try:
+        return _SYNC_ADAPTERS[normalized]
+    except KeyError as exc:
+        raise KeyError(f"unknown parser sync adapter: {normalized}") from exc
+
+
 class ModSyncer:
     def __init__(
         self,
@@ -58,15 +270,22 @@ class ModSyncer:
         depotdownloader_path: Path,
         steamcmd_runner_url: str | None,
         options: SyncOptions,
+        parser_type: str | None = None,
     ) -> None:
         self.api = api
-        self.steam_app_id = steam_app_id
+        self.source_id = steam_app_id
+        self.steam_app_id = self.source_id
         self.game_id = game_id
         self.mirror_root = mirror_root
-        self.steam_root = steam_root
+        self.source_root = steam_root
+        self.steam_root = self.source_root
         self.depotdownloader_path = depotdownloader_path
-        self.steamcmd_runner_url = steamcmd_runner_url
+        self.runner_url = steamcmd_runner_url
+        self.steamcmd_runner_url = self.runner_url
         self.options = options
+        self.adapter = get_sync_adapter(parser_type)
+        self.source_name = self.adapter.source_name
+        self.source_label = self.adapter.source_label
 
         self.queue = WorkQueue()
         self.stop_requested = threading.Event()
@@ -77,12 +296,10 @@ class ModSyncer:
         self.page = self.start_page
         self.listed_count = 0
         self.mod_index = ModIndex()
-        self.steam_mod_cache: Dict[str, SteamMod] = {}
+        self.source_mod_cache: Dict[str, SourceModProtocol] = {}
         self.catalog_backpressure_high_watermark = CATALOG_BACKPRESSURE_HIGH_WATERMARK
         self.catalog_backpressure_low_watermark = CATALOG_BACKPRESSURE_LOW_WATERMARK
-        self.download_worker_count = (
-            STEAM_DOWNLOADER_WORKER_COUNT if self.steamcmd_runner_url else 1
-        )
+        self.download_worker_count = self.adapter.download_worker_count(self.runner_url)
         self.ow_worker_count = OW_WORKER_COUNT
         self._catalog_backpressure_active = False
         self._ow_worker_state = threading.local()
@@ -109,13 +326,13 @@ class ModSyncer:
             prune=options.prune_resources,
             upload_files=options.upload_resource_files,
         )
-        self.mod_loader = SteamModLoader(options.timeout, options.language)
+        self.mod_loader = self.adapter.create_mod_loader(options.timeout, options.language)
 
     def run(self) -> None:
         with start_span(
             "sync.run",
             {
-                "steam.app_id": self.steam_app_id,
+                f"{self.source_name}.app_id": self.source_id,
                 "ow.game_id": self.game_id,
                 "sync.max_items": self.options.max_items,
                 "sync.max_pages": self.options.max_pages,
@@ -123,18 +340,18 @@ class ModSyncer:
             },
         ):
             self._clear_local_caches("startup")
-            steam_stats_reset()
+            self.adapter.reset_stats()
             self.tag_manager.preload()
             self.lookup_api = self._create_lookup_api()
             self.queue.configure_downloaders(self.download_worker_count)
             producer = threading.Thread(
                 target=self._run_producer,
-                name="steam-producer",
+                name=f"{self.source_name}-producer",
             )
             downloaders = [
                 threading.Thread(
                     target=self._run_downloader,
-                    name=f"steam-downloader-{index + 1}",
+                    name=f"{self.source_name}-downloader-{index + 1}",
                 )
                 for index in range(self.download_worker_count)
             ]
@@ -169,10 +386,11 @@ class ModSyncer:
                 raise self._worker_error
             self.dependency_manager.retry_pending()
 
-            stats = steam_stats_snapshot()
+            stats = self.adapter.snapshot_stats()
             if stats.get("total"):
                 STEAM_LOG.info(
-                    "Steam requests: total=%s ok=%s failed=%s endpoints=%s",
+                    "%s requests: total=%s ok=%s failed=%s endpoints=%s",
+                    self.source_label,
                     stats.get("total"),
                     stats.get("success"),
                     stats.get("failed"),
@@ -232,10 +450,11 @@ class ModSyncer:
         try:
             if self.options.force_required_item_id:
                 self.queue.enqueue_metadata(str(self.options.force_required_item_id))
-                STEAM_LOG.info("Steam workshop items: 1 (forced)")
+                STEAM_LOG.info("%s items: 1 (forced)", self.source_label)
             else:
                 STEAM_LOG.info(
-                    "Steam workshop listing: start_page=%s max_items=%s max_pages=%s",
+                    "%s listing: start_page=%s max_items=%s max_pages=%s",
+                    self.source_label,
                     self.start_page,
                     self.options.max_items or "unlimited",
                     self.options.max_pages or "unlimited",
@@ -259,7 +478,7 @@ class ModSyncer:
                 if not self._fetch_next_page():
                     break
         except Exception as exc:
-            STEAM_LOG.exception("Steam producer failed")
+            STEAM_LOG.exception("%s producer failed", self.source_label)
             self._record_worker_error(exc)
         finally:
             self.queue.finish_producer()
@@ -274,7 +493,7 @@ class ModSyncer:
                 if self.queue.producer_finished():
                     break
         except Exception as exc:
-            STEAM_LOG.exception("Steam downloader failed")
+            STEAM_LOG.exception("%s downloader failed", self.source_label)
             self._record_worker_error(exc)
         finally:
             self.queue.finish_downloader()
@@ -324,10 +543,10 @@ class ModSyncer:
 
     def _fetch_next_page(self) -> bool:
         with start_span(
-            "steam.list_page",
+            f"{self.source_name}.list_page",
             {
-                "steam.app_id": self.steam_app_id,
-                "steam.page": self.page,
+                f"{self.source_name}.app_id": self.source_id,
+                f"{self.source_name}.page": self.page,
                 "sync.max_pages": self.options.max_pages,
                 "sync.max_items": self.options.max_items,
             },
@@ -337,12 +556,13 @@ class ModSyncer:
                 if self.page > last_page:
                     return False
             STEAM_LOG.info(
-                "Steam workshop page fetch: page=%s max_pages=%s",
+                "%s page fetch: page=%s max_pages=%s",
+                self.source_label,
                 self.page,
                 self.options.max_pages or "unlimited",
             )
-            page_ids = steam_fetch_workshop_page_ids_html(
-                self.steam_app_id,
+            page_ids = self.adapter.fetch_page_ids(
+                self.source_id,
                 self.page,
                 self.options.language,
                 self.options.timeout,
@@ -382,7 +602,7 @@ class ModSyncer:
         found: Dict[str, Dict[str, Any]] = {}
         if missing:
             results = self.lookup_api.get_mods_by_source_ids(
-                "steam",
+                self.source_name,
                 missing,
                 page_size=len(missing),
             )
@@ -411,7 +631,8 @@ class ModSyncer:
                 if ow_mod and _ow_recent_edit(ow_mod, now_ts):
                     skipped_recent += 1
                     STEAM_LOG.info(
-                        "Skipping Steam fetch for %s (recent OW edit within %s)",
+                        "Skipping %s fetch for %s (recent OW edit within %s)",
+                        self.source_label,
                         ow_mod.get("id") or workshop_id,
                         window_label,
                     )
@@ -419,26 +640,28 @@ class ModSyncer:
                 fetch_ids.append(str(workshop_id))
             if not fetch_ids:
                 STEAM_LOG.info(
-                    "Skipped %s mods from Steam fetch due to recent edits",
+                    "Skipped %s mods from %s fetch due to recent edits",
                     skipped_recent,
+                    self.source_label,
                 )
                 return
             if skipped_recent:
                 STEAM_LOG.info(
-                    "Skipped %s mods from Steam fetch due to recent edits",
+                    "Skipped %s mods from %s fetch due to recent edits",
                     skipped_recent,
+                    self.source_label,
                 )
             mod_map = self.mod_loader.load_batch(fetch_ids)
-            self.steam_mod_cache.update(mod_map)
+            self.source_mod_cache.update(mod_map)
 
             for workshop_id in fetch_ids:
-                mod = self.steam_mod_cache.get(str(workshop_id))
+                mod = self.source_mod_cache.get(str(workshop_id))
                 if not mod:
-                    STEAM_LOG.warning("Steam page missing for %s", workshop_id)
+                    STEAM_LOG.warning("%s page missing for %s", self.source_label, workshop_id)
                     continue
                 with start_span(
                     "mod.payload_build",
-                    {"steam.item_id": str(workshop_id)},
+                    {f"{self.source_name}.item_id": str(workshop_id)},
                 ):
                     payload = self._build_payload(mod, workshop_id)
                 if payload is None:
@@ -452,7 +675,8 @@ class ModSyncer:
                     continue
                 if self._needs_file_update(mod, payload.ow_mod):
                     STEAM_LOG.info(
-                        "Queue download for %s (new=%s)",
+                        "Queue %s download for %s (new=%s)",
+                        self.source_label,
                         workshop_id,
                         payload.ow_mod_id is None,
                     )
@@ -469,13 +693,14 @@ class ModSyncer:
         item_id = task.item_id
         payload = task.payload
         STEAM_LOG.info(
-            "Downloading Steam mod %s (payload_new=%s)",
+            "Downloading %s mod %s (payload_new=%s)",
+            self.source_label,
             item_id,
             payload.is_new,
         )
         archive_path = self._download_mod_archive(item_id)
         if not archive_path:
-            STEAM_LOG.error("Steam download failed for %s", item_id)
+            STEAM_LOG.error("%s download failed for %s", self.source_label, item_id)
             return
         self.queue.enqueue_ready(item_id, payload, archive_path=archive_path)
 
@@ -498,7 +723,7 @@ class ModSyncer:
             "ow.mod_upsert",
             {
                 "ow.mod_id": payload.ow_mod_id,
-                "steam.item_id": str(item_id),
+                f"{self.source_name}.item_id": str(item_id),
                 "ow.mode": "metadata_update",
             },
         ):
@@ -507,7 +732,7 @@ class ModSyncer:
                 payload.title,
                 payload.short_desc,
                 payload.description,
-                "steam",
+                self.source_name,
                 int(item_id),
                 self.game_id,
                 self.options.public_mode,
@@ -539,7 +764,7 @@ class ModSyncer:
         ow_mod = payload.ow_mod
         ow_mod_id = payload.ow_mod_id
         if ow_mod is None:
-            ow_mod = api.get_mod_by_source("steam", int(item_id))
+            ow_mod = api.get_mod_by_source(self.source_name, int(item_id))
             if ow_mod is not None:
                 mod_id = ow_mod.get("id")
                 try:
@@ -569,7 +794,7 @@ class ModSyncer:
                 "ow.mod_upsert",
                 {
                     "ow.mod_id": int(payload.ow_mod_id) if payload.ow_mod_id else None,
-                    "steam.item_id": str(item_id),
+                    f"{self.source_name}.item_id": str(item_id),
                     "ow.mode": "upsert_with_file",
                 },
             ):
@@ -577,7 +802,7 @@ class ModSyncer:
                     payload.title,
                     payload.short_desc,
                     payload.description,
-                    "steam",
+                    self.source_name,
                     int(item_id),
                     self.game_id,
                     self.options.public_mode,
@@ -621,52 +846,36 @@ class ModSyncer:
 
     def _clear_local_caches(self, reason: str) -> None:
         self.mod_index.clear()
-        self.steam_mod_cache.clear()
-        appworkshop_acf = (
-            self.steam_root
-            / "steamapps"
-            / "workshop"
-            / f"appworkshop_{self.steam_app_id}.acf"
-        )
-        self._safe_unlink(appworkshop_acf)
-        cache_dirs = (
-            self.mirror_root / "steam_archives",
-            self.mirror_root / "resources",
-            self.steam_root / "steamapps" / "workshop" / "downloads",
-            self.steam_root / "steamapps" / "workshop" / "content",
-        )
-        for cache_dir in cache_dirs:
-            self._clear_directory_contents(cache_dir, reason)
-
-    def _clear_directory_contents(self, path: Path, reason: str) -> None:
-        if not path.exists():
-            return
-        if not path.is_dir():
-            PARSER_LOG.warning(
-                "Skip cache cleanup for %s (%s): path is not a directory",
-                path,
-                reason,
-            )
-            return
-        removed = 0
-        for child in path.iterdir():
-            try:
-                if child.is_dir() and not child.is_symlink():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
-                removed += 1
-            except FileNotFoundError:
-                continue
-            except Exception as exc:
+        self.source_mod_cache.clear()
+        self.adapter.clear_local_caches(self.mirror_root, self.source_root, self.source_id)
+        resources_dir = self.mirror_root / "resources"
+        if resources_dir.exists():
+            if not resources_dir.is_dir():
                 PARSER_LOG.warning(
-                    "Failed to delete cache entry %s (%s): %s",
-                    child,
+                    "Skip cache cleanup for %s (%s): path is not a directory",
+                    resources_dir,
                     reason,
-                    exc,
                 )
-        if removed:
-            PARSER_LOG.info("Cache cleanup %s (%s): removed=%s", path, reason, removed)
+                return
+            removed = 0
+            for child in resources_dir.iterdir():
+                try:
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+                    removed += 1
+                except FileNotFoundError:
+                    continue
+                except Exception as exc:
+                    PARSER_LOG.warning(
+                        "Failed to delete cache entry %s (%s): %s",
+                        child,
+                        reason,
+                        exc,
+                    )
+            if removed:
+                PARSER_LOG.info("Cache cleanup %s (%s): removed=%s", resources_dir, reason, removed)
 
     @staticmethod
     def _safe_unlink(path: Path) -> None:
@@ -677,14 +886,14 @@ class ModSyncer:
         except Exception as exc:
             PARSER_LOG.warning("Failed to remove archive %s: %s", path, exc)
 
-    def _build_payload(self, mod: SteamMod, workshop_id: str) -> Optional[ModPayload]:
+    def _build_payload(self, mod: SourceModProtocol, workshop_id: str) -> Optional[ModPayload]:
         title = mod.title
         if not title:
-            title = f"Steam Mod {workshop_id}"
-            STEAM_LOG.warning("Steam %s missing title, using fallback", workshop_id)
+            title = f"{self.source_label} Mod {workshop_id}"
+            STEAM_LOG.warning("%s %s missing title, using fallback", self.source_label, workshop_id)
         raw_description = mod.description
         tags = mod.tags
-        STEAM_LOG.debug("Steam %s tags: %s", workshop_id, tags)
+        STEAM_LOG.debug("%s %s tags: %s", self.source_label, workshop_id, tags)
 
         short_desc = strip_bbcode(raw_description)
         if not short_desc:
@@ -710,7 +919,7 @@ class ModSyncer:
         with start_span(
             "images.prepare_payload",
             {
-                "steam.item_id": str(workshop_id),
+                f"{self.source_name}.item_id": str(workshop_id),
                 "images.scrape_enabled": allow_image_scrape,
                 "images.max_screenshots": self.options.max_screenshots,
             },
@@ -726,7 +935,8 @@ class ModSyncer:
                     screenshots = screenshots[: self.options.max_screenshots]
                 images = [logo] + screenshots
         STEAM_LOG.debug(
-            "Steam %s images: %s (logo=%s extra=%s)",
+            "%s %s images: %s (logo=%s extra=%s)",
+            self.source_label,
             workshop_id,
             len(images),
             bool(mod.logo),
@@ -748,7 +958,7 @@ class ModSyncer:
             is_new=ow_mod_id is None,
         )
 
-    def _collect_images(self, mod: SteamMod, allow_image_scrape: bool) -> List[str]:
+    def _collect_images(self, mod: SourceModProtocol, allow_image_scrape: bool) -> List[str]:
         images: List[str] = []
         if mod.logo:
             images.append(mod.logo)
@@ -758,7 +968,7 @@ class ModSyncer:
 
     def _needs_file_update(
         self,
-        mod: SteamMod,
+        mod: SourceModProtocol,
         ow_mod: Optional[Dict[str, Any]],
     ) -> bool:
         with start_span("mod.file_update_decision"):
@@ -776,60 +986,21 @@ class ModSyncer:
         with start_span(
             "mod.download_archive",
             {
-                "steam.item_id": str(item_id),
-                "steam.app_id": self.steam_app_id,
+                f"{self.source_name}.item_id": str(item_id),
+                f"{self.source_name}.app_id": self.source_id,
             },
         ):
-            for attempt in range(1, DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS + 1):
-                download_result = download_mod_archive(
-                    self.depotdownloader_path,
-                    self.steam_root,
-                    self.steam_app_id,
-                    int(item_id),
-                    self.mirror_root / "steam_archives" / f"{item_id}.zip",
-                    self.steamcmd_runner_url,
-                )
-                if download_result.ok:
-                    return download_result.archive_path
-                reason = download_result.reason or "unknown reason"
-                STEAM_LOG.error(
-                    "SteamCMD download attempt %s/%s failed for %s: %s",
-                    attempt,
-                    DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS,
-                    item_id,
-                    reason,
-                )
-                if attempt >= DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS or not download_result.retryable:
-                    return None
-                delay = DEPOTDOWNLOADER_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
-                STEAM_LOG.warning(
-                    "Retrying SteamCMD download for %s in %.1fs",
-                    item_id,
-                    delay,
-                )
-                time.sleep(delay)
-        return None
+            return self.adapter.download_archive(
+                self.source_id,
+                item_id,
+                self.mirror_root,
+                self.source_root,
+                self.depotdownloader_path,
+                self.runner_url,
+            )
     
     def _notify_archive_done(self, item_id: str) -> None:
-        if not self.steamcmd_runner_url:
-            return
-        response: requests.Response | None = None
-        try:
-            endpoint = self.steamcmd_runner_url.rstrip("/") + "/api/v1/archive/done"
-            response = requests.post(
-                endpoint,
-                json={"appId": self.steam_app_id, "workshopId": int(item_id)},
-                timeout=10,
-            )
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            details = ""
-            if response is not None:
-                details = f" status={response.status_code} body={(response.text or '')[:200]!r}"
-            PARSER_LOG.warning("Failed to notify archive done: %s%s", exc, details)
-        finally:
-            if response is not None:
-                response.close()
+        self.adapter.notify_archive_done(self.source_id, item_id, self.runner_url)
 
 def sync_mods(
     api: ApiClient,
@@ -859,6 +1030,7 @@ def sync_mods(
     language: str,
     depotdownloader_path: Path,
     steamcmd_runner_url: Optional[str] = None,
+    parser_type: Optional[str] = None,
 ) -> None:
     options = SyncOptions(
         page_size=page_size,
@@ -891,4 +1063,5 @@ def sync_mods(
         depotdownloader_path,
         steamcmd_runner_url,
         options,
+        parser_type=parser_type,
     ).run()

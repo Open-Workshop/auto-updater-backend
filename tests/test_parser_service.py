@@ -299,6 +299,8 @@ class ParserRuntimeConfigReloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["proxyConfigured"], True)
         self.assertEqual(snapshot["proxyPoolSize"], 1)
         self.assertEqual(snapshot["proxyScope"], "mod_pages")
+        self.assertEqual(snapshot["parserType"], "steam-workshop")
+        self.assertEqual(snapshot["sourceName"], "steam")
         self.assertEqual(snapshot["stats"]["totalCalls"], 7)
         self.assertEqual(snapshot["proxies"], [])
 
@@ -375,6 +377,8 @@ class ParserRuntimeConfigReloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["proxyLabel"], "socks5://46.8.223.44:3001")
         self.assertEqual(snapshot["bucketCount"], 24)
         self.assertTrue(snapshot["found"])
+        self.assertEqual(snapshot["parserType"], "steam-workshop")
+        self.assertEqual(snapshot["sourceName"], "steam")
         self.assertEqual(snapshot["stats"]["totalCalls"], 6)
         self.assertEqual(snapshot["stats"]["topError"]["label"], "ProxyTimeoutError")
 

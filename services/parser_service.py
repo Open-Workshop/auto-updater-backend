@@ -56,6 +56,7 @@ class ParserRuntimeAdapter:
 
 class SteamWorkshopParserRuntimeAdapter(ParserRuntimeAdapter):
     parser_type = default_parser_type()
+    source_name = "steam"
 
     def bootstrap(self, runtime: "ParserRuntime") -> int:
         runtime._apply_runtime_settings()
@@ -94,6 +95,7 @@ class SteamWorkshopParserRuntimeAdapter(ParserRuntimeAdapter):
             runtime.cfg.language,
             Path(runtime.cfg.depotdownloader_path),
             runtime.cfg.steamcmd_runner_url or None,
+            runtime.adapter.parser_type,
         )
 
 
@@ -125,6 +127,8 @@ class ParserRuntime:
     ) -> None:
         self.cfg = cfg
         self.adapter = adapter or get_runtime_adapter(_parser_type_from_env())
+        self.parser_type = self.adapter.parser_type
+        self.source_name = getattr(self.adapter, "source_name", "source")
         self.api: ApiClient | None = None
         self.game_id = 0
         self.steam_app_id = 0
@@ -388,6 +392,9 @@ class ParserRuntime:
 
     def snapshot(self) -> dict[str, Any]:
         return {
+            "parserType": self.parser_type,
+            "sourceName": self.source_name,
+            "sourceId": self.steam_app_id,
             "steamAppId": self.steam_app_id,
             "gameId": self.game_id,
             "syncing": self.syncing,
@@ -418,6 +425,8 @@ class ParserRuntime:
             "proxyConfigured": bool(self.cfg.steam_proxy_pool),
             "proxyPoolSize": len(self.cfg.steam_proxy_pool),
             "proxyScope": self.cfg.steam_proxy_scope,
+            "parserType": self.parser_type,
+            "sourceName": self.source_name,
             "stats": {k: v for k, v in stats.items() if k != "proxies"},
             "proxies": list(stats.get("proxies") or []) if include_proxies else [],
         }
@@ -446,6 +455,8 @@ class ParserRuntime:
             "proxyConfigured": bool(self.cfg.steam_proxy_pool),
             "proxyPoolSize": len(self.cfg.steam_proxy_pool),
             "proxyScope": self.cfg.steam_proxy_scope,
+            "parserType": self.parser_type,
+            "sourceName": self.source_name,
             "proxyKey": str(detail.get("proxyKey") or proxy),
             "proxyLabel": str(detail.get("proxyLabel") or proxy),
             "found": bool(detail.get("found")),

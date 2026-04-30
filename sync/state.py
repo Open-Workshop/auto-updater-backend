@@ -5,10 +5,29 @@ import threading
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 
-if TYPE_CHECKING:
-    from steam.steam_mod import SteamMod
+
+class SourceModProtocol(Protocol):
+    item_id: str
+    title: str
+    description: str
+    tags: List[str]
+    dependencies: List[str]
+    page_ok: bool
+    logo: str | None
+    screenshots: List[str]
+    created_ts: int
+    updated_ts: int
+
+    async def download_images(
+        self,
+        dest_dir: Path,
+        targets: List[tuple[str, str, str]],
+        *,
+        timeout: int,
+    ) -> List[tuple[str, str, Path, str]]:
+        ...
 
 
 @dataclass(frozen=True)
@@ -37,7 +56,7 @@ class SyncOptions:
 
 @dataclass
 class ModPayload:
-    mod: SteamMod
+    mod: SourceModProtocol
     title: str
     short_desc: str
     description: str
