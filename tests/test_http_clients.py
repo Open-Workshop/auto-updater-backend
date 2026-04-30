@@ -203,6 +203,30 @@ class HttpClientTests(unittest.TestCase):
         self.assertEqual(upload_kwargs["json"]["owner_id"], 101)
         self.assertEqual(upload_kwargs["json"]["mode"], "create")
 
+    def test_ow_client_get_mod_dependencies_accepts_dependency_objects(self) -> None:
+        client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
+        client.session = _RecordingSession(
+            [
+                _FakeResponse(
+                    200,
+                    payload={
+                        "count": 2,
+                        "items": [
+                            {"mod_id": 11, "optional": True},
+                            {"dependence": 12, "optional": False},
+                        ],
+                    },
+                )
+            ]
+        )
+
+        dep_ids = client.get_mod_dependencies(7)
+
+        self.assertEqual(dep_ids, [11, 12])
+        method, url, kwargs = client.session.calls[0]
+        self.assertEqual((method, url), ("get", "https://example.com/mods/7/dependencies"))
+        self.assertEqual(kwargs, {})
+
     def test_ow_client_upsert_mod_with_existing_id_uses_edit_path(self) -> None:
         client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
         client.session = _RecordingSession(
