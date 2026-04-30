@@ -16,7 +16,7 @@ from core.parser_registry import (
     ParserWorkloadSpec,
     WorkloadLogTargetSpec,
 )
-from kube.mirror_instance import runner_service_url
+from kube.mirror_instance import managed_runner_proxy_secret_name, runner_service_url
 
 
 INSTANCE = {
@@ -251,6 +251,10 @@ class KubeResourceTests(unittest.TestCase):
             parser_statefulset = build_parser_statefulset(_fake_instance(), "example/image:latest")
             self.assertEqual(parser_statefulset["metadata"]["name"], "demo-ingestor")
             self.assertEqual(parser_statefulset["spec"]["serviceName"], "demo-ingestor")
+            self.assertEqual(
+                managed_runner_proxy_secret_name("demo", FAKE_PARSER_TYPE),
+                "demo-runner-proxy",
+            )
 
             runner_statefulset = build_runner_statefulset(
                 _fake_instance(),

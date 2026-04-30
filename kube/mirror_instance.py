@@ -110,8 +110,13 @@ def managed_parser_proxy_secret_name(name: str) -> str:
     return component_name(name, "parser-proxies")
 
 
-def managed_runner_proxy_secret_name(name: str) -> str:
-    return component_name(name, "steamcmd-proxy")
+def managed_runner_proxy_secret_name(name: str, parser_type: str | None = None) -> str:
+    parser_type = parser_type or default_parser_type()
+    try:
+        secret_component = parser_secret_component(parser_type, "runnerProxySecretRef")
+    except KeyError:
+        secret_component = "runner-proxy"
+    return component_name(name, secret_component)
 
 
 @dataclass(frozen=True)

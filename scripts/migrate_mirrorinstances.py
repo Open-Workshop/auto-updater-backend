@@ -26,9 +26,10 @@ from core.parser_registry import (
     get_parser_contract,
     parser_config_defaults,
     parser_secret_ref_defaults,
+    parser_workload_id,
     parser_workload_defaults,
 )
-from kube.mirror_instance import managed_runner_proxy_secret_name
+from kube.mirror_instance import managed_runner_proxy_secret_name, parser_name, runner_name
 
 
 def _parse_args() -> argparse.Namespace:
@@ -145,11 +146,6 @@ def _env_secret_name(env_items: list[dict[str, Any]], name: str) -> str:
     return ""
 
 
-def _statefulset_name(instance_name: str, workload_id: str) -> str:
-    suffix = "parser" if workload_id == "parser" else "steamcmd"
-    return f"{instance_name}-{suffix}"
-
-
 def _load_statefulset(kube_cli: list[str], namespace: str, name: str) -> dict[str, Any] | None:
     return _try_get_json(
         [
@@ -244,11 +240,12 @@ def _best_parser_env_snapshot(
     kube_cli: list[str],
     namespace: str,
     instance_name: str,
+    parser_type: str,
 ) -> list[dict[str, Any]]:
     snapshots = _controller_revision_env_snapshots(
         kube_cli,
         namespace,
-        _statefulset_name(instance_name, "parser"),
+        parser_name(instance_name, parser_type),
     )
     fallback: list[dict[str, Any]] = []
     for snapshot in snapshots:
@@ -270,11 +267,14 @@ def _runtime_recovered_manifest(
     if not name:
         raise RuntimeError("instance name is required for runtime recovery")
 
-    env_items = _best_parser_env_snapshot(kube_cli, namespace, name)
+    spec = dict(instance.get("spec") or {})
+    parser_block = dict(spec.get("parser") or {})
+    parser_type_hint = str(parser_block.get("type") or default_parser_type()).strip() or default_parser_type()
+    env_items = _best_parser_env_snapshot(kube_cli, namespace, name, parser_type_hint)
     if not env_items:
         raise RuntimeError(f"no parser runtime snapshot found for {name}")
 
-    parser_type = _env_value(env_items, "OW_PARSER_TYPE") or default_parser_type()
+    parser_type = _env_value(env_items, "OW_PARSER_TYPE") or parser_type_hint
     contract = get_parser_contract(parser_type)
     parser_config = parser_config_defaults(parser_type)
     for field in contract.config_fields:
@@ -293,7 +293,7 @@ def _runtime_recovered_manifest(
     if parser_proxy_secret_ref:
         parser_secret_refs["parserProxyPoolSecretRef"] = parser_proxy_secret_ref
 
-    runner_proxy_secret_ref = managed_runner_proxy_secret_name(name)
+    runner_proxy_secret_ref = managed_runner_proxy_secret_name(name, parser_type)
     runner_proxy_data = _load_secret_data(kube_cli, namespace, runner_proxy_secret_ref)
     runner_proxy_url = str(runner_proxy_data.get("proxyUrl") or "").strip()
     runner_proxy_type = "socks5"
@@ -302,21 +302,22 @@ def _runtime_recovered_manifest(
         parser_secret_refs["runnerProxySecretRef"] = runner_proxy_secret_ref
 
     parser_workloads = parser_workload_defaults(parser_type)
+    runner_workload_id = parser_workload_id(parser_type, "runner")
     parser_storage_size, parser_storage_class = _statefulset_storage(
-        _load_statefulset(kube_cli, namespace, _statefulset_name(name, "parser"))
+        _load_statefulset(kube_cli, namespace, parser_name(name, parser_type))
     )
     runner_storage_size, runner_storage_class = _statefulset_storage(
-        _load_statefulset(kube_cli, namespace, _statefulset_name(name, "steamcmd"))
+        _load_statefulset(kube_cli, namespace, runner_name(name, parser_type))
     )
     if parser_storage_size:
         parser_workloads["parser"]["storage"]["size"] = parser_storage_size
     if parser_storage_class:
         parser_workloads["parser"]["storage"]["storageClassName"] = parser_storage_class
     if runner_storage_size:
-        parser_workloads["steamcmd"]["storage"]["size"] = runner_storage_size
+        parser_workloads[runner_workload_id]["storage"]["size"] = runner_storage_size
     if runner_storage_class:
-        parser_workloads["steamcmd"]["storage"]["storageClassName"] = runner_storage_class
-    parser_workloads["steamcmd"]["config"]["proxyType"] = runner_proxy_type
+        parser_workloads[runner_workload_id]["storage"]["storageClassName"] = runner_storage_class
+    parser_workloads[runner_workload_id]["config"]["proxyType"] = runner_proxy_type
 
     credentials_secret_ref = str(dict(dict(instance.get("spec") or {}).get("credentials") or {}).get("secretRef") or "").strip()
     if not credentials_secret_ref:
