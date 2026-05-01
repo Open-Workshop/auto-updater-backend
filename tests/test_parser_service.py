@@ -11,8 +11,13 @@ from core.parser_registry import (
 )
 
 try:
-    from services.parser_service import ParserRuntime, run_parser
+    from services.parser_service import (
+        FactorioParserRuntimeAdapter,
+        ParserRuntime,
+        run_parser,
+    )
 except ModuleNotFoundError:
+    FactorioParserRuntimeAdapter = None
     ParserRuntime = None
     run_parser = None
 
@@ -235,6 +240,7 @@ class _FakeParserAdapter:
         runtime.api = object()
         runtime.game_id = 1
         runtime.steam_app_id = 2
+        runtime.source_id = 2
         return 0
 
     async def run_sync_once(self, runtime: ParserRuntime) -> None:
@@ -250,6 +256,57 @@ class ParserRuntimeConfigReloadTests(unittest.IsolatedAsyncioTestCase):
         runtime.steam_app_id = 4000
         with (
             patch("services.parser_service.get_instance", return_value=_instance(3000)),
+            patch("services.parser_service.read_secret_value", side_effect=_secret_value),
+            patch.object(runtime, "_apply_runtime_settings"),
+            patch.object(runtime, "_reinitialize_client_state", return_value=True) as reinitialize,
+        ):
+            runtime._refresh_config_from_cluster()
+
+        self.assertEqual(runtime.cfg.steam_max_pages, 3000)
+        reinitialize.assert_not_called()
+
+    def test_refresh_config_from_cluster_uses_canonical_parser_config_for_factorio(self) -> None:
+        if FactorioParserRuntimeAdapter is None:
+            self.skipTest("factorio runtime adapter is unavailable")
+
+        runtime = ParserRuntime(
+            _config(
+                api_base="https://api.openworkshop.miskler.ru",
+                log_level="DEBUG",
+                steam_app_id=0,
+            ),
+            adapter=FactorioParserRuntimeAdapter(),
+        )
+        runtime.api = object()
+        runtime.game_id = 7
+        runtime.source_id = "factorio"
+        factorio_instance = {
+            "metadata": {
+                "name": "demo",
+                "namespace": "auto-updater",
+            },
+            "spec": {
+                "enabled": True,
+                "credentials": {
+                    "secretRef": "demo-ow-credentials",
+                },
+                "parser": {
+                    "type": "factorio",
+                    "config": {
+                        "owGameId": 7,
+                        "steamMaxPages": 3000,
+                    },
+                    "secretRefs": {
+                        "parserProxyPoolSecretRef": "",
+                        "runnerProxySecretRef": "",
+                    },
+                    "workloads": {},
+                },
+            },
+        }
+
+        with (
+            patch("services.parser_service.get_instance", return_value=factorio_instance),
             patch("services.parser_service.read_secret_value", side_effect=_secret_value),
             patch.object(runtime, "_apply_runtime_settings"),
             patch.object(runtime, "_reinitialize_client_state", return_value=True) as reinitialize,
@@ -278,6 +335,32 @@ class ParserRuntimeConfigReloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.last_sync_result, "success")
         self.assertEqual(sync_mods.call_args.args[7], 3000)
         reinitialize.assert_not_called()
+
+    async def test_run_sync_once_uses_factorio_source_id(self) -> None:
+        if FactorioParserRuntimeAdapter is None:
+            self.skipTest("factorio runtime adapter is unavailable")
+
+        runtime = ParserRuntime(
+            _config(
+                api_base="https://api.openworkshop.miskler.ru",
+                log_level="DEBUG",
+                steam_app_id=0,
+            ),
+            adapter=FactorioParserRuntimeAdapter(),
+        )
+        runtime.api = object()
+        runtime.game_id = 7
+        runtime.source_id = "factorio"
+        with (
+            patch("services.parser_service.asyncio.to_thread", side_effect=_immediate_to_thread),
+            patch("services.parser_service.sync_mods") as sync_mods,
+            patch.object(runtime, "_report_status"),
+            patch.object(runtime, "_refresh_config_from_cluster"),
+        ):
+            await runtime.run_sync_once()
+
+        self.assertEqual(runtime.last_sync_result, "success")
+        self.assertEqual(sync_mods.call_args.args[1], "factorio")
 
     def test_proxy_snapshot_includes_pod_and_stats_metadata(self) -> None:
         runtime = ParserRuntime(

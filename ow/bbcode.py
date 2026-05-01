@@ -8,6 +8,15 @@ from typing import Iterable, Optional
 
 _TAG_RE = re.compile(r"\[(/?)([a-zA-Z0-9]+)(?:=([^\]]+))?\]")
 _URL_RE = re.compile(r"(https?://[^\s<>'\"]+)")
+_MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)?\s*$")
+_MD_HR_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+_MD_BULLET_RE = re.compile(r"^\s*[-*+]\s+(.*\S)?\s*$")
+_MD_ORDERED_RE = re.compile(r"^\s*\d+[.)]\s+(.*\S)?\s*$")
+_MD_BLOCKQUOTE_RE = re.compile(r"^\s*>\s?(.*)$")
+_MD_FENCE_RE = re.compile(r"^\s*(```+|~~~+)\s*$")
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_MD_CODE_RE = re.compile(r"`([^`]+)`")
 
 _ALLOWED_TAGS = {
     "b",
@@ -288,6 +297,151 @@ def html_to_bbcode(text: str) -> str:
     parser = HTMLToBBCode()
     parser.feed(text or "")
     return parser.get_value()
+
+
+class MarkdownToBBCode:
+    def __init__(self, *, auto_link: bool = True) -> None:
+        self.auto_link = auto_link
+
+    def to_bbcode(self, text: str) -> str:
+        lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        parts: list[str] = []
+        in_list = False
+        in_fence = False
+        fence_marker = ""
+
+        for raw_line in lines:
+            line = raw_line.rstrip()
+            stripped = line.strip()
+
+            if in_fence:
+                if stripped.startswith(fence_marker):
+                    parts.append(fence_marker)
+                    parts.append("\n")
+                    in_fence = False
+                    fence_marker = ""
+                else:
+                    parts.append(raw_line)
+                    parts.append("\n")
+                continue
+
+            if not stripped:
+                if in_list:
+                    parts.append("\n[/list]\n")
+                    in_list = False
+                else:
+                    parts.append("\n")
+                continue
+
+            fence_match = _MD_FENCE_RE.match(stripped)
+            if fence_match:
+                if in_list:
+                    parts.append("\n[/list]\n")
+                    in_list = False
+                in_fence = True
+                fence_marker = fence_match.group(1)
+                parts.append("```")
+                parts.append("\n")
+                continue
+
+            heading_match = _MD_HEADING_RE.match(stripped)
+            if heading_match:
+                if in_list:
+                    parts.append("\n[/list]\n")
+                    in_list = False
+                level = len(heading_match.group(1))
+                heading_text = (heading_match.group(2) or "").rstrip()
+                heading_text = re.sub(r"\s+#+\s*$", "", heading_text).strip()
+                parts.append(f"[h{level}]{self._render_inline(heading_text)}[/h{level}]\n")
+                continue
+
+            if _MD_HR_RE.match(stripped):
+                if in_list:
+                    parts.append("\n[/list]\n")
+                    in_list = False
+                parts.append("[hr]\n")
+                continue
+
+            bullet_match = _MD_BULLET_RE.match(raw_line)
+            ordered_match = _MD_ORDERED_RE.match(raw_line)
+            if bullet_match or ordered_match:
+                if not in_list:
+                    parts.append("[list]\n")
+                    in_list = True
+                item_text = (bullet_match or ordered_match).group(1) or ""
+                parts.append("[*] ")
+                parts.append(self._render_inline(item_text.strip()))
+                parts.append("\n")
+                continue
+
+            quote_match = _MD_BLOCKQUOTE_RE.match(raw_line)
+            if quote_match:
+                if in_list:
+                    parts.append("\n[/list]\n")
+                    in_list = False
+                parts.append("> ")
+                parts.append(self._render_inline((quote_match.group(1) or "").strip()))
+                parts.append("\n")
+                continue
+
+            if in_list:
+                parts.append("\n[/list]\n")
+                in_list = False
+
+            parts.append(self._render_inline(stripped))
+            parts.append("\n")
+
+        if in_list:
+            parts.append("\n[/list]\n")
+
+        rendered = "".join(parts)
+        rendered = re.sub(r"\n{3,}", "\n\n", rendered)
+        return rendered.strip()
+
+    def _render_inline(self, text: str) -> str:
+        if not text:
+            return ""
+
+        placeholders: list[str] = []
+
+        def stash(value: str) -> str:
+            placeholders.append(value)
+            return f"@@MDPLACEHOLDER_{len(placeholders) - 1}@@"
+
+        rendered = _MD_CODE_RE.sub(lambda match: stash(match.group(1) or ""), text)
+
+        def replace_image(match: re.Match[str]) -> str:
+            url = (match.group(2) or "").strip()
+            if not url:
+                return ""
+            return stash(f"[img]{url}[/img]")
+
+        rendered = _MD_IMAGE_RE.sub(replace_image, rendered)
+
+        def replace_link(match: re.Match[str]) -> str:
+            label = self._render_inline((match.group(1) or "").strip())
+            href = (match.group(2) or "").strip()
+            if not href:
+                return label
+            return stash(f"[url={href}]{label}[/url]")
+
+        rendered = _MD_LINK_RE.sub(replace_link, rendered)
+        rendered = re.sub(r"(?<!\*)\*\*\*(.+?)\*\*\*(?!\*)", r"[b][i]\1[/i][/b]", rendered, flags=re.S)
+        rendered = re.sub(r"(?<!_)___(.+?)___(?!_)", r"[b][i]\1[/i][/b]", rendered, flags=re.S)
+        rendered = re.sub(r"(?<!\*)\*\*(.+?)\*\*(?!\*)", r"[b]\1[/b]", rendered, flags=re.S)
+        rendered = re.sub(r"(?<!_)__(.+?)__(?!_)", r"[b]\1[/b]", rendered, flags=re.S)
+        rendered = re.sub(r"(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)", r"[i]\1[/i]", rendered, flags=re.S)
+        rendered = re.sub(r"(?<!\w)_(?!\s)(.+?)(?<!\s)_(?!\w)", r"[i]\1[/i]", rendered, flags=re.S)
+        if self.auto_link:
+            rendered = _URL_RE.sub(lambda match: f"[url={match.group(1)}]{match.group(1)}[/url]", rendered)
+
+        for index, value in enumerate(placeholders):
+            rendered = rendered.replace(f"@@MDPLACEHOLDER_{index}@@", value)
+        return rendered
+
+
+def markdown_to_bbcode(text: str) -> str:
+    return MarkdownToBBCode().to_bbcode(text)
 
 
 def _tokenize(text: str) -> Iterable[tuple[str, str] | tuple[str, bool, str, str | None, str]]:

@@ -206,6 +206,9 @@ def _clamp_page_size(page_size: int) -> int:
     return max(1, min(value, 50))
 
 
+_UNSET = object()
+
+
 class OWClient:
     def __init__(
         self,
@@ -413,7 +416,7 @@ class OWClient:
 
         return [item for item in list_all_pages(fetch) if isinstance(item, dict)]
 
-    def get_mod_by_source(self, source: str, source_id: int) -> Optional[Dict[str, Any]]:
+    def get_mod_by_source(self, source: str, source_id: Any) -> Optional[Dict[str, Any]]:
         response = self.request(
             "get",
             "/mods",
@@ -436,7 +439,7 @@ class OWClient:
         return None
 
     def get_mods_by_source_ids(
-        self, source: str, source_ids: List[int], page_size: int = 50
+        self, source: str, source_ids: List[Any], page_size: int = 50
     ) -> List[Dict[str, Any]]:
         if not source_ids:
             return []
@@ -460,7 +463,7 @@ class OWClient:
 
         return [item for item in list_all_pages(fetch) if isinstance(item, dict)]
 
-    def find_mod_by_source(self, source: str, source_id: int) -> Optional[int]:
+    def find_mod_by_source(self, source: str, source_id: Any) -> Optional[int]:
         mod = self.get_mod_by_source(source, source_id)
         if mod is None:
             return None
@@ -475,7 +478,7 @@ class OWClient:
     def list_games_by_source(
         self,
         source: str,
-        source_id: int,
+        source_id: Any,
         page_size: int,
     ) -> List[Dict[str, Any]]:
         def fetch(page: int) -> Dict[str, Any]:
@@ -522,7 +525,7 @@ class OWClient:
             return game_id
         raise RuntimeError("Failed to parse game id from response")
 
-    def edit_game_source(self, game_id: int, source: str, source_id: int) -> None:
+    def edit_game_source(self, game_id: int, source: str, source_id: Any) -> None:
         response = self.request(
             "patch",
             f"/games/{game_id}",
@@ -942,7 +945,7 @@ class OWClient:
     def _find_mod_by_source_with_wait(
         self,
         source: str,
-        source_id: int,
+        source_id: Any,
         *,
         attempts: int = 6,
         delay: float = 1.0,
@@ -962,13 +965,14 @@ class OWClient:
         short_desc: str,
         desc: str,
         source: str,
-        source_id: int,
+        source_id: Any,
         game_id: int,
         public_mode: int,
         without_author: bool,
         file_path,
         *,
         return_created: bool = False,
+        git_url: Any = _UNSET,
     ) -> int | tuple[int, bool]:
         name, short_desc, desc = self.limits.limit_mod_fields(name, short_desc, desc)
 
@@ -988,6 +992,8 @@ class OWClient:
                 "public": public_mode,
                 "without_author": bool(without_author),
             }
+            if git_url is not _UNSET:
+                data["git_url"] = git_url
             return self.request(
                 "post",
                 "/mods",
@@ -1056,13 +1062,14 @@ class OWClient:
         short_desc: str,
         desc: str,
         source: str,
-        source_id: int,
+        source_id: Any,
         game_id: int,
         public_mode: int,
         without_author: bool,
         file_path,
         *,
         existing_id: int | None = None,
+        git_url: Any = _UNSET,
     ) -> tuple[int, bool]:
         if existing_id is None:
             existing_id = self.find_mod_by_source(source, source_id)
@@ -1078,6 +1085,7 @@ class OWClient:
                 public_mode,
                 file_path,
                 set_source=False,
+                git_url=git_url,
             )
             return int(existing_id), False
 
@@ -1093,6 +1101,7 @@ class OWClient:
                 without_author,
                 file_path,
                 return_created=True,
+                git_url=git_url,
             )
         except RuntimeError as exc:
             if not self._is_mod_source_conflict_error(exc):
@@ -1116,6 +1125,7 @@ class OWClient:
                 public_mode,
                 file_path,
                 set_source=False,
+                git_url=git_url,
             )
             return int(existing_id), False
 
@@ -1137,6 +1147,7 @@ class OWClient:
             public_mode,
             file_path,
             set_source=False,
+            git_url=git_url,
         )
         return int(mod_id), False
 
@@ -1147,12 +1158,13 @@ class OWClient:
         short_desc: str,
         desc: str,
         source: str,
-        source_id: int,
+        source_id: Any,
         game_id: int,
         public_mode: int,
         file_path=None,
         *,
         set_source: bool = True,
+        git_url: Any = _UNSET,
     ) -> None:
         name, short_desc, desc = self.limits.limit_mod_fields(name, short_desc, desc)
 
@@ -1167,6 +1179,8 @@ class OWClient:
             if set_source:
                 data["source"] = source
                 data["source_id"] = source_id
+            if git_url is not _UNSET:
+                data["git_url"] = git_url
             return self.request("patch", f"/mods/{mod_id}", json=data)
 
         response = send(name)
@@ -1317,6 +1331,21 @@ class OWClient:
                 (response.text or "")[:200],
             )
 
+    def upsert_mod_dependency(self, mod_id: int, dep_id: int, *, optional: bool = False) -> None:
+        response = self.request(
+            "put",
+            f"/mods/{mod_id}/dependencies/{dep_id}",
+            json={"optional": bool(optional)},
+        )
+        if not self.is_success(response):
+            logging.warning(
+                "Failed to update dependency %s on mod %s: %s %s",
+                dep_id,
+                mod_id,
+                response.status_code,
+                (response.text or "")[:200],
+            )
+
     def delete_mod_dependency(self, mod_id: int, dep_id: int) -> bool:
         response = self.request("delete", f"/mods/{mod_id}/dependencies/{dep_id}")
         if self.is_success(response) or response.status_code in (404, 409, 412):
@@ -1324,6 +1353,64 @@ class OWClient:
         logging.warning(
             "Failed to delete dependency %s from mod %s: %s %s",
             dep_id,
+            mod_id,
+            response.status_code,
+            (response.text or "")[:200],
+            )
+        return False
+
+    def get_mod_dependency_links(self, mod_id: int) -> List[tuple[int, bool]]:
+        response = self.request("get", f"/mods/{mod_id}/dependencies")
+        if response.status_code == 404:
+            return []
+        response.raise_for_status()
+        payload = response.json()
+        dependency_links: List[tuple[int, bool]] = []
+        for item in _response_items(payload):
+            if isinstance(item, dict):
+                dep_id = item.get("mod_id") or item.get("id") or item.get("dependence")
+                optional = bool(item.get("optional", False))
+            else:
+                dep_id = item
+                optional = False
+            if dep_id is not None:
+                dependency_links.append((int(dep_id), optional))
+        return dependency_links
+
+    def get_mod_conflicts(self, mod_id: int, scope: str = "outgoing") -> List[int]:
+        response = self.request("get", f"/mods/{mod_id}/conflicts", params={"scope": scope})
+        if response.status_code == 404:
+            return []
+        response.raise_for_status()
+        payload = response.json()
+        conflict_ids: List[int] = []
+        for item in _response_items(payload):
+            if isinstance(item, dict):
+                conflict_id = item.get("id") or item.get("mod_id") or item.get("conflict")
+            else:
+                conflict_id = item
+            if conflict_id is not None:
+                conflict_ids.append(int(conflict_id))
+        return conflict_ids
+
+    def add_mod_conflict(self, mod_id: int, conflict_id: int) -> None:
+        response = self.request("post", f"/mods/{mod_id}/conflicts/{conflict_id}")
+        if not self.is_success(response):
+            logging.warning(
+                "Failed to add conflict %s to mod %s: %s %s",
+                conflict_id,
+                mod_id,
+                response.status_code,
+                (response.text or "")[:200],
+            )
+
+    def delete_mod_conflict(self, mod_id: int, conflict_id: int) -> bool:
+        response = self.request("delete", f"/mods/{mod_id}/conflicts/{conflict_id}")
+        if self.is_success(response) or response.status_code in (404, 409, 412):
+            return True
+        logging.warning(
+            "Failed to delete conflict %s from mod %s: %s %s",
+            conflict_id,
             mod_id,
             response.status_code,
             (response.text or "")[:200],
@@ -1521,18 +1608,18 @@ def ow_list_mods(api: OWClient, game_id: int, page_size: int) -> List[Dict[str, 
     return api.list_mods(game_id, page_size)
 
 
-def ow_find_mod_by_source(api: OWClient, source: str, source_id: int) -> Optional[int]:
+def ow_find_mod_by_source(api: OWClient, source: str, source_id: Any) -> Optional[int]:
     return api.find_mod_by_source(source, source_id)
 
 
 def ow_get_mod_by_source(
-    api: OWClient, source: str, source_id: int
+    api: OWClient, source: str, source_id: Any
 ) -> Optional[Dict[str, Any]]:
     return api.get_mod_by_source(source, source_id)
 
 
 def ow_list_games_by_source(
-    api: OWClient, source: str, source_id: int, page_size: int
+    api: OWClient, source: str, source_id: Any, page_size: int
 ) -> List[Dict[str, Any]]:
     return api.list_games_by_source(source, source_id, page_size)
 
@@ -1545,7 +1632,7 @@ def ow_add_game(api: OWClient, name: str, short_desc: str, desc: str) -> int:
     return api.add_game(name, short_desc, desc)
 
 
-def ow_edit_game_source(api: OWClient, game_id: int, source: str, source_id: int) -> None:
+def ow_edit_game_source(api: OWClient, game_id: int, source: str, source_id: Any) -> None:
     api.edit_game_source(game_id, source, source_id)
 
 
@@ -1559,7 +1646,7 @@ def ow_add_mod(
     short_desc: str,
     desc: str,
     source: str,
-    source_id: int,
+    source_id: Any,
     game_id: int,
     public_mode: int,
     without_author: bool,
@@ -1585,7 +1672,7 @@ def ow_edit_mod(
     short_desc: str,
     desc: str,
     source: str,
-    source_id: int,
+    source_id: Any,
     game_id: int,
     public_mode: int,
     file_path=None,
@@ -1635,6 +1722,10 @@ def ow_get_mod_dependencies(api: OWClient, mod_id: int) -> List[int]:
 
 def ow_add_mod_dependency(api: OWClient, mod_id: int, dep_id: int) -> None:
     api.add_mod_dependency(mod_id, dep_id)
+
+
+def ow_upsert_mod_dependency(api: OWClient, mod_id: int, dep_id: int, *, optional: bool = False) -> None:
+    api.upsert_mod_dependency(mod_id, dep_id, optional=optional)
 
 
 def ow_delete_mod_dependency(api: OWClient, mod_id: int, dep_id: int) -> bool:

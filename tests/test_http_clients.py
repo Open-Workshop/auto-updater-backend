@@ -1,7 +1,7 @@
 import base64
 import json
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import steam.steam_api as steam_api_module
 from ow.ow_api import OWClient
@@ -30,6 +30,9 @@ class _FakeResponse:
         if self._payload is None:
             raise ValueError("no json payload")
         return self._payload
+
+    def raise_for_status(self) -> None:
+        return None
 
 
 class _FakeSession:
@@ -187,6 +190,7 @@ class HttpClientTests(unittest.TestCase):
             0,
             False,
             "archive.zip",
+            git_url="https://github.com/example/mod",
         )
 
         self.assertEqual(mod_id, 101)
@@ -197,6 +201,7 @@ class HttpClientTests(unittest.TestCase):
         self.assertEqual(create_kwargs["json"]["game_id"], 123)
         self.assertEqual(create_kwargs["json"]["name"], "Example")
         self.assertEqual(create_kwargs["json"]["without_author"], False)
+        self.assertEqual(create_kwargs["json"]["git_url"], "https://github.com/example/mod")
         self.assertEqual((upload_method, upload_url), ("post", "https://example.com/uploads"))
         self.assertEqual(upload_kwargs["json"]["kind"], "mod_archive")
         self.assertEqual(upload_kwargs["json"]["owner_type"], "mod")
@@ -227,6 +232,54 @@ class HttpClientTests(unittest.TestCase):
         self.assertEqual((method, url), ("get", "https://example.com/mods/7/dependencies"))
         self.assertEqual(kwargs, {})
 
+    def test_ow_client_get_mod_dependency_links_serializes_optional_flags(self) -> None:
+        client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
+        client.session = _RecordingSession(
+            [
+                _FakeResponse(
+                    200,
+                    payload={
+                        "count": 2,
+                        "items": [
+                            {"mod_id": 11, "optional": True},
+                            {"dependence": 12, "optional": False},
+                        ],
+                    },
+                )
+            ]
+        )
+
+        dependency_links = client.get_mod_dependency_links(7)
+
+        self.assertEqual(dependency_links, [(11, True), (12, False)])
+        method, url, kwargs = client.session.calls[0]
+        self.assertEqual((method, url), ("get", "https://example.com/mods/7/dependencies"))
+        self.assertEqual(kwargs, {})
+
+    def test_ow_client_get_mod_conflicts_accepts_conflict_objects(self) -> None:
+        client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
+        client.session = _RecordingSession(
+            [
+                _FakeResponse(
+                    200,
+                    payload={
+                        "count": 2,
+                        "items": [
+                            {"mod_id": 11},
+                            {"conflict": 12},
+                        ],
+                    },
+                )
+            ]
+        )
+
+        conflict_ids = client.get_mod_conflicts(7)
+
+        self.assertEqual(conflict_ids, [11, 12])
+        method, url, kwargs = client.session.calls[0]
+        self.assertEqual((method, url), ("get", "https://example.com/mods/7/conflicts"))
+        self.assertEqual(kwargs["params"]["scope"], "outgoing")
+
     def test_ow_client_upsert_mod_with_existing_id_uses_edit_path(self) -> None:
         client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
         client.session = _RecordingSession(
@@ -255,6 +308,7 @@ class HttpClientTests(unittest.TestCase):
             False,
             "archive.zip",
             existing_id=17,
+            git_url="https://github.com/example/mod",
         )
 
         self.assertEqual(mod_id, 17)
@@ -265,9 +319,48 @@ class HttpClientTests(unittest.TestCase):
         self.assertEqual((patch_method, patch_url), ("patch", "https://example.com/mods/17"))
         self.assertEqual(patch_kwargs["json"]["game_id"], 123)
         self.assertEqual(patch_kwargs["json"]["name"], "Example")
+        self.assertEqual(patch_kwargs["json"]["git_url"], "https://github.com/example/mod")
         self.assertNotIn("source_id", patch_kwargs["json"])
         self.assertEqual((upload_method, upload_url), ("post", "https://example.com/uploads"))
         self.assertEqual(upload_kwargs["json"]["mode"], "replace")
+
+    def test_ow_client_conflict_crud_uses_manager_association_contract(self) -> None:
+        client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
+        client.session = _RecordingSession(
+            [
+                _FakeResponse(204),
+                _FakeResponse(204),
+            ]
+        )
+
+        client.add_mod_conflict(7, 13)
+        deleted = client.delete_mod_conflict(7, 13)
+
+        self.assertTrue(deleted)
+        self.assertEqual(
+            client.session.calls,
+            [
+                ("post", "https://example.com/mods/7/conflicts/13", {}),
+                ("delete", "https://example.com/mods/7/conflicts/13", {}),
+            ],
+        )
+
+    def test_ow_client_upsert_mod_dependency_uses_optional_flag(self) -> None:
+        client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
+        client.session = _RecordingSession([_FakeResponse(204)])
+
+        client.upsert_mod_dependency(7, 13, optional=True)
+
+        self.assertEqual(
+            client.session.calls,
+            [
+                (
+                    "put",
+                    "https://example.com/mods/7/dependencies/13",
+                    {"json": {"optional": True}},
+                )
+            ],
+        )
 
     def test_ow_client_add_resource_file_uses_manager_upload_contract(self) -> None:
         client = OWClient("https://example.com", "demo", "secret", timeout=5, retries=0, retry_backoff=0.0)
@@ -429,6 +522,7 @@ class HttpClientTests(unittest.TestCase):
             0,
             "archive.zip",
             set_source=False,
+            git_url=ANY,
         )
 
 

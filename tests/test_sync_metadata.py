@@ -87,6 +87,34 @@ class EnsureGameTests(unittest.TestCase):
         self.assertEqual(api.list_games_calls, [])
         self.assertEqual(api.add_game_calls, [])
 
+    def test_ensure_game_allows_string_source_id_for_non_steam(self) -> None:
+        api = _FakeApi()
+        loader_calls = []
+
+        def load_details(source_id: str, language: str, timeout: int):
+            loader_calls.append((source_id, language, timeout))
+            return {
+                "name": "Factorio",
+                "short": "Factorio mod portal",
+                "description": "Mirror Factorio mod portal content into Open Workshop.",
+            }
+
+        game_id = ensure_game(
+            api,
+            None,
+            "factorio",
+            "factorio",
+            "english",
+            60,
+            source_details_loader=load_details,
+        )
+
+        self.assertEqual(game_id, 123)
+        self.assertEqual(api.list_games_calls, [("factorio", "factorio", 50)])
+        self.assertEqual(api.add_game_calls, [("Factorio", "Factorio mod portal", "Mirror Factorio mod portal content into Open Workshop.")])
+        self.assertEqual(api.edit_game_source_calls, [(123, "factorio", "factorio")])
+        self.assertEqual(loader_calls, [("factorio", "english", 60)])
+
     def test_ensure_game_requires_explicit_loader_for_non_steam_sources(self) -> None:
         api = _FakeApi()
 

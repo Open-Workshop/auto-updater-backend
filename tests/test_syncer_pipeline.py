@@ -50,7 +50,7 @@ def _install_syncer_stubs() -> None:
     utils.dedupe_images = lambda items: list(dict.fromkeys(items))
     utils.ensure_dir = lambda _path: None
     utils.has_files = lambda _path: False
-    utils.strip_bbcode = lambda value: value
+    utils.extension_from_headers = lambda *_args, **_kwargs: "zip"
     utils.truncate = lambda value, _limit: value
     utils.zip_directory = lambda *_args, **_kwargs: None
     sys.modules["core.utils"] = utils
@@ -73,7 +73,7 @@ class SyncerPipelineTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.syncer = _load_syncer_module()
 
-    def _make_syncer(self):
+    def _make_syncer(self, parser_type: str | None = None):
         options = self.syncer.SyncOptions(
             page_size=50,
             timeout=60,
@@ -105,6 +105,7 @@ class SyncerPipelineTests(unittest.TestCase):
             Path("/tmp/depotdownloader"),
             None,
             options,
+            parser_type=parser_type,
         )
         syncer._clear_local_caches = lambda _reason: None
         syncer.tag_manager.preload = lambda: None
@@ -431,9 +432,16 @@ class SyncerPipelineTests(unittest.TestCase):
         mod = types.SimpleNamespace(
             item_id="42",
             title="Test Mod",
+            summary="Short summary",
             description="Some [b]desc[/b]",
+            git_url="https://github.com/example/mod",
             tags=["a", "b"],
-            dependencies=["12", "42", "13"],
+            dependency_items=[
+                self.syncer.SourceDependency("12"),
+                self.syncer.SourceDependency("42"),
+                self.syncer.SourceDependency("13", optional=True),
+            ],
+            conflicts=["99", "42"],
             page_ok=True,
             logo="https://cdn/logo.png",
             screenshots=[
@@ -447,12 +455,153 @@ class SyncerPipelineTests(unittest.TestCase):
 
         self.assertIsNotNone(payload)
         assert payload is not None
-        self.assertEqual(payload.short_desc, "Some [b]desc[/b]")
+        self.assertEqual(payload.short_desc, "Short summary")
         self.assertEqual(payload.description, "Some [b]desc[/b]")
-        self.assertEqual(payload.deps, ["12", "13"])
+        self.assertEqual([dep.source_id for dep in payload.deps], ["12", "13"])
+        self.assertEqual([dep.optional for dep in payload.deps], [False, True])
         self.assertEqual(
             payload.images,
             ["https://cdn/logo.png", "https://cdn/1.png"],
+        )
+
+    def test_build_payload_converts_factorio_markdown_to_bbcode(self) -> None:
+        syncer = self._make_syncer(parser_type="factorio")
+        mod = types.SimpleNamespace(
+            item_id="43",
+            title="Fallback Mod",
+            summary="Short summary",
+            description=(
+                "# Heading\n\n"
+                "* item one\n"
+                "* item two\n\n"
+                "Visit [GitHub](https://github.com).\n\n"
+                "![Logo](https://cdn/logo.png)\n"
+            ),
+            git_url="https://github.com/example/mod",
+            tags=[],
+            dependencies=[],
+            conflicts=[],
+            page_ok=True,
+            logo="",
+            screenshots=[],
+        )
+
+        payload = syncer._build_payload(mod, "43")
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload.short_desc, "Short summary")
+        self.assertIn("[h1]Heading[/h1]", payload.description)
+        self.assertIn("[list]", payload.description)
+        self.assertIn("[url=https://github.com]GitHub[/url]", payload.description)
+        self.assertIn("[img]https://cdn/logo.png[/img]", payload.description)
+
+    def test_factorio_file_update_passes_git_url_and_conflicts(self) -> None:
+        syncer = self._make_syncer(parser_type="factorio")
+        recorded: dict[str, object] = {}
+
+        class ApiStub:
+            def upsert_mod_with_file(
+                self,
+                name,
+                short_desc,
+                desc,
+                source,
+                source_id,
+                game_id,
+                public_mode,
+                without_author,
+                file_path,
+                *,
+                existing_id=None,
+                git_url=None,
+            ):
+                recorded["git_url"] = git_url
+                return 42, False
+
+        syncer._worker_api = lambda: ApiStub()
+        syncer._worker_tag_manager = lambda: types.SimpleNamespace(sync_mod_tags=lambda *args, **kwargs: None)
+        syncer._worker_dependency_manager = lambda: types.SimpleNamespace(
+            sync_dependencies=lambda ow_mod_id, dep_items, deps_ok: recorded.setdefault(
+                "deps",
+                [(dep.source_id, dep.optional) for dep in dep_items],
+            ),
+            retry_pending=lambda: None,
+        )
+        syncer._worker_conflict_manager = lambda: types.SimpleNamespace(
+            sync_conflicts=lambda ow_mod_id, conflict_source_ids: recorded.setdefault("conflicts", list(conflict_source_ids)),
+            retry_pending=lambda: None,
+        )
+        syncer._worker_resource_syncer = lambda: types.SimpleNamespace(sync_resources=lambda *args, **kwargs: None)
+
+        payload = self.syncer.ModPayload(
+            mod=types.SimpleNamespace(
+                item_id="factorio-dimension-warp",
+                git_url="https://github.com/Kyria/dimension-warp",
+                conflicts=["dimension-fix"],
+                version="0.7.2",
+            ),
+            title="Dimension Warp",
+            short_desc="short",
+            description="desc",
+            tags=[],
+            deps=[
+                self.syncer.SourceDependency("dimension-fix"),
+                self.syncer.SourceDependency("dimension-opt", optional=True),
+            ],
+            deps_ok=True,
+            images=[],
+            images_incomplete=False,
+            ow_mod={"id": 42, "source_id": "factorio-dimension-warp"},
+            ow_mod_id=42,
+            is_new=False,
+        )
+
+        syncer._process_file_update("factorio-dimension-warp", payload, Path("/tmp/factorio-dimension-warp.zip"))
+
+        self.assertEqual(recorded["git_url"], "https://github.com/Kyria/dimension-warp")
+        self.assertEqual(recorded["conflicts"], ["dimension-fix"])
+        self.assertEqual(
+            recorded["deps"],
+            [("dimension-fix", False), ("dimension-opt", True)],
+        )
+
+    def test_dependency_manager_upserts_optional_dependency_flags(self) -> None:
+        recorded: list[tuple[str, int, int, bool]] = []
+
+        api = types.SimpleNamespace(
+            get_mod_dependency_links=lambda _mod_id: [],
+            upsert_mod_dependency=lambda mod_id, dep_id, *, optional=False: recorded.append(
+                ("upsert", mod_id, dep_id, optional)
+            ),
+            delete_mod_dependency=lambda mod_id, dep_id: recorded.append(
+                ("delete", mod_id, dep_id, False)
+            ),
+        )
+        manager = self.syncer.DependencyManager(
+            api,
+            enabled=True,
+            prune=True,
+            scrape_required_items=True,
+            enqueue_metadata=lambda _source_id: None,
+            lookup_mod=lambda source_id: {"id": 10} if source_id == "required" else {"id": 11},
+        )
+
+        manager.sync_dependencies(
+            42,
+            [
+                self.syncer.SourceDependency("required"),
+                self.syncer.SourceDependency("optional", optional=True),
+            ],
+            deps_ok=True,
+        )
+
+        self.assertCountEqual(
+            recorded,
+            [
+                ("upsert", 42, 10, False),
+                ("upsert", 42, 11, True),
+            ],
         )
 
     def test_file_update_passes_known_mod_id_to_upsert(self) -> None:
@@ -473,6 +622,7 @@ class SyncerPipelineTests(unittest.TestCase):
                 file_path,
                 *,
                 existing_id=None,
+                git_url=None,
             ):
                 recorded["name"] = name
                 recorded["source"] = source
@@ -483,13 +633,62 @@ class SyncerPipelineTests(unittest.TestCase):
         syncer._worker_api = lambda: ApiStub()
         syncer._worker_tag_manager = lambda: types.SimpleNamespace(sync_mod_tags=lambda *args, **kwargs: None)
         syncer._worker_dependency_manager = lambda: types.SimpleNamespace(sync_dependencies=lambda *args, **kwargs: None, retry_pending=lambda: None)
+        syncer._worker_conflict_manager = lambda: types.SimpleNamespace(sync_conflicts=lambda *args, **kwargs: None, retry_pending=lambda: None)
         syncer._worker_resource_syncer = lambda: types.SimpleNamespace(sync_resources=lambda *args, **kwargs: None)
 
         syncer._process_file_update("42", self._payload("42"), Path("/tmp/42.zip"))
 
         self.assertEqual(recorded["source"], "steam")
-        self.assertEqual(recorded["source_id"], 42)
+        self.assertEqual(recorded["source_id"], "42")
         self.assertEqual(recorded["existing_id"], 42)
+
+    def test_file_update_preserves_string_source_id(self) -> None:
+        syncer = self._make_syncer()
+        recorded: dict[str, object] = {}
+
+        class ApiStub:
+            def upsert_mod_with_file(
+                self,
+                name,
+                short_desc,
+                desc,
+                source,
+                source_id,
+                game_id,
+                public_mode,
+                without_author,
+                file_path,
+                *,
+                existing_id=None,
+                git_url=None,
+            ):
+                recorded["source_id"] = source_id
+                return 42, False
+
+        payload = self.syncer.ModPayload(
+            mod=types.SimpleNamespace(item_id="factorio-dimension-warp", version="0.7.2"),
+            title="Dimension Warp",
+            short_desc="short",
+            description="desc",
+            tags=[],
+            deps=[],
+            deps_ok=True,
+            images=[],
+            images_incomplete=False,
+            ow_mod={"id": 42, "source_id": "factorio-dimension-warp"},
+            ow_mod_id=42,
+            is_new=False,
+        )
+
+        syncer._worker_api = lambda: ApiStub()
+        syncer._worker_tag_manager = lambda: types.SimpleNamespace(sync_mod_tags=lambda *args, **kwargs: None)
+        syncer._worker_dependency_manager = lambda: types.SimpleNamespace(sync_dependencies=lambda *args, **kwargs: None, retry_pending=lambda: None)
+        syncer._worker_conflict_manager = lambda: types.SimpleNamespace(sync_conflicts=lambda *args, **kwargs: None, retry_pending=lambda: None)
+        syncer._worker_resource_syncer = lambda: types.SimpleNamespace(sync_resources=lambda *args, **kwargs: None)
+
+        syncer._process_file_update("factorio-dimension-warp", payload, Path("/tmp/factorio-dimension-warp.zip"))
+
+        self.assertEqual(recorded["source_id"], "factorio-dimension-warp")
 
 
 if __name__ == "__main__":

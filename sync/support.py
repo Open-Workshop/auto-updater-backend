@@ -15,7 +15,7 @@ from sync.metadata import (
     parse_ow_datetime,
     recent_edit_window_label,
 )
-from sync.relationships import DependencyManager, TagManager
+from sync.relationships import ConflictManager, DependencyManager, TagManager
 from sync.resources import (
     ImageHashes,
     ResourceSyncer,

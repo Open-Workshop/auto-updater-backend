@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
 
@@ -346,8 +346,194 @@ STEAM_WORKSHOP_CONTRACT = ParserContract(
     subtitle_config_keys=("steamAppId", "owGameId"),
 )
 
+STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY = {
+    field.key: field for field in STEAM_WORKSHOP_CONFIG_FIELDS
+}
+
+FACTORIO_CONFIG_FIELDS: tuple[ParserConfigFieldSpec, ...] = (
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["owGameId"],
+        label="OW Game ID",
+        ui_section="basic",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["apiBase"],
+        default="https://api.openworkshop.miskler.ru",
+        ui_section="basic",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["pageSize"],
+        label="Page size",
+        ui_section="basic",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["pollIntervalSeconds"],
+        label="Poll interval",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["timeoutSeconds"],
+        label="HTTP timeout",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["httpRetries"],
+        label="HTTP retries",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["httpRetryBackoff"],
+        label="HTTP retry backoff",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["runOnce"],
+        label="Run once",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["logLevel"],
+        label="Log level",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["steamMaxPages"],
+        label="Catalog max pages",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["steamStartPage"],
+        label="Catalog start page",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["steamMaxItems"],
+        label="Catalog max items",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["steamDelay"],
+        label="Catalog page delay",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["maxScreenshots"],
+        label="Max screenshots",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["uploadResourceFiles"],
+        label="Upload resource files",
+        ui_section="toggle",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["scrapePreviewImages"],
+        label="Scrape preview images",
+        ui_section="toggle",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["scrapeRequiredItems"],
+        label="Scrape required items",
+        ui_section="toggle",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["forceRequiredItemId"],
+        label="Forced required item",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["publicMode"],
+        label="Public mode",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["withoutAuthor"],
+        label="Without author",
+        ui_section="toggle",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["syncTags"],
+        label="Sync tags",
+        ui_section="toggle",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["pruneTags"],
+        label="Prune tags",
+        ui_section="toggle",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["syncDependencies"],
+        label="Sync dependencies",
+        ui_section="toggle",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["pruneDependencies"],
+        label="Prune dependencies",
+        ui_section="toggle",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["syncResources"],
+        label="Sync resources",
+        ui_section="toggle",
+    ),
+    replace(
+        STEAM_WORKSHOP_CONFIG_FIELDS_BY_KEY["pruneResources"],
+        label="Prune resources",
+        ui_section="toggle",
+    ),
+)
+
+FACTORIO_SECRET_SPECS: tuple[ParserSecretSpec, ...] = (
+    ParserSecretSpec(
+        key="parserProxyPoolSecretRef",
+        label="Parser proxy pool",
+        form_field="parser_proxy_pool",
+        secret_component="parser-proxies",
+        secret_data_key="proxyPool",
+        input_type="textarea",
+        hint="Optional proxy URLs used by parser HTTP requests.",
+        validator="proxy-pool",
+    ),
+    ParserSecretSpec(
+        key="runnerProxySecretRef",
+        label="Runner proxy URL",
+        form_field="runner_proxy_url",
+        secret_component="runner-proxy",
+        secret_data_key="proxyUrl",
+        input_type="textarea",
+        hint="Optional proxy URL for the helper workload.",
+        validator="proxy-url",
+    ),
+)
+
+FACTORIO_WORKLOADS: tuple[ParserWorkloadSpec, ...] = (
+    ParserWorkloadSpec(
+        workload_id="parser",
+        component="parser",
+        name_suffix="parser",
+        display_label="Parser",
+        mode="parser",
+        main_container_name="parser",
+        storage_form_field="parser_storage_size",
+        storage_label="Parser PVC size",
+        default_storage_size="20Gi",
+        log_targets=(WorkloadLogTargetSpec("parser", "Parser", "parser"),),
+    ),
+    ParserWorkloadSpec(
+        workload_id="runner",
+        component="runner",
+        name_suffix="runner",
+        display_label="Runner",
+        mode="runner",
+        main_container_name="runner",
+        storage_form_field="runner_storage_size",
+        storage_label="Runner PVC size",
+        default_storage_size="10Gi",
+        log_targets=(WorkloadLogTargetSpec("runner", "Runner", "runner"),),
+    ),
+)
+
+FACTORIO_CONTRACT = ParserContract(
+    parser_type="factorio",
+    label="Factorio",
+    description="Mirror Factorio mod portal content into Open Workshop.",
+    config_fields=FACTORIO_CONFIG_FIELDS,
+    secret_specs=FACTORIO_SECRET_SPECS,
+    workloads=FACTORIO_WORKLOADS,
+    overview_config_keys=("owGameId",),
+    subtitle_config_keys=("owGameId",),
+)
+
 _PARSER_REGISTRY: dict[str, ParserContract] = {
     STEAM_WORKSHOP_CONTRACT.parser_type: STEAM_WORKSHOP_CONTRACT,
+    FACTORIO_CONTRACT.parser_type: FACTORIO_CONTRACT,
 }
 
 

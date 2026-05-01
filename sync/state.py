@@ -8,12 +8,29 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol
 
 
+@dataclass(frozen=True)
+class SourceDependency:
+    source_id: str
+    optional: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_id", str(self.source_id).strip())
+
+    def __str__(self) -> str:
+        return self.source_id
+
+
 class SourceModProtocol(Protocol):
     item_id: str
     title: str
+    summary: str
     description: str
+    git_url: str
     tags: List[str]
     dependencies: List[str]
+    dependency_items: List[SourceDependency]
+    conflicts: List[str]
+    version: str
     page_ok: bool
     logo: str | None
     screenshots: List[str]
@@ -61,7 +78,7 @@ class ModPayload:
     short_desc: str
     description: str
     tags: List[str]
-    deps: List[str]
+    deps: List[SourceDependency]
     deps_ok: bool
     images: List[str]
     images_incomplete: bool

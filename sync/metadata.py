@@ -77,11 +77,16 @@ class SteamModLoader:
         return results
 
 
+def _stringify_source_id(source_id: Any) -> str:
+    rendered = str(source_id or "").strip()
+    return rendered
+
+
 def ensure_game(
     api: ApiClient,
     game_id: Optional[int],
     source_name: str,
-    source_id: int,
+    source_id: Any,
     language: str,
     timeout: int,
     *,
@@ -106,7 +111,7 @@ def ensure_game(
                 OW_LOG.warning("Game %s not found: %s", game_id, exc)
             else:
                 existing_source_id = game.get("source_id")
-                if existing_source_id and int(existing_source_id) != source_id:
+                if source_name == "steam" and _stringify_source_id(existing_source_id) != _stringify_source_id(source_id):
                     OW_LOG.warning(
                         "OW game source_id %s does not match %s source id %s",
                         existing_source_id,

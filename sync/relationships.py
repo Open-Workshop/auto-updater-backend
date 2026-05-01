@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 from core.telemetry import start_span
 from ow.ow_api import ApiClient
 from sync.metadata import OW_LOG
+from sync.state import SourceDependency
 
 
 class TagManager:
@@ -155,42 +156,64 @@ class DependencyManager:
         for dep_source_id in dep_source_ids:
             self.enqueue_metadata(str(dep_source_id))
 
+    @staticmethod
+    def _normalize_dependency_items(dep_items: List[SourceDependency] | List[Any]) -> List[SourceDependency]:
+        normalized: List[SourceDependency] = []
+        for item in dep_items or []:
+            source_id = str(getattr(item, "source_id", item) or "").strip()
+            if not source_id:
+                continue
+            normalized.append(
+                SourceDependency(
+                    source_id,
+                    bool(getattr(item, "optional", False)),
+                )
+            )
+        return normalized
+
+    def _current_dependency_map(self, ow_mod_id: int) -> Dict[int, bool]:
+        current_dep_map: Dict[int, bool] = {}
+        for dep_id, optional in self.api.get_mod_dependency_links(ow_mod_id):
+            current_dep_map[int(dep_id)] = bool(optional)
+        return current_dep_map
+
     def sync_dependencies(
         self,
         ow_mod_id: int,
-        dep_source_ids: List[str],
+        dep_items: List[SourceDependency],
         deps_ok: bool,
     ) -> None:
         if not self.enabled or not self.scrape_required_items:
             return
+        dep_items = self._normalize_dependency_items(dep_items)
         with start_span(
             "dependencies.sync",
             {
                 "ow.mod_id": ow_mod_id,
-                "deps.desired_sources": len(dep_source_ids),
+                "deps.desired_sources": len(dep_items),
                 "deps.prune": self.prune,
                 "deps.ok": deps_ok,
             },
         ):
-            desired_dep_ids: List[int] = []
+            desired_dep_ids: Dict[int, bool] = {}
             missing_sources: List[str] = []
-            for dep_source_id in dep_source_ids:
-                dep_source_id = str(dep_source_id)
+            for dep_item in dep_items:
+                dep_source_id = dep_item.source_id
                 dep_mod = self.lookup_mod(dep_source_id)
                 if dep_mod:
-                    desired_dep_ids.append(int(dep_mod.get("id")))
+                    desired_dep_ids[int(dep_mod.get("id"))] = dep_item.optional
                 else:
                     missing_sources.append(dep_source_id)
                     self.enqueue_metadata(dep_source_id)
 
-            current_dep_ids = self.api.get_mod_dependencies(ow_mod_id)
-            for dep_id in desired_dep_ids:
-                if dep_id not in current_dep_ids:
-                    self.api.add_mod_dependency(ow_mod_id, dep_id)
+            current_dep_map = self._current_dependency_map(ow_mod_id)
+            for dep_id, optional in desired_dep_ids.items():
+                if current_dep_map.get(dep_id) != optional:
+                    self.api.upsert_mod_dependency(ow_mod_id, dep_id, optional=optional)
 
             allow_prune = self.prune and deps_ok and not missing_sources
             if allow_prune:
-                for dep_id in current_dep_ids:
+                for dep_id in current_dep_map:
                     if dep_id not in desired_dep_ids:
                         self.api.delete_mod_dependency(ow_mod_id, dep_id)
             elif self.prune and not deps_ok:
@@ -202,7 +225,7 @@ class DependencyManager:
             if missing_sources:
                 with self._lock:
                     self.pending_dependency_links[ow_mod_id] = {
-                        "deps": dep_source_ids,
+                        "deps": dep_items,
                         "deps_ok": deps_ok,
                     }
             else:
@@ -219,25 +242,139 @@ class DependencyManager:
             {"deps.pending_mods": len(pending_items)},
         ):
             for ow_mod_id, info in pending_items:
-                dep_source_ids = [str(dep) for dep in info.get("deps", [])]
+                dep_items = self._normalize_dependency_items(info.get("deps", []))
                 deps_ok = bool(info.get("deps_ok", True))
-                desired_dep_ids: List[int] = []
+                desired_dep_ids: Dict[int, bool] = {}
                 missing_sources: List[str] = []
-                for dep_source_id in dep_source_ids:
-                    dep_mod = self.lookup_mod(dep_source_id)
+                for dep_item in dep_items:
+                    dep_mod = self.lookup_mod(dep_item.source_id)
                     if dep_mod:
-                        desired_dep_ids.append(int(dep_mod.get("id")))
+                        desired_dep_ids[int(dep_mod.get("id"))] = dep_item.optional
                     else:
-                        missing_sources.append(dep_source_id)
-                current_dep_ids = self.api.get_mod_dependencies(ow_mod_id)
-                for dep_id in desired_dep_ids:
-                    if dep_id not in current_dep_ids:
-                        self.api.add_mod_dependency(ow_mod_id, dep_id)
+                        missing_sources.append(dep_item.source_id)
+                current_dep_map = self._current_dependency_map(ow_mod_id)
+                for dep_id, optional in desired_dep_ids.items():
+                    if current_dep_map.get(dep_id) != optional:
+                        self.api.upsert_mod_dependency(ow_mod_id, dep_id, optional=optional)
                 if self.prune and deps_ok and not missing_sources:
-                    for dep_id in current_dep_ids:
+                    for dep_id in current_dep_map:
                         if dep_id not in desired_dep_ids:
                             self.api.delete_mod_dependency(ow_mod_id, dep_id)
                 if not missing_sources:
                     with self._lock:
                         if self.pending_dependency_links.get(ow_mod_id) == info:
                             self.pending_dependency_links.pop(ow_mod_id, None)
+
+
+class ConflictManager:
+    def __init__(
+        self,
+        api: ApiClient,
+        *,
+        enabled: bool = True,
+        prune: bool = True,
+        enqueue_metadata: Callable[[str], None],
+        lookup_mod: Callable[[str], Optional[Dict[str, Any]]],
+        pending_conflict_links: Dict[int, Dict[str, Any]] | None = None,
+        lock: threading.Lock | None = None,
+    ) -> None:
+        self.api = api
+        self.enabled = enabled
+        self.prune = prune
+        self.enqueue_metadata = enqueue_metadata
+        self.lookup_mod = lookup_mod
+        self.pending_conflict_links = (
+            pending_conflict_links if pending_conflict_links is not None else {}
+        )
+        self._lock = lock or threading.Lock()
+
+    def clone(self, api: ApiClient) -> "ConflictManager":
+        return ConflictManager(
+            api,
+            enabled=self.enabled,
+            prune=self.prune,
+            enqueue_metadata=self.enqueue_metadata,
+            lookup_mod=self.lookup_mod,
+            pending_conflict_links=self.pending_conflict_links,
+            lock=self._lock,
+        )
+
+    def queue_missing_sources(self, conflict_source_ids: List[str]) -> None:
+        if not self.enabled:
+            return
+        for conflict_source_id in conflict_source_ids:
+            self.enqueue_metadata(str(conflict_source_id))
+
+    def sync_conflicts(self, ow_mod_id: int, conflict_source_ids: List[str]) -> None:
+        if not self.enabled:
+            return
+        with start_span(
+            "conflicts.sync",
+            {
+                "ow.mod_id": ow_mod_id,
+                "conflicts.desired_sources": len(conflict_source_ids),
+                "conflicts.prune": self.prune,
+            },
+        ):
+            desired_conflict_ids: List[int] = []
+            missing_sources: List[str] = []
+            for conflict_source_id in conflict_source_ids:
+                conflict_source_id = str(conflict_source_id)
+                conflict_mod = self.lookup_mod(conflict_source_id)
+                if conflict_mod:
+                    desired_conflict_ids.append(int(conflict_mod.get("id")))
+                else:
+                    missing_sources.append(conflict_source_id)
+                    self.enqueue_metadata(conflict_source_id)
+
+            current_conflict_ids = self.api.get_mod_conflicts(ow_mod_id)
+            for conflict_id in desired_conflict_ids:
+                if conflict_id not in current_conflict_ids:
+                    self.api.add_mod_conflict(ow_mod_id, conflict_id)
+            allow_prune = self.prune and not missing_sources
+            if allow_prune:
+                for conflict_id in current_conflict_ids:
+                    if conflict_id not in desired_conflict_ids:
+                        self.api.delete_mod_conflict(ow_mod_id, conflict_id)
+
+            if missing_sources:
+                with self._lock:
+                    self.pending_conflict_links[ow_mod_id] = {
+                        "conflicts": conflict_source_ids,
+                    }
+            else:
+                with self._lock:
+                    self.pending_conflict_links.pop(ow_mod_id, None)
+
+    def retry_pending(self) -> None:
+        with self._lock:
+            pending_items = list(self.pending_conflict_links.items())
+        if not pending_items:
+            return
+        with start_span(
+            "conflicts.retry_pending",
+            {"conflicts.pending_mods": len(pending_items)},
+        ):
+            for ow_mod_id, info in pending_items:
+                conflict_source_ids = [str(dep) for dep in info.get("conflicts", [])]
+                desired_conflict_ids: List[int] = []
+                missing_sources: List[str] = []
+                for conflict_source_id in conflict_source_ids:
+                    conflict_mod = self.lookup_mod(conflict_source_id)
+                    if conflict_mod:
+                        desired_conflict_ids.append(int(conflict_mod.get("id")))
+                    else:
+                        missing_sources.append(conflict_source_id)
+                current_conflict_ids = self.api.get_mod_conflicts(ow_mod_id)
+                for conflict_id in desired_conflict_ids:
+                    if conflict_id not in current_conflict_ids:
+                        self.api.add_mod_conflict(ow_mod_id, conflict_id)
+                allow_prune = self.prune and not missing_sources
+                if allow_prune:
+                    for conflict_id in current_conflict_ids:
+                        if conflict_id not in desired_conflict_ids:
+                            self.api.delete_mod_conflict(ow_mod_id, conflict_id)
+                if not missing_sources:
+                    with self._lock:
+                        if self.pending_conflict_links.get(ow_mod_id) == info:
+                            self.pending_conflict_links.pop(ow_mod_id, None)

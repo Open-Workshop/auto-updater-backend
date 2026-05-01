@@ -53,10 +53,16 @@ class ParserRuntimeAdapter:
     async def run_sync_once(self, runtime: "ParserRuntime") -> None:
         raise NotImplementedError
 
+    def source_details_loader(self):
+        return None
+
 
 class SteamWorkshopParserRuntimeAdapter(ParserRuntimeAdapter):
     parser_type = default_parser_type()
     source_name = "steam"
+
+    def source_details_loader(self):
+        return steam_get_app_details
 
     def bootstrap(self, runtime: "ParserRuntime") -> int:
         runtime._apply_runtime_settings()
@@ -69,7 +75,63 @@ class SteamWorkshopParserRuntimeAdapter(ParserRuntimeAdapter):
         await asyncio.to_thread(
             sync_mods,
             runtime.api,
-            runtime.steam_app_id,
+            runtime.source_id,
+            runtime.game_id,
+            Path(runtime.cfg.mirror_root),
+            Path(runtime.cfg.steam_root),
+            runtime.cfg.page_size,
+            runtime.cfg.timeout,
+            runtime.cfg.steam_max_pages,
+            runtime.cfg.steam_start_page,
+            runtime.cfg.steam_max_items,
+            runtime.cfg.steam_delay,
+            runtime.cfg.max_screenshots,
+            runtime.cfg.public_mode,
+            runtime.cfg.without_author,
+            runtime.cfg.sync_tags,
+            runtime.cfg.prune_tags,
+            runtime.cfg.sync_dependencies,
+            runtime.cfg.prune_dependencies,
+            runtime.cfg.sync_resources,
+            runtime.cfg.prune_resources,
+            runtime.cfg.upload_resource_files,
+            runtime.cfg.scrape_preview_images,
+            runtime.cfg.scrape_required_items,
+            runtime.cfg.force_required_item_id,
+            runtime.cfg.language,
+            Path(runtime.cfg.depotdownloader_path),
+            runtime.cfg.steamcmd_runner_url or None,
+            runtime.adapter.parser_type,
+        )
+
+
+class FactorioParserRuntimeAdapter(ParserRuntimeAdapter):
+    parser_type = "factorio"
+    source_name = "factorio"
+
+    @staticmethod
+    def _source_details_loader(source_id: Any, language: str, timeout: int) -> dict[str, str]:
+        return {
+            "name": "Factorio",
+            "short": "Factorio mod portal",
+            "description": "Mirror Factorio mod portal content into Open Workshop.",
+        }
+
+    def source_details_loader(self):
+        return self._source_details_loader
+
+    def bootstrap(self, runtime: "ParserRuntime") -> int:
+        runtime._apply_runtime_settings()
+        if not runtime._reinitialize_client_state():
+            return 2
+        return 0
+
+    async def run_sync_once(self, runtime: "ParserRuntime") -> None:
+        await asyncio.to_thread(runtime._refresh_config_from_cluster)
+        await asyncio.to_thread(
+            sync_mods,
+            runtime.api,
+            runtime.source_id,
             runtime.game_id,
             Path(runtime.cfg.mirror_root),
             Path(runtime.cfg.steam_root),
@@ -101,6 +163,7 @@ class SteamWorkshopParserRuntimeAdapter(ParserRuntimeAdapter):
 
 _RUNTIME_ADAPTERS: dict[str, ParserRuntimeAdapter] = {
     default_parser_type(): SteamWorkshopParserRuntimeAdapter(),
+    "factorio": FactorioParserRuntimeAdapter(),
 }
 
 
@@ -129,6 +192,7 @@ class ParserRuntime:
         self.adapter = adapter or get_runtime_adapter(_parser_type_from_env())
         self.parser_type = self.adapter.parser_type
         self.source_name = getattr(self.adapter, "source_name", "source")
+        self.source_id: Any = 0
         self.api: ApiClient | None = None
         self.game_id = 0
         self.steam_app_id = 0
@@ -168,14 +232,8 @@ class ParserRuntime:
         )
 
     def _reinitialize_client_state(self) -> bool:
-        source_env_name = (
-            "OW_STEAM_APP_ID" if self.source_name == "steam" else f"OW_{self.source_name.upper()}_ID"
-        )
         if not self.cfg.login_name or not self.cfg.password:
             logging.error("OW_LOGIN and OW_PASSWORD are required")
-            return False
-        if self.cfg.steam_app_id <= 0 and self.cfg.game_id <= 0:
-            logging.error("%s or OW_GAME_ID is required", source_env_name)
             return False
 
         api = ApiClient(
@@ -195,24 +253,37 @@ class ParserRuntime:
         with start_span("ow.load_api_limits"):
             load_api_limits(api)
 
+        source_id: Any
         steam_app_id = self.cfg.steam_app_id
-        if steam_app_id <= 0:
-            try:
-                with start_span("ow.get_game", {"ow.game_id": self.cfg.game_id}):
-                    game = ow_get_game(api, self.cfg.game_id)
-            except Exception as exc:
-                logging.error("Failed to load game %s: %s", self.cfg.game_id, exc)
+        source_details_loader = self.adapter.source_details_loader()
+        if self.source_name == "steam":
+            source_env_name = "OW_STEAM_APP_ID"
+            if steam_app_id <= 0 and self.cfg.game_id <= 0:
+                logging.error("%s or OW_GAME_ID is required", source_env_name)
                 return False
-            steam_app_id = int(game.get("source_id") or 0)
             if steam_app_id <= 0:
-                logging.error("OW game has no %s source_id, set %s", self.source_name, source_env_name)
+                try:
+                    with start_span("ow.get_game", {"ow.game_id": self.cfg.game_id}):
+                        game = ow_get_game(api, self.cfg.game_id)
+                except Exception as exc:
+                    logging.error("Failed to load game %s: %s", self.cfg.game_id, exc)
+                    return False
+                steam_app_id = int(game.get("source_id") or 0)
+                if steam_app_id <= 0:
+                    logging.error("OW game has no %s source_id, set %s", self.source_name, source_env_name)
+                    return False
+            source_id = steam_app_id
+        else:
+            source_id = self.source_name
+            if source_details_loader is None:
+                logging.error("source_details_loader is required for non-steam source %s", self.source_name)
                 return False
 
         try:
             with start_span(
                 "ow.ensure_game",
                 {
-                    f"{self.source_name}.source_id": steam_app_id,
+                    f"{self.source_name}.source_id": source_id,
                     "ow.game_id": self.cfg.game_id or 0,
                 },
             ):
@@ -220,9 +291,10 @@ class ParserRuntime:
                     api,
                     self.cfg.game_id if self.cfg.game_id > 0 else None,
                     self.source_name,
-                    steam_app_id,
+                    source_id,
                     self.cfg.language,
                     self.cfg.timeout,
+                    source_details_loader=source_details_loader,
                 )
         except Exception as exc:
             logging.error("Failed to ensure game: %s", exc)
@@ -232,8 +304,9 @@ class ParserRuntime:
         ensure_dir(Path(self.cfg.steam_root))
         self.api = api
         self.game_id = game_id
+        self.source_id = source_id
         self.steam_app_id = steam_app_id
-        logging.info("Using OW game %s for %s source %s", game_id, self.source_name, steam_app_id)
+        logging.info("Using OW game %s for %s source %s", game_id, self.source_name, source_id)
         return True
 
     def _refresh_config_from_cluster(self) -> None:
@@ -247,9 +320,19 @@ class ParserRuntime:
         sync = dict(spec.get("sync") or {})
         credentials = dict(spec.get("credentials") or {})
         parser = dict(spec.get("parser") or {})
-        sync_cfg = load_sync_config_from_env(dict(iter_sync_env_items(sync)))
+        parser_cfg = {}
+        parser_secret_refs = {}
+        if any(key in parser for key in {"type", "config", "secretRefs", "workloads"}):
+            parser_cfg = dict(parser.get("config") or {})
+            parser_secret_refs = dict(parser.get("secretRefs") or {})
+        sync_source = parser_cfg or sync
+        sync_cfg = load_sync_config_from_env(dict(iter_sync_env_items(sync_source)))
         credentials_secret = str(credentials.get("secretRef") or "").strip()
-        parser_proxy_secret = str(parser.get("proxyPoolSecretRef") or "").strip()
+        parser_proxy_secret = str(
+            parser_secret_refs.get("parserProxyPoolSecretRef")
+            or parser.get("proxyPoolSecretRef")
+            or ""
+        ).strip()
         proxy_pool_value = ""
         if parser_proxy_secret:
             proxy_pool_value = read_secret_value(
@@ -257,6 +340,7 @@ class ParserRuntime:
                 parser_proxy_secret,
                 "proxyPool",
             )
+        source_values = parser_cfg or source
         candidate_cfg = replace(
             self.cfg,
             api_base=str(sync_cfg["api_base"]),
@@ -270,8 +354,8 @@ class ParserRuntime:
                 credentials_secret,
                 "password",
             ),
-            steam_app_id=int(source.get("steamAppId") or 0),
-            game_id=int(source.get("owGameId") or 0),
+            steam_app_id=int(source_values.get("steamAppId") or 0),
+            game_id=int(source_values.get("owGameId") or 0),
             page_size=int(sync_cfg["page_size"]),
             poll_interval=int(sync_cfg["poll_interval"]),
             timeout=int(sync_cfg["timeout"]),
@@ -302,7 +386,7 @@ class ParserRuntime:
             prune_dependencies=bool(sync_cfg["prune_dependencies"]),
             sync_resources=bool(sync_cfg["sync_resources"]),
             prune_resources=bool(sync_cfg["prune_resources"]),
-            language=str(source.get("language") or "english").strip() or "english",
+            language=str(source_values.get("language") or "english").strip() or "english",
             steamcmd_runner_url=runner_service_url(
                 self.cfg.instance_name,
                 self.cfg.instance_namespace,
@@ -401,7 +485,7 @@ class ParserRuntime:
         return {
             "parserType": self.parser_type,
             "sourceName": self.source_name,
-            "sourceId": self.steam_app_id,
+            "sourceId": self.source_id,
             "steamAppId": self.steam_app_id,
             "gameId": self.game_id,
             "syncing": self.syncing,

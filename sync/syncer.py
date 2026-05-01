@@ -8,15 +8,21 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol
 
 import requests
+from core.log_tags import tagged_logger
 from core.telemetry import start_span
 from core.parser_registry import default_parser_type
 from core.utils import (
     dedupe_images,
     has_files,
-    strip_bbcode,
     truncate,
     zip_directory,
 )
+from factorio.factorio_mod import (
+    FactorioModLoader,
+    download_factorio_mod_archive,
+    list_factorio_mod_names,
+)
+from ow.bbcode import markdown_to_bbcode
 from ow.ow_api import ApiClient
 from steam.depot_downloader import download_mod_archive
 from steam.steam_api import (
@@ -29,11 +35,13 @@ from sync.state import (
     ModIndex,
     ModPayload,
     ReadyTask,
+    SourceDependency,
     SourceModProtocol,
     SyncOptions,
     WorkQueue,
 )
 from sync.support import (
+    ConflictManager,
     DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS,
     DEPOTDOWNLOADER_RETRY_BACKOFF_SECONDS,
     OW_LOG,
@@ -69,12 +77,18 @@ class ParserSyncAdapter(Protocol):
     def snapshot_stats(self) -> Dict[str, Any]:
         ...
 
+    def render_description(self, text: str) -> str:
+        ...
+
+    def source_git_url(self, mod: SourceModProtocol) -> str | None:
+        ...
+
     def download_worker_count(self, runner_url: str | None) -> int:
         ...
 
     def fetch_page_ids(
         self,
-        source_id: int,
+        source_id: Any,
         page: int,
         language: str,
         timeout: int,
@@ -83,24 +97,25 @@ class ParserSyncAdapter(Protocol):
 
     def download_archive(
         self,
-        source_id: int,
-        item_id: str,
+        source_id: Any,
+        mod: SourceModProtocol,
         mirror_root: Path,
         source_root: Path,
         downloader_path: Path,
         runner_url: str | None,
+        timeout: int,
     ) -> Path | None:
         ...
 
     def notify_archive_done(
         self,
-        source_id: int,
+        source_id: Any,
         item_id: str,
         runner_url: str | None,
     ) -> None:
         ...
 
-    def clear_local_caches(self, mirror_root: Path, source_root: Path, source_id: int) -> None:
+    def clear_local_caches(self, mirror_root: Path, source_root: Path, source_id: Any) -> None:
         ...
 
 
@@ -118,12 +133,18 @@ class SteamWorkshopSyncAdapter:
     def snapshot_stats(self) -> Dict[str, Any]:
         return steam_stats_snapshot()
 
+    def render_description(self, text: str) -> str:
+        return text or ""
+
+    def source_git_url(self, mod: SourceModProtocol) -> str | None:
+        return None
+
     def download_worker_count(self, runner_url: str | None) -> int:
         return STEAM_DOWNLOADER_WORKER_COUNT if runner_url else 1
 
     def fetch_page_ids(
         self,
-        source_id: int,
+        source_id: Any,
         page: int,
         language: str,
         timeout: int,
@@ -132,18 +153,20 @@ class SteamWorkshopSyncAdapter:
 
     def download_archive(
         self,
-        source_id: int,
-        item_id: str,
+        source_id: Any,
+        mod: SourceModProtocol,
         mirror_root: Path,
         source_root: Path,
         downloader_path: Path,
         runner_url: str | None,
+        timeout: int,
     ) -> Path | None:
+        item_id = str(mod.item_id)
         for attempt in range(1, DEPOTDOWNLOADER_MAX_DOWNLOAD_ATTEMPTS + 1):
             download_result = download_mod_archive(
                 downloader_path,
                 source_root,
-                source_id,
+                int(source_id),
                 int(item_id),
                 mirror_root / "steam_archives" / f"{item_id}.zip",
                 runner_url,
@@ -171,7 +194,7 @@ class SteamWorkshopSyncAdapter:
 
     def notify_archive_done(
         self,
-        source_id: int,
+        source_id: Any,
         item_id: str,
         runner_url: str | None,
     ) -> None:
@@ -195,7 +218,7 @@ class SteamWorkshopSyncAdapter:
             if response is not None:
                 response.close()
 
-    def clear_local_caches(self, mirror_root: Path, source_root: Path, source_id: int) -> None:
+    def clear_local_caches(self, mirror_root: Path, source_root: Path, source_id: Any) -> None:
         appworkshop_acf = source_root / "steamapps" / "workshop" / f"appworkshop_{source_id}.acf"
         self._safe_unlink(appworkshop_acf)
         cache_dirs = (
@@ -246,8 +269,119 @@ class SteamWorkshopSyncAdapter:
             PARSER_LOG.warning("Failed to remove archive %s: %s", path, exc)
 
 
+class FactorioSyncAdapter:
+    parser_type = "factorio"
+    source_name = "factorio"
+    source_label = "Factorio"
+
+    def create_mod_loader(self, timeout: int, language: str) -> Any:
+        return FactorioModLoader(timeout)
+
+    def reset_stats(self) -> None:
+        return None
+
+    def snapshot_stats(self) -> Dict[str, Any]:
+        return {}
+
+    def render_description(self, text: str) -> str:
+        return markdown_to_bbcode(text)
+
+    def source_git_url(self, mod: SourceModProtocol) -> str | None:
+        git_url = str(getattr(mod, "git_url", "") or "").strip()
+        return git_url or None
+
+    def download_worker_count(self, runner_url: str | None) -> int:
+        return 2
+
+    def fetch_page_ids(
+        self,
+        source_id: Any,
+        page: int,
+        language: str,
+        timeout: int,
+    ) -> List[str]:
+        return list_factorio_mod_names(page, timeout=timeout)
+
+    def download_archive(
+        self,
+        source_id: Any,
+        mod: SourceModProtocol,
+        mirror_root: Path,
+        source_root: Path,
+        downloader_path: Path,
+        runner_url: str | None,
+        timeout: int,
+    ) -> Path | None:
+        version = str(getattr(mod, "version", "") or "").strip()
+        if not version:
+            PARSER_LOG.warning(
+                "Skipping Factorio archive download for %s: missing version",
+                mod.item_id,
+            )
+            return None
+        archive_path = mirror_root / "factorio_archives" / f"{mod.item_id}-{version}.zip"
+        return download_factorio_mod_archive(
+            mod.item_id,
+            version,
+            archive_path,
+            timeout=timeout,
+        )
+
+    def notify_archive_done(
+        self,
+        source_id: Any,
+        item_id: str,
+        runner_url: str | None,
+    ) -> None:
+        return None
+
+    def clear_local_caches(self, mirror_root: Path, source_root: Path, source_id: Any) -> None:
+        cache_dir = mirror_root / "factorio_archives"
+        self._clear_directory_contents(cache_dir, "startup")
+
+    def _clear_directory_contents(self, path: Path, reason: str) -> None:
+        if not path.exists():
+            return
+        if not path.is_dir():
+            PARSER_LOG.warning(
+                "Skip cache cleanup for %s (%s): path is not a directory",
+                path,
+                reason,
+            )
+            return
+        removed = 0
+        for child in path.iterdir():
+            try:
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+                removed += 1
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                PARSER_LOG.warning(
+                    "Failed to delete cache entry %s (%s): %s",
+                    child,
+                    reason,
+                    exc,
+                )
+        if removed:
+            PARSER_LOG.info("Cache cleanup %s (%s): removed=%s", path, reason, removed)
+
+    @staticmethod
+    def _safe_unlink(path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            PARSER_LOG.warning("Failed to remove archive %s: %s", path, exc)
+
+
 _SYNC_ADAPTERS: dict[str, ParserSyncAdapter] = {
     default_parser_type(): SteamWorkshopSyncAdapter(),
+    "factorio": FactorioSyncAdapter(),
 }
 
 
@@ -263,7 +397,7 @@ class ModSyncer:
     def __init__(
         self,
         api: ApiClient,
-        steam_app_id: int,
+        source_id: Any,
         game_id: int,
         mirror_root: Path,
         steam_root: Path,
@@ -273,8 +407,11 @@ class ModSyncer:
         parser_type: str | None = None,
     ) -> None:
         self.api = api
-        self.source_id = steam_app_id
-        self.steam_app_id = self.source_id
+        self.source_id = source_id
+        try:
+            self.steam_app_id = int(source_id)
+        except (TypeError, ValueError):
+            self.steam_app_id = 0
         self.game_id = game_id
         self.mirror_root = mirror_root
         self.source_root = steam_root
@@ -286,6 +423,7 @@ class ModSyncer:
         self.adapter = get_sync_adapter(parser_type)
         self.source_name = self.adapter.source_name
         self.source_label = self.adapter.source_label
+        self.source_log = tagged_logger(self.source_name)
 
         self.queue = WorkQueue()
         self.stop_requested = threading.Event()
@@ -318,6 +456,11 @@ class ModSyncer:
             enqueue_metadata=self.queue.enqueue_metadata,
             lookup_mod=self.mod_index.get,
         )
+        self.conflict_manager = ConflictManager(
+            api,
+            enqueue_metadata=self.queue.enqueue_metadata,
+            lookup_mod=self.mod_index.get,
+        )
         self.resource_syncer = ResourceSyncer(
             api,
             mirror_root,
@@ -332,7 +475,7 @@ class ModSyncer:
         with start_span(
             "sync.run",
             {
-                f"{self.source_name}.app_id": self.source_id,
+                f"{self.source_name}.source_id": self.source_id,
                 "ow.game_id": self.game_id,
                 "sync.max_items": self.options.max_items,
                 "sync.max_pages": self.options.max_pages,
@@ -388,7 +531,7 @@ class ModSyncer:
 
             stats = self.adapter.snapshot_stats()
             if stats.get("total"):
-                STEAM_LOG.info(
+                self.source_log.info(
                     "%s requests: total=%s ok=%s failed=%s endpoints=%s",
                     self.source_label,
                     stats.get("total"),
@@ -426,7 +569,7 @@ class ModSyncer:
             backlog = self.queue.downstream_backlog()
             if self._catalog_backpressure_active:
                 if backlog <= low_watermark:
-                    STEAM_LOG.info(
+                    self.source_log.info(
                         "Catalog producer resumed: downstream_backlog=%s low_watermark=%s",
                         backlog,
                         low_watermark,
@@ -437,7 +580,7 @@ class ModSyncer:
                 continue
             if backlog >= high_watermark:
                 self._catalog_backpressure_active = True
-                STEAM_LOG.info(
+                self.source_log.info(
                     "Catalog producer paused: downstream_backlog=%s high_watermark=%s",
                     backlog,
                     high_watermark,
@@ -450,9 +593,9 @@ class ModSyncer:
         try:
             if self.options.force_required_item_id:
                 self.queue.enqueue_metadata(str(self.options.force_required_item_id))
-                STEAM_LOG.info("%s items: 1 (forced)", self.source_label)
+                self.source_log.info("%s items: 1 (forced)", self.source_label)
             else:
-                STEAM_LOG.info(
+                self.source_log.info(
                     "%s listing: start_page=%s max_items=%s max_pages=%s",
                     self.source_label,
                     self.start_page,
@@ -478,7 +621,7 @@ class ModSyncer:
                 if not self._fetch_next_page():
                     break
         except Exception as exc:
-            STEAM_LOG.exception("%s producer failed", self.source_label)
+            self.source_log.exception("%s producer failed", self.source_label)
             self._record_worker_error(exc)
         finally:
             self.queue.finish_producer()
@@ -493,7 +636,7 @@ class ModSyncer:
                 if self.queue.producer_finished():
                     break
         except Exception as exc:
-            STEAM_LOG.exception("%s downloader failed", self.source_label)
+            self.source_log.exception("%s downloader failed", self.source_label)
             self._record_worker_error(exc)
         finally:
             self.queue.finish_downloader()
@@ -505,6 +648,9 @@ class ModSyncer:
             self._ow_worker_state.api = worker_api
             self._ow_worker_state.tag_manager = self.tag_manager.clone(worker_api)
             self._ow_worker_state.dependency_manager = self.dependency_manager.clone(
+                worker_api
+            )
+            self._ow_worker_state.conflict_manager = self.conflict_manager.clone(
                 worker_api
             )
             self._ow_worker_state.resource_syncer = self.resource_syncer.clone(
@@ -537,6 +683,10 @@ class ModSyncer:
         manager = getattr(self._ow_worker_state, "dependency_manager", None)
         return manager if manager is not None else self.dependency_manager
 
+    def _worker_conflict_manager(self) -> ConflictManager:
+        manager = getattr(self._ow_worker_state, "conflict_manager", None)
+        return manager if manager is not None else self.conflict_manager
+
     def _worker_resource_syncer(self) -> ResourceSyncer:
         syncer = getattr(self._ow_worker_state, "resource_syncer", None)
         return syncer if syncer is not None else self.resource_syncer
@@ -545,7 +695,7 @@ class ModSyncer:
         with start_span(
             f"{self.source_name}.list_page",
             {
-                f"{self.source_name}.app_id": self.source_id,
+                f"{self.source_name}.source_id": self.source_id,
                 f"{self.source_name}.page": self.page,
                 "sync.max_pages": self.options.max_pages,
                 "sync.max_items": self.options.max_items,
@@ -555,7 +705,7 @@ class ModSyncer:
                 last_page = self.start_page + self.options.max_pages - 1
                 if self.page > last_page:
                     return False
-            STEAM_LOG.info(
+            self.source_log.info(
                 "%s page fetch: page=%s max_pages=%s",
                 self.source_label,
                 self.page,
@@ -591,14 +741,11 @@ class ModSyncer:
             return {}
         if self.lookup_api is None:
             return {item: self.mod_index.get(item) for item in requested}
-        missing: List[int] = []
+        missing: List[str] = []
         for source_id in requested:
             if self.mod_index.has(source_id):
                 continue
-            try:
-                missing.append(int(source_id))
-            except (TypeError, ValueError):
-                continue
+            missing.append(source_id)
         found: Dict[str, Dict[str, Any]] = {}
         if missing:
             results = self.lookup_api.get_mods_by_source_ids(
@@ -620,7 +767,7 @@ class ModSyncer:
             "metadata.batch",
             {"metadata.batch_size": len(batch_ids)},
         ):
-            STEAM_LOG.info("Process metadata batch: size=%s", len(batch_ids))
+            self.source_log.info("Process metadata batch: size=%s", len(batch_ids))
             now_ts = int(time.time())
             window_label = _recent_edit_window_label()
             ow_mod_map = self._fetch_existing_ow_mods(batch_ids)
@@ -630,7 +777,7 @@ class ModSyncer:
                 ow_mod = ow_mod_map.get(str(workshop_id))
                 if ow_mod and _ow_recent_edit(ow_mod, now_ts):
                     skipped_recent += 1
-                    STEAM_LOG.info(
+                    self.source_log.info(
                         "Skipping %s fetch for %s (recent OW edit within %s)",
                         self.source_label,
                         ow_mod.get("id") or workshop_id,
@@ -639,14 +786,14 @@ class ModSyncer:
                     continue
                 fetch_ids.append(str(workshop_id))
             if not fetch_ids:
-                STEAM_LOG.info(
+                self.source_log.info(
                     "Skipped %s mods from %s fetch due to recent edits",
                     skipped_recent,
                     self.source_label,
                 )
                 return
             if skipped_recent:
-                STEAM_LOG.info(
+                self.source_log.info(
                     "Skipped %s mods from %s fetch due to recent edits",
                     skipped_recent,
                     self.source_label,
@@ -657,7 +804,7 @@ class ModSyncer:
             for workshop_id in fetch_ids:
                 mod = self.source_mod_cache.get(str(workshop_id))
                 if not mod:
-                    STEAM_LOG.warning("%s page missing for %s", self.source_label, workshop_id)
+                    self.source_log.warning("%s page missing for %s", self.source_label, workshop_id)
                     continue
                 with start_span(
                     "mod.payload_build",
@@ -674,7 +821,7 @@ class ModSyncer:
                     )
                     continue
                 if self._needs_file_update(mod, payload.ow_mod):
-                    STEAM_LOG.info(
+                    self.source_log.info(
                         "Queue %s download for %s (new=%s)",
                         self.source_label,
                         workshop_id,
@@ -692,15 +839,15 @@ class ModSyncer:
     def _process_download_task(self, task: DownloadTask) -> None:
         item_id = task.item_id
         payload = task.payload
-        STEAM_LOG.info(
+        self.source_log.info(
             "Downloading %s mod %s (payload_new=%s)",
             self.source_label,
             item_id,
             payload.is_new,
         )
-        archive_path = self._download_mod_archive(item_id)
+        archive_path = self._download_mod_archive(payload.mod)
         if not archive_path:
-            STEAM_LOG.error("%s download failed for %s", self.source_label, item_id)
+            self.source_log.error("%s download failed for %s", self.source_label, item_id)
             return
         self.queue.enqueue_ready(item_id, payload, archive_path=archive_path)
 
@@ -710,6 +857,7 @@ class ModSyncer:
         else:
             self._process_file_update(task.item_id, task.payload, task.archive_path)
         self._worker_dependency_manager().retry_pending()
+        self._worker_conflict_manager().retry_pending()
 
     def _process_metadata_update(self, item_id: str, payload: ModPayload) -> None:
         if payload.ow_mod_id is None:
@@ -717,8 +865,10 @@ class ModSyncer:
         api = self._worker_api()
         tag_manager = self._worker_tag_manager()
         dependency_manager = self._worker_dependency_manager()
+        conflict_manager = self._worker_conflict_manager()
         resource_syncer = self._worker_resource_syncer()
         OW_LOG.info("Updating OW mod %s metadata", payload.ow_mod_id)
+        git_url = self.adapter.source_git_url(payload.mod)
         with start_span(
             "ow.mod_upsert",
             {
@@ -733,16 +883,21 @@ class ModSyncer:
                 payload.short_desc,
                 payload.description,
                 self.source_name,
-                int(item_id),
+                item_id,
                 self.game_id,
                 self.options.public_mode,
                 set_source=False,
+                **({"git_url": git_url} if git_url is not None else {}),
             )
         tag_manager.sync_mod_tags(payload.ow_mod_id, payload.tags)
         dependency_manager.sync_dependencies(
             payload.ow_mod_id,
             payload.deps,
             payload.deps_ok,
+        )
+        conflict_manager.sync_conflicts(
+            payload.ow_mod_id,
+            [str(conflict) for conflict in getattr(payload.mod, "conflicts", []) if conflict],
         )
         resource_syncer.sync_resources(
             payload.ow_mod_id,
@@ -760,11 +915,12 @@ class ModSyncer:
         api = self._worker_api()
         tag_manager = self._worker_tag_manager()
         dependency_manager = self._worker_dependency_manager()
+        conflict_manager = self._worker_conflict_manager()
         resource_syncer = self._worker_resource_syncer()
         ow_mod = payload.ow_mod
         ow_mod_id = payload.ow_mod_id
         if ow_mod is None:
-            ow_mod = api.get_mod_by_source(self.source_name, int(item_id))
+            ow_mod = api.get_mod_by_source(self.source_name, item_id)
             if ow_mod is not None:
                 mod_id = ow_mod.get("id")
                 try:
@@ -776,7 +932,7 @@ class ModSyncer:
                         str(item_id),
                         {
                             "id": int(ow_mod_id),
-                            "source_id": int(item_id),
+                            "source_id": item_id,
                         },
                     )
         if ow_mod is not None and _ow_recent_edit(ow_mod):
@@ -790,6 +946,7 @@ class ModSyncer:
             return
 
         try:
+            git_url = self.adapter.source_git_url(payload.mod)
             with start_span(
                 "ow.mod_upsert",
                 {
@@ -803,19 +960,20 @@ class ModSyncer:
                     payload.short_desc,
                     payload.description,
                     self.source_name,
-                    int(item_id),
+                    item_id,
                     self.game_id,
                     self.options.public_mode,
                     self.options.without_author,
                     archive_path,
                     existing_id=ow_mod_id,
+                    **({"git_url": git_url} if git_url is not None else {}),
                 )
             now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
             self.mod_index.set(
                 str(item_id),
                 {
                     "id": int(ow_mod_id),
-                    "source_id": int(item_id),
+                    "source_id": item_id,
                     "file_updated_at": now_iso,
                     "date_update_file": now_iso,
                 },
@@ -833,6 +991,10 @@ class ModSyncer:
                 int(ow_mod_id),
                 payload.deps,
                 payload.deps_ok,
+            )
+            conflict_manager.sync_conflicts(
+                int(ow_mod_id),
+                [str(conflict) for conflict in getattr(payload.mod, "conflicts", []) if conflict],
             )
             resource_syncer.sync_resources(
                 int(ow_mod_id),
@@ -890,16 +1052,17 @@ class ModSyncer:
         title = mod.title
         if not title:
             title = f"{self.source_label} Mod {workshop_id}"
-            STEAM_LOG.warning("%s %s missing title, using fallback", self.source_label, workshop_id)
+            self.source_log.warning("%s %s missing title, using fallback", self.source_label, workshop_id)
         raw_description = mod.description
+        summary = str(getattr(mod, "summary", "") or "").strip()
         tags = mod.tags
-        STEAM_LOG.debug("%s %s tags: %s", self.source_label, workshop_id, tags)
+        self.source_log.debug("%s %s tags: %s", self.source_label, workshop_id, tags)
 
-        short_desc = strip_bbcode(raw_description)
+        short_desc = self.adapter.render_description(summary or raw_description)
         if not short_desc:
             short_desc = title
         short_desc = truncate(short_desc, 256)
-        description = truncate(raw_description, 10000)
+        description = truncate(self.adapter.render_description(raw_description), 10000)
         title, short_desc, description = self.api.limit_mod_fields(
             title, short_desc, description
         )
@@ -911,10 +1074,16 @@ class ModSyncer:
         allow_image_scrape = (not is_existing_mod) or self.options.scrape_preview_images
         images_incomplete = is_existing_mod and not allow_image_scrape
 
-        page_deps = [str(dep) for dep in mod.dependencies if dep]
-        page_deps = [dep for dep in page_deps if dep != str(workshop_id)]
+        page_deps = [
+            dep
+            for dep in self._dependency_items(mod)
+            if dep.source_id and dep.source_id != str(workshop_id)
+        ]
+        page_conflicts = [str(conflict) for conflict in getattr(mod, "conflicts", []) if conflict]
+        page_conflicts = [conflict for conflict in page_conflicts if conflict != str(workshop_id)]
         page_ok = mod.page_ok
-        self.dependency_manager.queue_missing_sources(page_deps)
+        self.dependency_manager.queue_missing_sources([dep.source_id for dep in page_deps])
+        self.conflict_manager.queue_missing_sources(page_conflicts)
 
         with start_span(
             "images.prepare_payload",
@@ -934,7 +1103,7 @@ class ModSyncer:
                 if len(screenshots) > self.options.max_screenshots:
                     screenshots = screenshots[: self.options.max_screenshots]
                 images = [logo] + screenshots
-        STEAM_LOG.debug(
+        self.source_log.debug(
             "%s %s images: %s (logo=%s extra=%s)",
             self.source_label,
             workshop_id,
@@ -966,6 +1135,30 @@ class ModSyncer:
             images.extend(mod.screenshots)
         return [url for url in images if url]
 
+    @staticmethod
+    def _dependency_items(mod: SourceModProtocol) -> List[SourceDependency]:
+        raw_items = getattr(mod, "dependency_items", None)
+        normalized: List[SourceDependency] = []
+        if raw_items is not None:
+            for item in raw_items:
+                source_id = str(getattr(item, "source_id", item) or "").strip()
+                if not source_id:
+                    continue
+                normalized.append(
+                    SourceDependency(
+                        source_id,
+                        bool(getattr(item, "optional", False)),
+                    )
+                )
+            return normalized
+
+        for dep in getattr(mod, "dependencies", []) or []:
+            source_id = str(dep or "").strip()
+            if not source_id:
+                continue
+            normalized.append(SourceDependency(source_id, False))
+        return normalized
+
     def _needs_file_update(
         self,
         mod: SourceModProtocol,
@@ -982,29 +1175,31 @@ class ModSyncer:
             )
             return steam_latest_ts > ow_latest_ts
 
-    def _download_mod_archive(self, item_id: str) -> Optional[Path]:
+    def _download_mod_archive(self, mod: SourceModProtocol) -> Optional[Path]:
+        item_id = str(mod.item_id)
         with start_span(
             "mod.download_archive",
             {
                 f"{self.source_name}.item_id": str(item_id),
-                f"{self.source_name}.app_id": self.source_id,
+                f"{self.source_name}.source_id": self.source_id,
             },
         ):
             return self.adapter.download_archive(
                 self.source_id,
-                item_id,
+                mod,
                 self.mirror_root,
                 self.source_root,
                 self.depotdownloader_path,
                 self.runner_url,
+                self.options.timeout,
             )
-    
+
     def _notify_archive_done(self, item_id: str) -> None:
         self.adapter.notify_archive_done(self.source_id, item_id, self.runner_url)
 
 def sync_mods(
     api: ApiClient,
-    steam_app_id: int,
+    source_id: Any,
     game_id: int,
     mirror_root: Path,
     steam_root: Path,
@@ -1056,7 +1251,7 @@ def sync_mods(
     )
     ModSyncer(
         api,
-        steam_app_id,
+        source_id,
         game_id,
         mirror_root,
         steam_root,

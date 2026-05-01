@@ -21,6 +21,7 @@ from ow.bbcode import html_to_bbcode
 from core.proxy_stats import proxy_error_type, record_proxy_request
 from core.http_utils import ProxyPool, RetryPolicy, is_dns_error, mask_proxy, parse_proxy_url
 from core.utils import dedupe_images, ensure_dir, normalize_image_url, extension_from_headers
+from sync.state import SourceDependency
 
 DEFAULT_TIMEOUT = 20
 DEFAULT_IMAGE_CONCURRENCY = 6
@@ -62,9 +63,14 @@ class AsyncThrottle:
 class SteamMod:
     item_id: str
     title: str = ""
+    summary: str = ""
     description: str = ""
+    git_url: str = ""
     tags: List[str] = field(default_factory=list)
     dependencies: List[str] = field(default_factory=list)
+    dependency_items: List[SourceDependency] = field(default_factory=list)
+    conflicts: List[str] = field(default_factory=list)
+    version: str = ""
     logo: str = ""
     screenshots: List[str] = field(default_factory=list)
     size_text: str = ""
@@ -186,7 +192,8 @@ class SteamMod:
         else:
             screenshots = screenshot_urls
 
-        dependencies = _extract_dependencies(html_text)
+        dependency_items = _extract_dependencies(html_text)
+        dependencies = [dep.source_id for dep in dependency_items]
 
         return cls(
             item_id=str(item_id),
@@ -194,6 +201,7 @@ class SteamMod:
             description=description,
             tags=tags,
             dependencies=dependencies,
+            dependency_items=dependency_items,
             logo=logo_url,
             screenshots=screenshots,
             size_text=size_text,
@@ -206,9 +214,14 @@ class SteamMod:
 
     def _apply(self, other: "SteamMod") -> None:
         self.title = other.title
+        self.summary = other.summary
         self.description = other.description
+        self.git_url = other.git_url
         self.tags = list(other.tags)
         self.dependencies = list(other.dependencies)
+        self.dependency_items = list(other.dependency_items)
+        self.conflicts = list(other.conflicts)
+        self.version = other.version
         self.logo = other.logo
         self.screenshots = list(other.screenshots)
         self.size_text = other.size_text
@@ -801,9 +814,9 @@ def _parse_steam_date(value: str | None) -> int:
     return 0
 
 
-def _extract_dependencies(html_text: str) -> List[str]:
+def _extract_dependencies(html_text: str) -> List[SourceDependency]:
     parser = HTMLParser(html_text)
-    ids: List[str] = []
+    ids: List[SourceDependency] = []
     seen = set()
     for node in parser.css("div#RequiredItems a"):
         href = node.attributes.get("href") or ""
@@ -816,5 +829,5 @@ def _extract_dependencies(html_text: str) -> List[str]:
             if not item_id or item_id in seen:
                 continue
             seen.add(item_id)
-            ids.append(item_id)
+            ids.append(SourceDependency(item_id))
     return ids
