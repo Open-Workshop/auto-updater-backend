@@ -20,6 +20,7 @@ from steam.steam_api import (
     set_steam_proxy_pool,
     set_steam_request_logging,
     set_steam_request_policy,
+    steam_get_app_details,
 )
 from steam.steam_mod import (
     set_steam_mod_proxy_images,

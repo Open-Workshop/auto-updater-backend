@@ -111,6 +111,32 @@ class FactorioModTests(unittest.TestCase):
         self.assertGreater(mod.created_ts, 0)
         self.assertGreater(mod.updated_ts, 0)
 
+    def test_factorio_mod_from_api_json_uses_latest_release_by_timestamp(self) -> None:
+        payload = {
+            "title": "Dimension Warp",
+            "summary": "Move items between surfaces.",
+            "description": "Move items between surfaces.",
+            "releases": [
+                {
+                    "version": "0.7.1",
+                    "released_at": "2026-04-21T08:16:51.071000Z",
+                    "info_json": {"dependencies": ["aai-containers"]},
+                },
+                {
+                    "version": "0.7.2",
+                    "released_at": "2026-04-30T19:09:59.093000Z",
+                    "info_json": {"dependencies": ["Krastorio2 >= 1.3.0", "? space-age"]},
+                },
+            ],
+        }
+
+        mod = FactorioMod.from_api_json("dimension-warp", payload)
+
+        self.assertEqual(mod.version, "0.7.2")
+        self.assertEqual(mod.dependencies, ["Krastorio2"])
+        self.assertEqual([dep.source_id for dep in mod.dependency_items], ["Krastorio2"])
+        self.assertEqual([dep.optional for dep in mod.dependency_items], [False])
+
     def test_download_factorio_mod_archive_uses_storage_host(self) -> None:
         response = Mock()
         response.status_code = 200

@@ -163,10 +163,21 @@ def _latest_release(payload: Dict[str, Any]) -> Dict[str, Any] | None:
     releases = payload.get("releases")
     if not isinstance(releases, list) or not releases:
         return None
-    latest = releases[0]
-    if isinstance(latest, dict):
-        return latest
-    return None
+    latest_release: Dict[str, Any] | None = None
+    latest_ts = -1
+    latest_index = -1
+    for index, release in enumerate(releases):
+        if not isinstance(release, dict):
+            continue
+        _, released_ts = _parse_iso_datetime(release.get("released_at"))
+        if released_ts > latest_ts or (released_ts == latest_ts and index > latest_index):
+            latest_release = release
+            latest_ts = released_ts
+            latest_index = index
+    if latest_release is not None:
+        return latest_release
+    tail = releases[-1]
+    return tail if isinstance(tail, dict) else None
 
 
 def list_factorio_mod_names(
