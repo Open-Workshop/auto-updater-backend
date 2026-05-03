@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import aiohttp
 from aiohttp_socks import ProxyConnector
@@ -27,6 +27,10 @@ DEFAULT_TIMEOUT = 20
 DEFAULT_IMAGE_CONCURRENCY = 6
 DEFAULT_RETRY_POLICY = RetryPolicy(retries=2, backoff=1.0, request_delay=0.0)
 PROXY_RESERVE_SECONDS = 120.0
+_STEAM_LINKFILTER_URL_RE = re.compile(
+    r"https://steamcommunity\.com/linkfilter/\?[^\s<>'\"\[\]]+",
+    flags=re.I,
+)
 
 ImageTarget = Tuple[str, str, str]
 ImageDownload = Tuple[str, str, Path, str]
@@ -741,12 +745,28 @@ def _clean_text(value: str | None) -> str:
 def _clean_description(value: str | None) -> str:
     if not value:
         return ""
-    value = re.sub(
-        r"https://steamcommunity\.com/linkfilter/\?u=",
-        "",
-        value,
-    )
-    return html_to_bbcode(value)
+    return _normalize_steam_linkfilter_urls(html_to_bbcode(value))
+
+
+def _normalize_steam_linkfilter_urls(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        return _unwrap_steam_linkfilter_url(match.group(0))
+
+    return _STEAM_LINKFILTER_URL_RE.sub(replace, value)
+
+
+def _unwrap_steam_linkfilter_url(url: str) -> str:
+    parsed = urlparse(url)
+    if (parsed.netloc or "").lower() != "steamcommunity.com":
+        return url
+    if parsed.path != "/linkfilter/":
+        return url
+
+    params = parse_qs(parsed.query)
+    target = params.get("u", [""])[0].strip()
+    if not target:
+        return url
+    return unquote(target)
 
 
 def _is_openworkshop_url(url: str) -> bool:

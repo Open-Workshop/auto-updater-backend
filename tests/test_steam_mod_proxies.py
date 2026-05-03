@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 from aiohttp_socks._errors import ProxyError, ProxyTimeoutError
 
 from core.http_utils import ProxyPool, RetryPolicy
-from steam.steam_mod import SteamWorkshopClient
+from steam.steam_mod import SteamWorkshopClient, _clean_description
 
 
 class _FakeSession:
@@ -30,6 +30,21 @@ class SteamModProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pool.next(now=10.0), "socks5://good")
         self.assertEqual(pool.next(now=50.0), "socks5://good")
         self.assertEqual(pool.next(now=131.0), "socks5://bad")
+
+    def test_clean_description_unwraps_steam_linkfilter_redirect(self) -> None:
+        html = (
+            '<div class="workshopItemDescription">'
+            '<a href="https://steamcommunity.com/linkfilter/?u=https%3A%2F%2Fgithub.com%2Ffoo">'
+            "GitHub"
+            "</a> and "
+            "https://steamcommunity.com/linkfilter/?u=https%3A%2F%2Fexample.com%2Fbar"
+            "</div>"
+        )
+
+        self.assertEqual(
+            _clean_description(html),
+            "[url=https://github.com/foo]GitHub[/url] and [url]https://example.com/bar[/url]",
+        )
 
     async def test_socks_proxy_uses_aiohttp_socks_connector(self) -> None:
         client = SteamWorkshopClient()
