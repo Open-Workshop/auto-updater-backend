@@ -282,7 +282,7 @@ def _render_storage_field(workload: Any, value: Any, error: str = "") -> str:
 def _panel_section(title: str, body_html: str, *, open_attr: str = "", details: bool = False) -> str:
     if details:
         return (
-            f"<details class='panel-section expert-panel'{open_attr}>"
+            f"<details class=\"panel-section expert-panel\"{open_attr}>"
             f"<summary>{_escape(title)}</summary>"
             f"{body_html}"
             "</details>"

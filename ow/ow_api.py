@@ -1214,11 +1214,36 @@ class OWClient:
                     f"{upload_response.status_code} {upload_response.text}"
                 )
 
-    def list_tags(self, game_id: int, page_size: int) -> List[Dict[str, Any]]:
+    def list_tags(
+        self,
+        game_id: int,
+        page_size: int,
+        *,
+        include: List[str] | None = None,
+    ) -> List[Dict[str, Any]]:
+        def fetch(page: int) -> Dict[str, Any]:
+            params: Dict[str, Any] = {
+                "game_id": game_id,
+                "page_size": _clamp_page_size(page_size),
+                "page": page,
+            }
+            if include:
+                params["include"] = list(include)
+            response = self.request("get", "/tags", params=params)
+            response.raise_for_status()
+            return response.json()
+
+        return [item for item in list_all_pages(fetch) if isinstance(item, dict)]
+
+    def list_tag_groups(
+        self,
+        game_id: int,
+        page_size: int,
+    ) -> List[Dict[str, Any]]:
         def fetch(page: int) -> Dict[str, Any]:
             response = self.request(
                 "get",
-                "/tags",
+                "/tag-groups",
                 params={
                     "game_id": game_id,
                     "page_size": _clamp_page_size(page_size),
@@ -1230,11 +1255,14 @@ class OWClient:
 
         return [item for item in list_all_pages(fetch) if isinstance(item, dict)]
 
-    def add_tag(self, name: str) -> int:
+    def add_tag(self, name: str, *, group_id: int | None = None) -> int:
+        payload: Dict[str, Any] = {"name": self.limits.limit_tag_name(name)}
+        if group_id is not None:
+            payload["group_id"] = int(group_id)
         response = self.request(
             "post",
             "/tags",
-            json={"name": self.limits.limit_tag_name(name)},
+            json=payload,
         )
         if not self.is_success(response):
             raise RuntimeError(
@@ -1244,6 +1272,41 @@ class OWClient:
         if tag_id is not None:
             return tag_id
         raise RuntimeError("Failed to parse tag id from response")
+
+    def add_tag_group(self, name: str) -> int:
+        response = self.request(
+            "post",
+            "/tag-groups",
+            json={"name": self.limits.limit_tag_name(name)},
+        )
+        if not self.is_success(response):
+            raise RuntimeError(
+                f"Failed to add tag group: {response.status_code} {response.text}"
+            )
+        group_id = self.extract_id(response)
+        if group_id is not None:
+            return group_id
+        raise RuntimeError("Failed to parse tag group id from response")
+
+    def patch_tag(
+        self,
+        tag_id: int,
+        *,
+        name: str | None = None,
+        group_id: int | None = None,
+    ) -> None:
+        payload: Dict[str, Any] = {}
+        if name is not None:
+            payload["name"] = self.limits.limit_tag_name(name)
+        payload["group_id"] = group_id
+        response = self.request("patch", f"/tags/{tag_id}", json=payload)
+        if not self.is_success(response):
+            logging.warning(
+                "Failed to patch tag %s: %s %s",
+                tag_id,
+                response.status_code,
+                (response.text or "")[:200],
+            )
 
     def associate_game_tag(self, game_id: int, tag_id: int) -> None:
         response = self.request(
@@ -1696,8 +1759,26 @@ def ow_list_tags(api: OWClient, game_id: int, page_size: int) -> List[Dict[str, 
     return api.list_tags(game_id, page_size)
 
 
-def ow_add_tag(api: OWClient, name: str) -> int:
-    return api.add_tag(name)
+def ow_list_tag_groups(api: OWClient, game_id: int, page_size: int) -> List[Dict[str, Any]]:
+    return api.list_tag_groups(game_id, page_size)
+
+
+def ow_add_tag(api: OWClient, name: str, group_id: int | None = None) -> int:
+    return api.add_tag(name, group_id=group_id)
+
+
+def ow_add_tag_group(api: OWClient, name: str) -> int:
+    return api.add_tag_group(name)
+
+
+def ow_patch_tag(
+    api: OWClient,
+    tag_id: int,
+    *,
+    name: str | None = None,
+    group_id: int | None = None,
+) -> None:
+    api.patch_tag(tag_id, name=name, group_id=group_id)
 
 
 def ow_associate_game_tag(api: OWClient, game_id: int, tag_id: int) -> None:

@@ -191,7 +191,7 @@ class ParserRuntime:
     ) -> None:
         self.cfg = cfg
         self.adapter = adapter or get_runtime_adapter(_parser_type_from_env())
-        self.parser_type = self.adapter.parser_type
+        self.parser_type = getattr(self.adapter, "parser_type", _parser_type_from_env())
         self.source_name = getattr(self.adapter, "source_name", "source")
         self.source_id: Any = 0
         self.api: ApiClient | None = None

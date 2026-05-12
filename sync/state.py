@@ -3,7 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol
 
@@ -18,6 +18,28 @@ class SourceDependency:
 
     def __str__(self) -> str:
         return self.source_id
+
+
+@dataclass(frozen=True)
+class SourceTagGroup:
+    name: str
+    tags: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        rendered_name = str(self.name or "").strip()
+        clean_tags: List[str] = []
+        seen: set[str] = set()
+        for tag in self.tags or []:
+            rendered_tag = str(tag or "").strip()
+            if not rendered_tag:
+                continue
+            key = rendered_tag.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            clean_tags.append(rendered_tag)
+        object.__setattr__(self, "name", rendered_name)
+        object.__setattr__(self, "tags", clean_tags)
 
 
 class SourceModProtocol(Protocol):
@@ -85,6 +107,7 @@ class ModPayload:
     ow_mod: Optional[Dict[str, Any]]
     ow_mod_id: Optional[int]
     is_new: bool
+    tag_groups: List[SourceTagGroup] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

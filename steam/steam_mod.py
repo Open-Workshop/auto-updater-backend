@@ -21,7 +21,7 @@ from ow.bbcode import html_to_bbcode
 from core.proxy_stats import proxy_error_type, record_proxy_request
 from core.http_utils import ProxyPool, RetryPolicy, is_dns_error, mask_proxy, parse_proxy_url
 from core.utils import dedupe_images, ensure_dir, normalize_image_url, extension_from_headers
-from sync.state import SourceDependency
+from sync.state import SourceDependency, SourceTagGroup
 
 DEFAULT_TIMEOUT = 20
 DEFAULT_IMAGE_CONCURRENCY = 6
@@ -71,6 +71,7 @@ class SteamMod:
     description: str = ""
     git_url: str = ""
     tags: List[str] = field(default_factory=list)
+    tag_groups: List[SourceTagGroup] = field(default_factory=list)
     dependencies: List[str] = field(default_factory=list)
     dependency_items: List[SourceDependency] = field(default_factory=list)
     conflicts: List[str] = field(default_factory=list)
@@ -157,6 +158,7 @@ class SteamMod:
         )
 
         tags: List[str] = []
+        tag_groups: List[SourceTagGroup] = []
         size_text = ""
         created_at = ""
         updated_at = ""
@@ -164,10 +166,20 @@ class SteamMod:
         updated_ts = 0
 
         right_blocks = parser.css("div.rightDetailsBlock")
-        if right_blocks:
+        tag_blocks = parser.css("div.rightDetailsBlock div.workshopTags")
+        if tag_blocks:
+            for block in tag_blocks:
+                group_name, group_tags = _parse_workshop_tag_block(block)
+                if not group_tags:
+                    continue
+                tags.extend(group_tags)
+                if group_name:
+                    tag_groups.append(SourceTagGroup(group_name, group_tags))
+        elif right_blocks:
             tag_nodes = right_blocks[0].css("a")
             tag_values = [_clean_text(node.text()) for node in tag_nodes if node.text()]
             tags = _dedupe_keep_order([t for t in tag_values if t])
+        tags = _dedupe_keep_order(tags)
 
         if len(right_blocks) > 1:
             stat_nodes = right_blocks[1].css(
@@ -204,6 +216,7 @@ class SteamMod:
             title=title,
             description=description,
             tags=tags,
+            tag_groups=tag_groups,
             dependencies=dependencies,
             dependency_items=dependency_items,
             logo=logo_url,
@@ -222,6 +235,7 @@ class SteamMod:
         self.description = other.description
         self.git_url = other.git_url
         self.tags = list(other.tags)
+        self.tag_groups = list(other.tag_groups)
         self.dependencies = list(other.dependencies)
         self.dependency_items = list(other.dependency_items)
         self.conflicts = list(other.conflicts)
@@ -789,6 +803,21 @@ def _dedupe_keep_order(values: List[str]) -> List[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _clean_tag_group_name(value: str | None) -> str:
+    rendered = _clean_text(value)
+    if not rendered:
+        return ""
+    rendered = re.sub(r"[:：]\s*$", "", rendered).strip()
+    return rendered
+
+
+def _parse_workshop_tag_block(node) -> tuple[str, List[str]]:
+    title_node = node.css_first("span.workshopTagsTitle")
+    group_name = _clean_tag_group_name(title_node.text() if title_node else "")
+    tag_values = [_clean_text(tag.text()) for tag in node.css("a") if tag.text()]
+    return group_name, _dedupe_keep_order([tag for tag in tag_values if tag])
 
 
 def _parse_steam_date(value: str | None) -> int:

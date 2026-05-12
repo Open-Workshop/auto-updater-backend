@@ -889,7 +889,7 @@ class ModSyncer:
                 set_source=False,
                 **({"git_url": git_url} if git_url is not None else {}),
             )
-        tag_manager.sync_mod_tags(payload.ow_mod_id, payload.tags)
+        tag_manager.sync_mod_tags(payload.ow_mod_id, payload.tags, payload.tag_groups)
         dependency_manager.sync_dependencies(
             payload.ow_mod_id,
             payload.deps,
@@ -986,7 +986,7 @@ class ModSyncer:
             if ow_mod_id is None:
                 return
 
-            tag_manager.sync_mod_tags(int(ow_mod_id), payload.tags)
+            tag_manager.sync_mod_tags(int(ow_mod_id), payload.tags, payload.tag_groups)
             dependency_manager.sync_dependencies(
                 int(ow_mod_id),
                 payload.deps,
@@ -1056,7 +1056,15 @@ class ModSyncer:
         raw_description = mod.description
         summary = str(getattr(mod, "summary", "") or "").strip()
         tags = mod.tags
+        tag_groups = list(getattr(mod, "tag_groups", []) or [])
         self.source_log.debug("%s %s tags: %s", self.source_label, workshop_id, tags)
+        if tag_groups:
+            self.source_log.debug(
+                "%s %s tag groups: %s",
+                self.source_label,
+                workshop_id,
+                [(getattr(group, "name", ""), list(getattr(group, "tags", []) or [])) for group in tag_groups],
+            )
 
         short_desc = self.adapter.render_description(summary or raw_description)
         if not short_desc:
@@ -1118,6 +1126,7 @@ class ModSyncer:
             short_desc=short_desc,
             description=description,
             tags=tags,
+            tag_groups=tag_groups,
             deps=page_deps,
             deps_ok=page_ok,
             images=images,

@@ -6,6 +6,8 @@ import unittest
 from contextlib import nullcontext
 from pathlib import Path
 
+from sync.state import SourceTagGroup
+
 
 def _install_syncer_stubs() -> None:
     aiohttp = types.ModuleType("aiohttp")
@@ -68,6 +70,104 @@ class _FakeApi:
         return title, short_desc, description
 
 
+class _TagApiStub:
+    def __init__(
+        self,
+        *,
+        tags: list[dict] | None = None,
+        tag_groups: list[dict] | None = None,
+        current_tag_ids: list[int] | None = None,
+        next_tag_id: int = 101,
+        next_group_id: int = 201,
+    ) -> None:
+        self.tags = list(tags or [])
+        self.tag_groups = list(tag_groups or [])
+        self.current_tag_ids = list(current_tag_ids or [])
+        self.next_tag_id = next_tag_id
+        self.next_group_id = next_group_id
+        self.add_tag_calls: list[str] = []
+        self.add_tag_requests: list[tuple[str, int | None]] = []
+        self.add_tag_group_calls: list[str] = []
+        self.patch_tag_calls: list[tuple[int, int | None]] = []
+        self.associate_calls: list[tuple[int, int]] = []
+        self.add_mod_tag_calls: list[tuple[int, int]] = []
+        self.delete_mod_tag_calls: list[tuple[int, int]] = []
+
+    def list_tags(self, game_id: int, page_size: int, *, include: list[str] | None = None) -> list[dict]:
+        del game_id, page_size, include
+        return list(self.tags)
+
+    def list_tag_groups(self, game_id: int, page_size: int) -> list[dict]:
+        del game_id, page_size
+        return list(self.tag_groups)
+
+    def get_mod_tags(self, ow_mod_id: int) -> list[int]:
+        del ow_mod_id
+        return list(self.current_tag_ids)
+
+    def add_tag(self, name: str, *, group_id: int | None = None) -> int:
+        self.add_tag_calls.append(name)
+        self.add_tag_requests.append((name, group_id))
+        tag_id = self.next_tag_id
+        self.next_tag_id += 1
+        tag_entry: dict[str, object] = {"id": tag_id, "name": name}
+        if group_id is not None:
+            group_name = next(
+                (
+                    group.get("name")
+                    for group in self.tag_groups
+                    if int(group.get("id") or 0) == int(group_id)
+                ),
+                None,
+            )
+            tag_entry["group"] = {"id": int(group_id), "name": group_name or f"Group {group_id}"}
+        self.tags.append(tag_entry)
+        return tag_id
+
+    def add_tag_group(self, name: str) -> int:
+        self.add_tag_group_calls.append(name)
+        group_id = self.next_group_id
+        self.next_group_id += 1
+        self.tag_groups.append({"id": group_id, "name": name})
+        return group_id
+
+    def patch_tag(self, tag_id: int, *, name: str | None = None, group_id: int | None = None) -> None:
+        self.patch_tag_calls.append((tag_id, group_id))
+        for tag in self.tags:
+            if int(tag.get("id", 0)) != int(tag_id):
+                continue
+            if name is not None:
+                tag["name"] = name
+            if group_id is None:
+                tag.pop("group", None)
+            else:
+                group_name = next(
+                    (
+                        group.get("name")
+                        for group in self.tag_groups
+                        if int(group.get("id") or 0) == int(group_id)
+                    ),
+                    None,
+                )
+                tag["group"] = {"id": int(group_id), "name": group_name or f"Group {group_id}"}
+            break
+
+    def associate_game_tag(self, game_id: int, tag_id: int) -> None:
+        self.associate_calls.append((game_id, tag_id))
+
+    def add_mod_tag(self, ow_mod_id: int, tag_id: int) -> None:
+        self.add_mod_tag_calls.append((ow_mod_id, tag_id))
+        if tag_id not in self.current_tag_ids:
+            self.current_tag_ids.append(tag_id)
+
+    def delete_mod_tag(self, ow_mod_id: int, tag_id: int) -> None:
+        self.delete_mod_tag_calls.append((ow_mod_id, tag_id))
+        try:
+            self.current_tag_ids.remove(tag_id)
+        except ValueError:
+            pass
+
+
 class SyncerPipelineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -120,6 +220,83 @@ class SyncerPipelineTests(unittest.TestCase):
         self.assertEqual(syncer.catalog_backpressure_low_watermark, 5)
         self.assertEqual(syncer.download_worker_count, 1)
         self.assertEqual(syncer.ow_worker_count, 3)
+
+    def test_tag_manager_uses_grouped_tags_by_name_without_recreating_them(self) -> None:
+        api = _TagApiStub(
+            tags=[{"id": 42, "name": "Gameplay", "group": {"id": 1, "name": "Version"}}],
+            current_tag_ids=[42],
+        )
+        manager = self.syncer.TagManager(
+            api,
+            game_id=3,
+            page_size=50,
+            enabled=True,
+            prune=True,
+        )
+
+        manager.preload()
+        manager.sync_mod_tags(100, ["Gameplay"])
+
+        self.assertEqual(api.add_tag_calls, [])
+        self.assertEqual(api.associate_calls, [])
+        self.assertEqual(api.add_mod_tag_calls, [])
+        self.assertEqual(api.delete_mod_tag_calls, [])
+
+    def test_tag_manager_dedupes_duplicate_tag_names_before_sync(self) -> None:
+        api = _TagApiStub(tags=[], current_tag_ids=[], next_tag_id=101)
+        manager = self.syncer.TagManager(
+            api,
+            game_id=3,
+            page_size=50,
+            enabled=True,
+            prune=True,
+        )
+
+        manager.sync_mod_tags(100, ["Gameplay", "Gameplay", "Gameplay"])
+
+        self.assertEqual(api.add_tag_calls, ["Gameplay"])
+        self.assertEqual(api.associate_calls, [(3, 101)])
+        self.assertEqual(api.add_mod_tag_calls, [(100, 101)])
+        self.assertEqual(api.delete_mod_tag_calls, [])
+
+    def test_tag_manager_keeps_grouped_tags_out_of_flat_sync(self) -> None:
+        api = _TagApiStub(tags=[], current_tag_ids=[], next_tag_id=101, next_group_id=301)
+        manager = self.syncer.TagManager(
+            api,
+            game_id=3,
+            page_size=50,
+            enabled=True,
+            prune=True,
+        )
+
+        manager.sync_mod_tags(
+            100,
+            ["Approved", "Customizable", "Scene", "Sci-Fi", "Wallpaper", "Loose"],
+            [
+                SourceTagGroup("Miscellaneous", ["Approved", "Customizable"]),
+                SourceTagGroup("Type", ["Scene"]),
+                SourceTagGroup("Genre", ["Sci-Fi"]),
+                SourceTagGroup("Category", ["Wallpaper"]),
+            ],
+        )
+
+        self.assertEqual(api.add_tag_group_calls, ["Miscellaneous", "Type", "Genre", "Category"])
+        self.assertEqual(
+            api.add_tag_requests,
+            [
+                ("Approved", 301),
+                ("Customizable", 301),
+                ("Scene", 302),
+                ("Sci-Fi", 303),
+                ("Wallpaper", 304),
+                ("Loose", None),
+            ],
+        )
+        self.assertEqual(api.patch_tag_calls, [])
+        self.assertEqual(
+            api.add_mod_tag_calls,
+            [(100, 101), (100, 102), (100, 103), (100, 104), (100, 105), (100, 106)],
+        )
 
     def _payload(self, item_id: str):
         mod = types.SimpleNamespace(item_id=item_id)

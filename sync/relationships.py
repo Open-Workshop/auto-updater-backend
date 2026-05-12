@@ -3,10 +3,12 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
+import requests
+
 from core.telemetry import start_span
 from ow.ow_api import ApiClient
 from sync.metadata import OW_LOG
-from sync.state import SourceDependency
+from sync.state import SourceDependency, SourceTagGroup
 
 
 class TagManager:
@@ -20,6 +22,8 @@ class TagManager:
         prune: bool,
         name_to_id: Dict[str, int] | None = None,
         id_to_name: Dict[int, str] | None = None,
+        group_name_to_id: Dict[str, int] | None = None,
+        tag_id_to_group_id: Dict[int, int | None] | None = None,
         lock: threading.Lock | None = None,
     ) -> None:
         self.api = api
@@ -29,6 +33,10 @@ class TagManager:
         self.prune = prune
         self._name_to_id = name_to_id if name_to_id is not None else {}
         self._id_to_name = id_to_name if id_to_name is not None else {}
+        self._group_name_to_id = group_name_to_id if group_name_to_id is not None else {}
+        self._tag_id_to_group_id = (
+            tag_id_to_group_id if tag_id_to_group_id is not None else {}
+        )
         self._lock = lock or threading.Lock()
 
     def clone(self, api: ApiClient) -> "TagManager":
@@ -40,6 +48,8 @@ class TagManager:
             prune=self.prune,
             name_to_id=self._name_to_id,
             id_to_name=self._id_to_name,
+            group_name_to_id=self._group_name_to_id,
+            tag_id_to_group_id=self._tag_id_to_group_id,
             lock=self._lock,
         )
 
@@ -53,29 +63,75 @@ class TagManager:
                 "tags.page_size": self.page_size,
             },
         ):
-            for tag in self.api.list_tags(self.game_id, self.page_size):
+            for group in self.api.list_tag_groups(self.game_id, self.page_size):
+                group_name = group.get("name") or group.get("group_name")
+                group_id = group.get("id") or group.get("group_id")
+                if group_name and group_id is not None:
+                    with self._lock:
+                        self._group_name_to_id[self._normalize_key(str(group_name))] = int(group_id)
+            for tag in self.api.list_tags(self.game_id, self.page_size, include=["group"]):
                 name = tag.get("name") or tag.get("tag_name")
                 tag_id = tag.get("id") or tag.get("tag_id")
+                tag_group_id: int | None = None
+                group = tag.get("group")
+                if isinstance(group, dict):
+                    group_name = group.get("name") or group.get("group_name")
+                    group_id = group.get("id") or group.get("group_id")
+                    if group_name and group_id is not None:
+                        with self._lock:
+                            self._group_name_to_id[self._normalize_key(str(group_name))] = int(group_id)
+                    if group_id is not None:
+                        tag_group_id = int(group_id)
                 if name and tag_id:
                     with self._lock:
-                        self._name_to_id[str(name).lower()] = int(tag_id)
+                        # Match by normalized tag name and cache group metadata separately,
+                        # so grouped sources can reuse the same tag ids without duplication.
+                        self._name_to_id[self._normalize_key(str(name))] = int(tag_id)
                         self._id_to_name[int(tag_id)] = str(name)
+                        self._tag_id_to_group_id[int(tag_id)] = tag_group_id
 
-    def sync_mod_tags(self, ow_mod_id: int, tag_names: List[str]) -> None:
+    def sync_mod_tags(
+        self,
+        ow_mod_id: int,
+        tag_names: List[str],
+        tag_groups: List[SourceTagGroup] | None = None,
+    ) -> None:
         if not self.enabled:
             return
+        tag_names = self._unique_tag_names(tag_names)
+        normalized_groups = self._normalize_tag_groups(tag_groups)
+        grouped_tag_names = self._unique_tag_names(
+            tag_name
+            for tag_group in normalized_groups
+            for tag_name in tag_group.tags
+        )
+        grouped_tag_name_set = {name.lower() for name in grouped_tag_names}
+        tag_names = [name for name in tag_names if name.lower() not in grouped_tag_name_set]
         with start_span(
             "tags.sync",
             {
                 "ow.mod_id": ow_mod_id,
-                "tags.desired": len(tag_names),
+                "tags.desired": len(tag_names) + len(grouped_tag_names),
+                "tags.groups": len(normalized_groups),
+                "tags.grouped": len(grouped_tag_names),
                 "tags.prune": self.prune,
             },
         ):
-            desired_tag_ids = self._resolve_tag_ids(tag_names)
+            desired_tag_ids = self._resolve_grouped_tag_ids(normalized_groups)
+            desired_tag_ids.extend(self._resolve_tag_ids(tag_names, group_id=None))
+            unique_desired_tag_ids: List[int] = []
+            seen_tag_ids: set[int] = set()
+            for tag_id in desired_tag_ids:
+                if tag_id in seen_tag_ids:
+                    continue
+                seen_tag_ids.add(tag_id)
+                unique_desired_tag_ids.append(tag_id)
+            desired_tag_ids = unique_desired_tag_ids
             current_tag_ids = self.api.get_mod_tags(ow_mod_id)
-            missing_tags = [tid for tid in desired_tag_ids if tid not in current_tag_ids]
-            extra_tags = [tid for tid in current_tag_ids if tid not in desired_tag_ids]
+            desired_tag_id_set = set(desired_tag_ids)
+            current_tag_id_set = set(current_tag_ids)
+            missing_tags = [tid for tid in desired_tag_ids if tid not in current_tag_id_set]
+            extra_tags = [tid for tid in current_tag_ids if tid not in desired_tag_id_set]
             if missing_tags or extra_tags:
                 with self._lock:
                     id_to_name = dict(self._id_to_name)
@@ -88,30 +144,114 @@ class TagManager:
                     [id_to_name.get(tid, tid) for tid in extra_tags],
                 )
             for tag_id in desired_tag_ids:
-                if tag_id not in current_tag_ids:
+                if tag_id not in current_tag_id_set:
                     self.api.add_mod_tag(ow_mod_id, tag_id)
+                    current_tag_id_set.add(tag_id)
             if self.prune:
                 for tag_id in current_tag_ids:
-                    if tag_id not in desired_tag_ids:
+                    if tag_id not in desired_tag_id_set:
                         self.api.delete_mod_tag(ow_mod_id, tag_id)
 
-    def _resolve_tag_ids(self, tag_names: List[str]) -> List[int]:
+    def _resolve_grouped_tag_ids(self, tag_groups: List[SourceTagGroup]) -> List[int]:
+        desired_tag_ids: List[int] = []
+        for tag_group in tag_groups:
+            group_id = self._resolve_group_id(tag_group.name)
+            if group_id is None:
+                continue
+            desired_tag_ids.extend(self._resolve_tag_ids(tag_group.tags, group_id=group_id))
+        return desired_tag_ids
+
+    def _resolve_group_id(self, group_name: str) -> int | None:
+        key = self._normalize_key(group_name)
+        if not key:
+            return None
+        with self._lock:
+            group_id = self._group_name_to_id.get(key)
+            if group_id is not None:
+                return group_id
+            try:
+                group_id = self.api.add_tag_group(group_name)
+            except (requests.RequestException, RuntimeError) as exc:
+                OW_LOG.warning("Failed to add tag group %s: %s", group_name, exc)
+                return None
+            self._group_name_to_id[key] = group_id
+            return group_id
+
+    def _resolve_tag_ids(self, tag_names: List[str], *, group_id: int | None) -> List[int]:
         desired_tag_ids: List[int] = []
         for tag_name in tag_names:
-            key = tag_name.lower()
+            key = self._normalize_key(tag_name)
+            if not key:
+                continue
             with self._lock:
                 tag_id = self._name_to_id.get(key)
+                current_group_id = self._tag_id_to_group_id.get(tag_id) if tag_id else None
                 if not tag_id:
                     try:
-                        tag_id = self.api.add_tag(tag_name)
-                    except Exception as exc:
+                        tag_id = self.api.add_tag(tag_name, group_id=group_id)
+                    except (requests.RequestException, RuntimeError) as exc:
                         OW_LOG.warning("Failed to add tag %s: %s", tag_name, exc)
                         continue
                     self.api.associate_game_tag(self.game_id, tag_id)
                     self._name_to_id[key] = tag_id
                     self._id_to_name[tag_id] = tag_name
+                    self._tag_id_to_group_id[tag_id] = group_id
+                elif group_id is not None and current_group_id != group_id:
+                    try:
+                        self.api.patch_tag(tag_id, group_id=group_id)
+                    except (requests.RequestException, RuntimeError) as exc:
+                        OW_LOG.warning(
+                            "Failed to update tag %s group to %s: %s",
+                            tag_name,
+                            group_id,
+                            exc,
+                        )
+                    else:
+                        self._tag_id_to_group_id[tag_id] = group_id
             desired_tag_ids.append(tag_id)
         return desired_tag_ids
+
+    @staticmethod
+    def _unique_tag_names(tag_names: List[str]) -> List[str]:
+        unique_tag_names: List[str] = []
+        seen: set[str] = set()
+        for tag_name in tag_names:
+            rendered = str(tag_name or "").strip()
+            if not rendered:
+                continue
+            key = rendered.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_tag_names.append(rendered)
+        return unique_tag_names
+
+    @staticmethod
+    def _normalize_key(value: str) -> str:
+        return str(value or "").strip().lower()
+
+    @staticmethod
+    def _normalize_tag_groups(
+        tag_groups: List[SourceTagGroup] | None,
+    ) -> List[SourceTagGroup]:
+        normalized_groups: List[SourceTagGroup] = []
+        for group in tag_groups or []:
+            if isinstance(group, SourceTagGroup):
+                normalized = group
+            elif isinstance(group, dict):
+                normalized = SourceTagGroup(
+                    str(group.get("name") or group.get("group_name") or "").strip(),
+                    list(group.get("tags") or group.get("items") or []),
+                )
+            else:
+                normalized = SourceTagGroup(
+                    str(getattr(group, "name", "") or "").strip(),
+                    list(getattr(group, "tags", []) or []),
+                )
+            if not normalized.name or not normalized.tags:
+                continue
+            normalized_groups.append(normalized)
+        return normalized_groups
 
 
 class DependencyManager:

@@ -38,13 +38,19 @@ def _action_form(
     button_class: str = "",
     confirm: str = "",
     return_path: str = "/",
+    extra_fields: dict[str, Any] | None = None,
 ) -> str:
     classes = f"button {button_class}".strip()
     form_attrs = " data-async='true'" if action else ""
     if confirm:
         form_attrs += f" data-confirm=\"{_escape(confirm)}\""
+    extra_inputs = "".join(
+        f'<input type="hidden" name="{_escape(name)}" value="{_escape(value)}">'
+        for name, value in (extra_fields or {}).items()
+    )
     return f"""
     <form class="inline-form" method="post" action="{_escape(action)}"{form_attrs}>
+      {extra_inputs}
       <input type="hidden" name="return_path" value="{_escape(return_path)}">
       <button type="submit" class="{classes}">{_escape(label)}</button>
     </form>
@@ -78,6 +84,7 @@ def _instance_actions(settings: UISettings, summary: dict[str, Any], *, return_p
                 button_class="warn",
                 confirm=f"Delete {name}? This also removes the managed secrets.",
                 return_path=return_path,
+                extra_fields={"parser_type": summary.get("parserType") or ""},
             ),
         ]
     )

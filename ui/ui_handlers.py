@@ -9,12 +9,14 @@ from urllib.parse import quote, urlencode
 import requests
 from aiohttp import web
 from kubernetes.client.rest import ApiException
+from kubernetes import config
 
 from core.instance_schema import (
     MirrorInstanceSpecModel,
     build_parser_config_from_form,
     build_parser_workloads_from_form,
     default_spec,
+    default_parser_type,
     get_parser_contract,
 )
 from core.log_tags import format_log_tag_options
@@ -37,7 +39,6 @@ from kube.mirror_instance import (
     managed_secret_specs,
     normalize_instance,
     parser_service_url,
-    runner_config_secret_name,
 )
 from kube.kube_resources import build_runner_config_secret
 from ui.ui_assets import STATIC_DIR
@@ -419,9 +420,11 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
 
     contract = get_parser_contract(parser_type)
     raw_patch = _parse_sync_json(sync_json_patch) if sync_json_patch else {}
+    base_parser_config = dict(model.parser_config)
+    base_parser_config.update(model.parser_config_extras)
     parser_config_rendered = build_parser_config_from_form(
         parser_type,
-        model.parser_config,
+        base_parser_config,
         submitted,
         raw_patch,
     )
@@ -518,22 +521,19 @@ async def save_instance(request: web.Request) -> web.StreamResponse:
             )
         else:
             await _run_blocking(delete_secret, settings.namespace, metadata.name)
-    runner_config_secret = runner_config_secret_name(name, parser_type)
-    if runner_proxy_url:
+    if runner_proxy_url and (not original_name or original_name != name):
         await _run_blocking(
             upsert_secret,
             settings.namespace,
             build_runner_config_secret(saved_instance, runner_proxy_url),
         )
-    else:
-        await _run_blocking(delete_secret, settings.namespace, runner_config_secret)
     if original_name and (original_name != name or model.parser_type != parser_type):
         old_secret_names = managed_secret_names(original_name, model.parser_type)
         new_secret_names = managed_secret_names(name, parser_type)
-        for secret_name in sorted(old_secret_names - new_secret_names):
-            await _run_blocking(delete_secret, settings.namespace, secret_name)
         if original_name != name:
             await _run_blocking(delete_instance, settings.namespace, original_name)
+        for secret_name in sorted(old_secret_names - new_secret_names):
+            await _run_blocking(delete_secret, settings.namespace, secret_name)
     return _action_response(
         request,
         settings,
@@ -591,9 +591,16 @@ async def delete_instance_route(request: web.Request) -> web.StreamResponse:
     """Delete instance handler."""
     settings: UISettings = request.app["settings"]
     name = request.match_info["name"]
-    await request.post()
-    instance = normalize_instance(await _run_blocking(get_instance, settings.namespace, name))
-    parser_type = MirrorInstanceSpecModel.from_instance_dict(instance).parser_type
+    form = await request.post()
+    parser_type = str(form.get("parser_type") or "").strip()
+    if not parser_type:
+        try:
+            instance = normalize_instance(await _run_blocking(get_instance, settings.namespace, name))
+        except (ApiException, config.ConfigException, KeyError, ValueError) as exc:
+            logging.debug("Failed to load instance metadata for delete %s: %s", name, exc)
+            parser_type = default_parser_type()
+        else:
+            parser_type = MirrorInstanceSpecModel.from_instance_dict(instance).parser_type
     await _run_blocking(delete_instance, settings.namespace, name)
     for secret_name in managed_secret_names(name, parser_type):
         await _run_blocking(delete_secret, settings.namespace, secret_name)
