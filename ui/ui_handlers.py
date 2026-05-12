@@ -90,6 +90,52 @@ async def healthz(_: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+def _public_health_paths(settings: UISettings) -> set[str]:
+    """Return health endpoints that must stay public."""
+    return {
+        _url(settings, "/healthz"),
+        _url(settings, "/healthz/workers"),
+    }
+
+
+async def workers_healthz(request: web.Request) -> web.Response:
+    """Report whether all enabled worker workloads are healthy."""
+    settings: UISettings = request.app["settings"]
+    summaries = await _run_blocking(_load_instance_summaries, settings)
+
+    skipped_instances = 0
+    skipped_workers = 0
+    checked_workers = 0
+    healthy_workers = 0
+    for summary in summaries:
+        workload_items = list(summary.get("workloads") or [])
+        if not bool(summary.get("enabled")):
+            skipped_instances += 1
+            skipped_workers += len(workload_items)
+            continue
+        for workload in workload_items:
+            checked_workers += 1
+            if bool(workload.get("ready")):
+                healthy_workers += 1
+
+    unhealthy_workers = checked_workers - healthy_workers
+    status = "ok" if unhealthy_workers == 0 else "degraded"
+    return web.json_response(
+        {
+            "status": status,
+            "counts": {
+                "checkedInstances": len(summaries) - skipped_instances,
+                "skippedInstances": skipped_instances,
+                "checkedWorkers": checked_workers,
+                "skippedWorkers": skipped_workers,
+                "healthyWorkers": healthy_workers,
+                "unhealthyWorkers": unhealthy_workers,
+            },
+        },
+        status=200 if unhealthy_workers == 0 else 503,
+    )
+
+
 async def dashboard(request: web.Request) -> web.Response:
     """Dashboard page handler."""
     settings: UISettings = request.app["settings"]
@@ -567,7 +613,7 @@ async def _basic_auth(request: web.Request, handler: Any) -> web.StreamResponse:
     import hmac
     
     settings: UISettings = request.app["settings"]
-    if request.path in {"/healthz", _url(settings, "/healthz")}:
+    if request.path in _public_health_paths(settings):
         return await handler(request)
     if not settings.username:
         return await handler(request)

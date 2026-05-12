@@ -21,6 +21,26 @@ def _auth_headers() -> dict[str, str]:
 
 
 def _sample_summary() -> dict:
+    parser_resources = {
+        "cpuMilliCores": 42,
+        "memoryBytes": 155189248,
+        "diskCapacityBytes": 21474836480,
+        "diskUsedBytes": 7516192768,
+        "diskRequestedBytes": 21474836480,
+        "cpuLabel": "42m",
+        "memoryLabel": "148Mi",
+        "diskLabel": "20Gi cap / 7Gi used / 20Gi req",
+    }
+    runner_resources = {
+        "cpuMilliCores": 88,
+        "memoryBytes": 127926272,
+        "diskCapacityBytes": 10737418240,
+        "diskUsedBytes": 536870912,
+        "diskRequestedBytes": 10737418240,
+        "cpuLabel": "88m",
+        "memoryLabel": "122Mi",
+        "diskLabel": "10Gi cap / 512Mi used / 10Gi req",
+    }
     return {
         "name": "demo",
         "enabled": True,
@@ -39,22 +59,53 @@ def _sample_summary() -> dict:
             "owGameId": 3,
             "language": "english",
         },
+        "workloads": [
+            {
+                "id": "parser",
+                "label": "Parser",
+                "component": "parser",
+                "podName": "demo-parser-0",
+                "state": "Ready",
+                "tone": "healthy",
+                "ready": True,
+                "image": "auto-updater-backend:prod",
+                "serviceName": "demo-parser",
+                "resources": parser_resources,
+                "logTargets": [
+                    {"target": "parser", "label": "Parser", "container": "parser"},
+                ],
+                "containerReady": {"parser": True},
+                "images": {"parser": "auto-updater-backend:prod"},
+            },
+            {
+                "id": "steamcmd",
+                "label": "Runner",
+                "component": "runner",
+                "podName": "demo-steamcmd-0",
+                "state": "Ready",
+                "tone": "healthy",
+                "ready": True,
+                "image": "auto-updater-backend:prod",
+                "serviceName": "demo-steamcmd",
+                "resources": runner_resources,
+                "logTargets": [
+                    {"target": "steamcmd", "label": "Runner", "container": "runner"},
+                    {"target": "steamcmd:tun-proxy", "label": "TUN", "container": "tun-proxy"},
+                ],
+                "containerReady": {"runner": True, "tun-proxy": True},
+                "images": {
+                    "runner": "auto-updater-backend:prod",
+                    "tun-proxy": "ghcr.io/sagernet/sing-box:latest",
+                },
+            },
+        ],
         "parser": {
             "podName": "demo-parser-0",
             "state": "Ready",
             "tone": "healthy",
             "ready": True,
             "image": "auto-updater-backend:prod",
-            "resources": {
-                "cpuMilliCores": 42,
-                "memoryBytes": 155189248,
-                "diskCapacityBytes": 21474836480,
-                "diskUsedBytes": 7516192768,
-                "diskRequestedBytes": 21474836480,
-                "cpuLabel": "42m",
-                "memoryLabel": "148Mi",
-                "diskLabel": "20Gi cap / 7Gi used / 20Gi req",
-            },
+            "resources": parser_resources,
         },
         "runner": {
             "podName": "demo-steamcmd-0",
@@ -64,16 +115,7 @@ def _sample_summary() -> dict:
             "image": "auto-updater-backend:prod",
             "tunImage": "ghcr.io/sagernet/sing-box:latest",
             "tunReady": True,
-            "resources": {
-                "cpuMilliCores": 88,
-                "memoryBytes": 127926272,
-                "diskCapacityBytes": 10737418240,
-                "diskUsedBytes": 536870912,
-                "diskRequestedBytes": 10737418240,
-                "cpuLabel": "88m",
-                "memoryLabel": "122Mi",
-                "diskLabel": "10Gi cap / 512Mi used / 10Gi req",
-            },
+            "resources": runner_resources,
         },
         "resources": {
             "cpuMilliCores": 130,
@@ -576,6 +618,75 @@ class UIDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(payload["counts"]["Healthy"], 1)
                 self.assertEqual(payload["resources"]["cpuLabel"], "130m")
                 self.assertEqual(payload["resources"]["diskLabel"], "n/a cap / n/a used / 32.2GB req")
+            finally:
+                await client.close()
+
+    async def test_health_endpoints_are_public_without_auth(self) -> None:
+        healthy_summary = _sample_summary()
+        disabled_summary = _sample_summary()
+        disabled_summary["name"] = "paused"
+        disabled_summary["enabled"] = False
+        disabled_summary["health"] = "Disabled"
+        disabled_summary["healthTone"] = "muted"
+        disabled_summary["parser"]["ready"] = False
+        disabled_summary["parser"]["state"] = "Stopped"
+        disabled_summary["parser"]["tone"] = "muted"
+        disabled_summary["runner"]["ready"] = False
+        disabled_summary["runner"]["state"] = "Stopped"
+        disabled_summary["runner"]["tone"] = "muted"
+        for workload in disabled_summary["workloads"]:
+            workload["ready"] = False
+            workload["state"] = "Stopped"
+            workload["tone"] = "muted"
+
+        with patch("ui.ui_handlers._load_instance_summaries", return_value=[healthy_summary, disabled_summary]):
+            app = _create_app(load_ui_settings())
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                response = await client.get("/auto-updater/healthz")
+                self.assertEqual(response.status, 200)
+                payload = await response.json()
+                self.assertEqual(payload["status"], "ok")
+
+                response = await client.get("/auto-updater/healthz/workers")
+                self.assertEqual(response.status, 200)
+                payload = await response.json()
+                self.assertEqual(payload["status"], "ok")
+                self.assertEqual(payload["counts"]["checkedInstances"], 1)
+                self.assertEqual(payload["counts"]["skippedInstances"], 1)
+                self.assertEqual(payload["counts"]["checkedWorkers"], 2)
+                self.assertEqual(payload["counts"]["skippedWorkers"], 2)
+                self.assertEqual(payload["counts"]["healthyWorkers"], 2)
+                self.assertEqual(payload["counts"]["unhealthyWorkers"], 0)
+            finally:
+                await client.close()
+
+    async def test_workers_healthz_reports_unhealthy_enabled_workers(self) -> None:
+        unhealthy_summary = _sample_summary()
+        unhealthy_summary["health"] = "Degraded"
+        unhealthy_summary["healthTone"] = "warning"
+        unhealthy_summary["errorSummary"] = "Runner pod is not ready"
+        unhealthy_summary["runner"]["ready"] = False
+        unhealthy_summary["runner"]["state"] = "Starting"
+        unhealthy_summary["runner"]["tone"] = "warning"
+        unhealthy_summary["workloads"][1]["ready"] = False
+        unhealthy_summary["workloads"][1]["state"] = "Starting"
+        unhealthy_summary["workloads"][1]["tone"] = "warning"
+
+        with patch("ui.ui_handlers._load_instance_summaries", return_value=[unhealthy_summary]):
+            app = _create_app(load_ui_settings())
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                response = await client.get("/auto-updater/healthz/workers")
+                self.assertEqual(response.status, 503)
+                payload = await response.json()
+                self.assertEqual(payload["status"], "degraded")
+                self.assertEqual(payload["counts"]["checkedWorkers"], 2)
+                self.assertEqual(payload["counts"]["healthyWorkers"], 1)
+                self.assertEqual(payload["counts"]["unhealthyWorkers"], 1)
+                self.assertNotIn("unhealthyWorkers", payload)
             finally:
                 await client.close()
 

@@ -27,6 +27,7 @@ from ui.ui_handlers import (
     proxy_stats_page,
     resource_page,
     save_instance,
+    workers_healthz,
     sync_now,
     toggle_instance,
 )
@@ -53,6 +54,7 @@ def _create_app(settings: UISettings) -> web.Application:
                 app.router.add_route(method, f"{settings.base_path}{path}", handler)
 
     register("GET", "/healthz", healthz)
+    register("GET", "/healthz/workers", workers_healthz)
     register("GET", "/favicon.ico", favicon)
     register("GET", "/", dashboard)
     register("GET", "/proxy-stats", proxy_stats_page)

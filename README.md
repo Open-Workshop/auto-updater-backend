@@ -221,6 +221,10 @@ UI поднимается в режиме `ui` и работает прямо с
 - открывать связанные ресурсы;
 - читать `parser`, `runner` и `tun-proxy` pod logs без отдельной БД.
 
+- public health endpoints without auth:
+  - `GET /healthz`
+  - `GET /healthz/workers`
+
 ## Parser / Runner API
 
 Внутренние HTTP интерфейсы:
